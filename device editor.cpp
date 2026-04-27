@@ -42,7 +42,8 @@ inline double round (double x)
 DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
                             AcquisitionBoard* board_)
     : VisualizerEditor (parentNode, "Acq Board", 340),
-      board (board_)
+      board (board_),
+      activeAudioChannel (LEFT)
 {
     canvas = nullptr;
     noBoardsDetectedLabel = nullptr;
@@ -753,15 +754,20 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
 
     if (electrodeButtons.size() >= 2)
     {
-        electrodeButtons[0]->setChannelNum (AudioOutputL);
-        board->connectHeadstageChannelToDAC (0, AudioOutputL);
-        if (AudioOutputL > -1)
-            electrodeButtons[0]->setToggleState (true, dontSendNotification);
+        auto restoreAudioOutput = [this] (int outputChannel, int savedChannelNumber)
+        {
+            const int channelCount = board != nullptr ? board->getNumChannels() : 0;
+            const int channelNumber = isPositiveAndBelow (savedChannelNumber - 1, channelCount)
+                                          ? savedChannelNumber
+                                          : -1;
 
-        electrodeButtons[1]->setChannelNum (AudioOutputR);
-        board->connectHeadstageChannelToDAC (1, AudioOutputR);
-        if (AudioOutputR > -1)
-            electrodeButtons[1]->setToggleState (true, dontSendNotification);
+            electrodeButtons[outputChannel]->setChannelNum (channelNumber);
+            electrodeButtons[outputChannel]->setToggleState (channelNumber > -1, dontSendNotification);
+            board->connectHeadstageChannelToDAC (channelNumber > -1 ? channelNumber - 1 : -1, outputChannel);
+        };
+
+        restoreAudioOutput (LEFT, AudioOutputL);
+        restoreAudioOutput (RIGHT, AudioOutputR);
     }
 
     forEachXmlChildElementWithTagName (*xml, hsOptions, "HSOPTIONS")
