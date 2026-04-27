@@ -826,7 +826,7 @@ static int init_hardware(HardwareContext *ctx) {
 }
 
 // --- Streaming Logic ---
-static int run_stream(int client_fd, HardwareContext *ctx, int base_channels) {
+static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
     uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4;
     const int max_bytes_per_frame = max_total_channels * 2;
@@ -841,9 +841,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, int base_channels) {
     int bytes_per_frame = current_channels * 2;
     int buffered_bytes_per_frame = bytes_per_frame;
     char cmd[256];
-    FILE *bin_file = NULL;
-    FILE *csv_file = NULL;
-    bool record = false;
+    bool record = true;
     int buf_idx = 0;
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
@@ -1145,10 +1143,38 @@ int main(void) {
                 printf("Requested sample frequency: %d Hz.\n", frequency_hz);
             }
             else if (strstr(buffer, "START")) {
-                char started_msg[64];
-                snprintf(started_msg, sizeof(started_msg), "STARTED\n");
+                system("rw");
+                mkdir("/root/Measurements", 0775);
+
+                time_t rawtime; struct tm *timeinfo;
+                char time_str[20]; char bin_filename[128]; char csv_filename[128];
+                time(&rawtime);
+                timeinfo = localtime(&rawtime);
+                strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
+                sprintf(bin_filename, "/root/Measurements/recording_%s.bin", time_str);
+                sprintf(csv_filename, "/root/Measurements/recording_%s.csv", time_str);
+
+                FILE *bin_fp = fopen(bin_filename, "wb");
+                if (bin_fp == NULL) {
+                    perror("Failed to open binary file");
+                    write(client_fd, "ERROR_FILE\n", 11);
+                    continue;
+                }
+
+                FILE *csv_fp = fopen(csv_filename, "w");
+                if (csv_fp == NULL) {
+                    perror("Failed to open CSV file");
+                    fclose(bin_fp);
+                    write(client_fd, "ERROR_FILE\n", 11);
+                    continue;
+                }
+
+                write_csv_header(csv_fp, &ctx, true);
+
+                char started_msg[320];
+                snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
                 write(client_fd, started_msg, strlen(started_msg));
-                if (run_stream(client_fd, &ctx, base_channels) < 0) {
+                if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
                     break;
                 }
                 system("sync");
