@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
@@ -840,7 +841,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     int bytes_per_frame = current_channels * 2;
     int buffered_bytes_per_frame = bytes_per_frame;
     char cmd[32];
-    bool record = false;
+    bool record = true;
     int buf_idx = 0;
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
@@ -1094,6 +1095,8 @@ int main(void) {
             }
             else if (strstr(buffer, "START")) {
                 system("rw");
+                mkdir("/root/Measurements", 0775);
+
                 time_t rawtime; struct tm *timeinfo;
                 char time_str[20]; char bin_filename[128]; char csv_filename[128];
                 time(&rawtime);

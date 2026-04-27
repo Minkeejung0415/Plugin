@@ -472,7 +472,7 @@ void DeviceEditor::buttonClicked (Button* button)
                 const String csvPath = board->getLastRecordingCsvPath();
 
                 if (binPath.isNotEmpty() && csvPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording to " + binPath + " and " + csvPath);
+                    CoreServices::sendStatusMessage ("Recording to BIN: " + binPath + " CSV: " + csvPath);
                 else if (binPath.isNotEmpty())
                     CoreServices::sendStatusMessage ("Recording to " + binPath);
                 else
@@ -487,7 +487,7 @@ void DeviceEditor::buttonClicked (Button* button)
                 const String csvPath = board->getLastRecordingCsvPath();
 
                 if (binPath.isNotEmpty() && csvPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording saved to " + binPath + " and " + csvPath);
+                    CoreServices::sendStatusMessage ("Recording saved. BIN: " + binPath + " CSV: " + csvPath);
                 else if (binPath.isNotEmpty())
                     CoreServices::sendStatusMessage ("Recording saved to " + binPath);
                 else
