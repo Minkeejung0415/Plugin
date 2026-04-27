@@ -178,6 +178,15 @@ public:
 
     virtual void updateSampleFrequency (int newFreq) {}
 
+    /** Enables or disables the hardware filter */
+    virtual void setFilterEnabled (bool enabled) {}
+
+    /** Sets the analog input gain/scaling factor */
+    virtual void setAnalogInGain (float gain) {}
+
+    /** Sets the analog output voltage */
+    virtual void setAnalogOutVoltage (float voltage) {}
+
     /** Returns total number of continuous channels */
     int getNumChannels()
     {

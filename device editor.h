@@ -137,6 +137,15 @@ private:
     std::unique_ptr<Label> sampleRateTitle;
     std::unique_ptr<Label> sampleRateLabel;
 
+    std::unique_ptr<UtilityButton> filterButton;
+    std::unique_ptr<Label> filterTitle;
+
+    std::unique_ptr<Label> analogInTitle;
+    std::unique_ptr<Label> analogInLabel;
+
+    std::unique_ptr<Label> analogOutTitle;
+    std::unique_ptr<Label> analogOutLabel;
+
     enum AudioChannel
     {
         LEFT = 0,

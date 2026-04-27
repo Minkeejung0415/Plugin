@@ -114,6 +114,51 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     sampleRateLabel->setTooltip ("Set streaming frequency (100 - 2000 Hz)");
     addAndMakeVisible (sampleRateLabel.get());
 
+    // --- Filter Toggle ---
+    filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
+    filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    filterTitle->setBounds (xOffset + 155, 22, 65, 15);
+    addAndMakeVisible (filterTitle.get());
+
+    filterButton = std::make_unique<UtilityButton> ("FILTER");
+    filterButton->setRadius (3.0f);
+    filterButton->setBounds (xOffset + 155, 38, 65, 18);
+    filterButton->addListener (this);
+    filterButton->setClickingTogglesState (true);
+    filterButton->setToggleState (false, dontSendNotification);
+    filterButton->setTooltip ("Toggle hardware filter on/off");
+    addAndMakeVisible (filterButton.get());
+
+    // --- Analog Input Gain ---
+    analogInTitle = std::make_unique<Label> ("analogInTitle", "Analog In Gain");
+    analogInTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    analogInTitle->setBounds (xOffset + 155, 62, 80, 12);
+    addAndMakeVisible (analogInTitle.get());
+
+    analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
+    analogInLabel->setEditable (true);
+    analogInLabel->setColour (Label::backgroundColourId, Colours::black);
+    analogInLabel->setColour (Label::textColourId, Colours::white);
+    analogInLabel->setBounds (xOffset + 155, 74, 65, 18);
+    analogInLabel->addListener (this);
+    analogInLabel->setTooltip ("Set ADC input gain (0.1 - 100.0)");
+    addAndMakeVisible (analogInLabel.get());
+
+    // --- Analog Output Voltage ---
+    analogOutTitle = std::make_unique<Label> ("analogOutTitle", "Analog Out (V)");
+    analogOutTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    analogOutTitle->setBounds (xOffset + 155, 94, 80, 12);
+    addAndMakeVisible (analogOutTitle.get());
+
+    analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
+    analogOutLabel->setEditable (true);
+    analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
+    analogOutLabel->setColour (Label::textColourId, Colours::white);
+    analogOutLabel->setBounds (xOffset + 155, 108, 65, 18);
+    analogOutLabel->addListener (this);
+    analogOutLabel->setTooltip ("Set DAC output voltage (0.0 - 1.8 V)");
+    addAndMakeVisible (analogOutLabel.get());
+
     // add rescan button
     /*
     rescanButton = std::make_unique<UtilityButton> ("RESCAN");
@@ -415,6 +460,11 @@ void DeviceEditor::buttonClicked (Button* button)
         else
             board->sendRecordOffCommand();
     }
+    else if (button == filterButton.get())
+    {
+        if (board != nullptr)
+            board->setFilterEnabled (filterButton->getToggleState());
+    }
     /*
     else if (button == auxButton.get() && ! acquisitionIsActive)
     {
@@ -451,6 +501,15 @@ void DeviceEditor::startAcquisition()
     //adcButton->setEnabledState (false);
     //dspoffsetButton->setEnabledState (false);
 
+    if (filterButton != nullptr)
+        filterButton->setEnabledState (false);
+
+    if (analogInLabel != nullptr)
+        analogInLabel->setEnabled (false);
+
+    if (analogOutLabel != nullptr)
+        analogOutLabel->setEnabled (false);
+
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
         headstageOptions->setEnabled (false);
@@ -473,6 +532,15 @@ void DeviceEditor::stopAcquisition()
     //auxButton->setEnabledState (true);
     //adcButton->setEnabledState (true);
     //dspoffsetButton->setEnabledState (true);
+
+    if (filterButton != nullptr)
+        filterButton->setEnabledState (true);
+
+    if (analogInLabel != nullptr)
+        analogInLabel->setEnabled (true);
+
+    if (analogOutLabel != nullptr)
+        analogOutLabel->setEnabled (true);
 
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
@@ -504,6 +572,34 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
             board->updateSampleFrequency (newFreq);
         }
     }
+    else if (labelThatHasChanged == analogInLabel.get())
+    {
+        float newGain = analogInLabel->getText().getFloatValue();
+
+        if (newGain < 0.1f || newGain > 100.0f)
+        {
+            CoreServices::sendStatusMessage ("Analog In gain out of range (0.1 - 100.0).");
+            analogInLabel->setText ("1.00", dontSendNotification);
+            return;
+        }
+
+        if (board != nullptr)
+            board->setAnalogInGain (newGain);
+    }
+    else if (labelThatHasChanged == analogOutLabel.get())
+    {
+        float newVoltage = analogOutLabel->getText().getFloatValue();
+
+        if (newVoltage < 0.0f || newVoltage > 1.8f)
+        {
+            CoreServices::sendStatusMessage ("Analog Out voltage out of range (0.0 - 1.8 V).");
+            analogOutLabel->setText ("0.00", dontSendNotification);
+            return;
+        }
+
+        if (board != nullptr)
+            board->setAnalogOutVoltage (newVoltage);
+    }
 }
 
 void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
@@ -532,6 +628,9 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
         xml->setAttribute ("Channel_Naming_Scheme", previousSettings->getIntAttribute ("Channel_Naming_Scheme", 0));
         xml->setAttribute ("AudioOutputL", previousSettings->getIntAttribute ("AudioOutputL"));
         xml->setAttribute ("AudioOutputR", previousSettings->getIntAttribute ("AudioOutputR"));
+        xml->setAttribute ("FilterEnabled", previousSettings->getBoolAttribute ("FilterEnabled", false));
+        xml->setAttribute ("AnalogInGain", previousSettings->getDoubleAttribute ("AnalogInGain", 1.0));
+        xml->setAttribute ("AnalogOutVoltage", previousSettings->getDoubleAttribute ("AnalogOutVoltage", 0.0));
 
         forEachXmlChildElementWithTagName (*previousSettings, hsOptions, "HSOPTIONS")
         {
@@ -582,6 +681,10 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
 
     // save channel naming scheme
     xml->setAttribute ("Channel_Naming_Scheme", board->getNamingScheme());
+
+    xml->setAttribute ("FilterEnabled", filterButton->getToggleState());
+    xml->setAttribute ("AnalogInGain", analogInLabel->getText().getFloatValue());
+    xml->setAttribute ("AnalogOutVoltage", analogOutLabel->getText().getFloatValue());
 }
 
 void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
@@ -605,6 +708,9 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
         previousSettings->setAttribute ("Channel_Naming_Scheme", xml->getIntAttribute ("Channel_Naming_Scheme", 0));
         previousSettings->setAttribute ("AudioOutputL", xml->getIntAttribute ("AudioOutputL"));
         previousSettings->setAttribute ("AudioOutputR", xml->getIntAttribute ("AudioOutputR"));
+        previousSettings->setAttribute ("FilterEnabled", xml->getBoolAttribute ("FilterEnabled", false));
+        previousSettings->setAttribute ("AnalogInGain", xml->getDoubleAttribute ("AnalogInGain", 1.0));
+        previousSettings->setAttribute ("AnalogOutVoltage", xml->getDoubleAttribute ("AnalogOutVoltage", 0.0));
 
         forEachXmlChildElementWithTagName (*xml, hsOptions, "HSOPTIONS")
         {
@@ -665,6 +771,18 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
             headstageOptionsInterfaces[index]->set32Channel (1, hsOptions->getBoolAttribute ("hs2_full_channels", true));
         }
     }
+
+    bool filterOn = xml->getBoolAttribute ("FilterEnabled", false);
+    filterButton->setToggleState (filterOn, dontSendNotification);
+    board->setFilterEnabled (filterOn);
+
+    float ainGain = jlimit (0.1f, 100.0f, (float) xml->getDoubleAttribute ("AnalogInGain", 1.0));
+    analogInLabel->setText (String (ainGain, 2), dontSendNotification);
+    board->setAnalogInGain (ainGain);
+
+    float aoutVoltage = jlimit (0.0f, 1.8f, (float) xml->getDoubleAttribute ("AnalogOutVoltage", 0.0));
+    analogOutLabel->setText (String (aoutVoltage, 2), dontSendNotification);
+    board->setAnalogOutVoltage (aoutVoltage);
 
     // load channel naming scheme
     board->setNamingScheme ((ChannelNamingScheme) xml->getIntAttribute ("Channel_Naming_Scheme", 0));

@@ -154,6 +154,15 @@ public:
 
     void updateSampleFrequency (int newFreq) override;
 
+    /** Enables or disables hardware filter */
+    void setFilterEnabled (bool enabled) override;
+
+    /** Sets analog input gain factor */
+    void setAnalogInGain (float gain) override;
+
+    /** Sets analog output voltage */
+    void setAnalogOutVoltage (float voltage) override;
+
     /** Fills data buffer */
     void run();
 
@@ -193,6 +202,10 @@ public:
 
     /** BitVolts scaling for ADC channels */
     float adcBitVolts = 1.0f;
+
+    bool filterEnabled = false;
+    float analogInGain = 1.0f;
+    float analogOutVoltage = 0.0f;
 
     StreamingSocket* commandSocket = nullptr;
 
