@@ -435,6 +435,59 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
     }
 }
 
+void AcqBoardRedPitaya::setFilterEnabled (bool enabled)
+{
+    if (commandSocket == nullptr)
+        return;
+
+    const char* msg = enabled ? "FILTER ON\n" : "FILTER OFF\n";
+
+    int written = commandSocket->write (msg, (int) strlen (msg));
+
+    if (written > 0)
+        std::cout << "Red Pitaya: Sent command -> " << msg;
+    else
+        std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
+
+    filterEnabled = enabled;
+}
+
+void AcqBoardRedPitaya::setAnalogInGain (float gain)
+{
+    if (commandSocket == nullptr)
+        return;
+
+    char msg[32];
+    snprintf (msg, sizeof (msg), "AIN_GAIN:%.2f\n", gain);
+
+    int written = commandSocket->write (msg, (int) strlen (msg));
+
+    if (written > 0)
+        std::cout << "Red Pitaya: Sent command -> " << msg;
+    else
+        std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
+
+    analogInGain = gain;
+}
+
+void AcqBoardRedPitaya::setAnalogOutVoltage (float voltage)
+{
+    if (commandSocket == nullptr)
+        return;
+
+    char msg[32];
+    snprintf (msg, sizeof (msg), "AOUT:%.2f\n", voltage);
+
+    int written = commandSocket->write (msg, (int) strlen (msg));
+
+    if (written > 0)
+        std::cout << "Red Pitaya: Sent command -> " << msg;
+    else
+        std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
+
+    analogOutVoltage = voltage;
+}
+
 double AcqBoardRedPitaya::setUpperBandwidth (double upperBandwidth)
 {
     upperBandwidthHz = upperBandwidth;
