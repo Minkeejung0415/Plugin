@@ -465,9 +465,21 @@ void DeviceEditor::buttonClicked (Button* button)
     if (button == recordButton.get() && acquisitionIsActive)
     {
         if (recordButton->getToggleState())
+        {
             board->sendRecordOnCommand();
+        }
         else
-            board->sendRecordOffCommand();
+        {
+            if (board->sendRecordOffCommand())
+            {
+                const String recordingPath = board->getLastRecordingPath();
+
+                if (recordingPath.isNotEmpty())
+                    CoreServices::sendStatusMessage ("Recording saved to " + recordingPath);
+                else
+                    CoreServices::sendStatusMessage ("Recording stopped and saved.");
+            }
+        }
     }
     else if (button == filterButton.get())
     {

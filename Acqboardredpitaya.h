@@ -152,6 +152,8 @@ public:
 
     bool sendRecordOffCommand() override;
 
+    String getLastRecordingPath() const override { return lastRecordingPath; }
+
     void updateSampleFrequency (int newFreq) override;
 
     /** Enables or disables hardware filter */
@@ -169,8 +171,11 @@ public:
     /** Maximum samples per buffer for Red Pitaya ADC */
     static constexpr int MAX_SAMPLES_PER_BUFFER = 128;
 
+    /** Maximum Red Pitaya channels, including reserved filtered/fusion outputs */
+    static constexpr int MAX_CHANNELS = 64;
+
     /** Data buffers */
-    float samples[8 * MAX_SAMPLES_PER_BUFFER];
+    float samples[MAX_CHANNELS * MAX_SAMPLES_PER_BUFFER];
     int64 sampleNumbers[MAX_SAMPLES_PER_BUFFER];
     double timestamps[MAX_SAMPLES_PER_BUFFER];
     uint64 event_codes[MAX_SAMPLES_PER_BUFFER];
@@ -208,6 +213,8 @@ public:
     float analogOutVoltage = 0.0f;
 
     StreamingSocket* commandSocket = nullptr;
+
+    String lastRecordingPath;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };

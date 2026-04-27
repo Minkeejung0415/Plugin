@@ -176,6 +176,8 @@ public:
 
     virtual bool sendRecordOffCommand() { return false; }
 
+    virtual String getLastRecordingPath() const { return {}; }
+
     virtual void updateSampleFrequency (int newFreq) {}
 
     /** Enables or disables the hardware filter */

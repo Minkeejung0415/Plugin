@@ -303,6 +303,25 @@ bool AcqBoardRedPitaya::startAcquisition()
     const char* msg = "START\n";
     commandSocket->write (msg, (int) strlen (msg));
 
+    lastRecordingPath = {};
+
+    String responseText;
+
+    while (commandSocket->waitUntilReady (true, 1000))
+    {
+        char c = 0;
+        if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+            break;
+
+        responseText += c;
+    }
+
+    if (responseText.startsWith ("STARTED "))
+    {
+        lastRecordingPath = responseText.fromFirstOccurrenceOf ("STARTED ", false, false).trim();
+        std::cout << "Red Pitaya: Streaming to " << lastRecordingPath << std::endl;
+    }
+
     startThread();
     return true;
 }
@@ -605,7 +624,7 @@ void AcqBoardRedPitaya::run()
 
     const int numAdcChannelsLocal = getNumDataOutputs (ContinuousChannel::ADC);
 
-    if (numAdcChannelsLocal <= 0 || samplesPerBuffer <= 0)
+    if (numAdcChannelsLocal <= 0 || numAdcChannelsLocal > MAX_CHANNELS || samplesPerBuffer <= 0)
         return;
 
     const int headerSize = 22;

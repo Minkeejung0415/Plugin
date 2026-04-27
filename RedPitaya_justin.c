@@ -410,7 +410,9 @@ static void write_sensor_csv_labels(FILE *fp, const SensorInstance *s, int senso
                 sensor_index, name, sensor_index, name, sensor_index, name);
     }
 
-    if (with_fusion) {
+    (void)with_fusion;
+
+    {
         fprintf(fp,
                 ",sensor%d_%s_qw,sensor%d_%s_qx,sensor%d_%s_qy,sensor%d_%s_qz",
                 sensor_index, name, sensor_index, name, sensor_index, name, sensor_index, name);
@@ -427,12 +429,13 @@ static void write_csv_header(FILE *fp, HardwareContext *ctx, bool with_fusion) {
 
 static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int sample_index, const int16_t *frame_buffer) {
     int channel_offset = 0;
+    (void)with_fusion;
 
     fprintf(fp, "%d,%.6f", sample_index, (double)sample_index / (double)DESIRED_SAMPLE_RATE_HZ);
 
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         const SensorInstance *s = &ctx->sensors[i];
-        int sensor_channels = s->num_channels + (with_fusion ? 4 : 0);
+        int sensor_channels = s->num_channels + 4;
 
         for (int j = 0; j < sensor_channels; j++) {
             fprintf(fp, ",%d", frame_buffer[channel_offset + j]);
@@ -446,7 +449,7 @@ static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int 
 
 static int update_frame_layout(HardwareContext *ctx, int base_channels, bool *with_fusion, int *current_channels, int *bytes_per_frame) {
     bool next_with_fusion = fusion_is_enabled();
-    int next_channels = base_channels + (next_with_fusion ? ctx->active_sensor_count * 4 : 0);
+    int next_channels = base_channels + ctx->active_sensor_count * 4;
     int next_bytes_per_frame = next_channels * 2;
 
     *with_fusion = next_with_fusion;
@@ -513,7 +516,7 @@ static void acquire_sensor_samples(
             }
         }
 
-        current_byte_offset += (s->num_channels + (with_fusion ? 4 : 0)) * 2;
+        current_byte_offset += (s->num_channels + 4) * 2;
     }
 }
 
@@ -542,7 +545,7 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
     const int total_samples = duration_seconds * DESIRED_SAMPLE_RATE_HZ;
     int16_t *frame_buffer = (int16_t *)malloc(max_bytes_per_frame);
     bool with_fusion = fusion_is_enabled();
-    int current_channels = base_channels + (with_fusion ? ctx->active_sensor_count * 4 : 0);
+    int current_channels = base_channels + ctx->active_sensor_count * 4;
     int bytes_per_frame = current_channels * 2;
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
@@ -833,7 +836,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
     uint8_t *sd_write_buffer = (uint8_t *)malloc(max_bytes_per_frame * BUF_SAMPLES); // The massive RAM queue
 
     bool with_fusion = fusion_is_enabled();
-    int current_channels = base_channels + (with_fusion ? ctx->active_sensor_count * 4 : 0);
+    int current_channels = base_channels + ctx->active_sensor_count * 4;
     int bytes_per_frame = current_channels * 2;
     int buffered_bytes_per_frame = bytes_per_frame;
     char cmd[32];
@@ -877,9 +880,11 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
 
                 if (strstr(cmd, "RECORD ON")) record = true;
                 if (strstr(cmd, "FILTER ON")) {
+                    fusion_set_enabled(true);
                     printf("Filter enabled.\n");
                 }
                 if (strstr(cmd, "FILTER OFF")) {
+                    fusion_set_enabled(false);
                     printf("Filter disabled.\n");
                 }
                 if (strstr(cmd, "AIN_GAIN:")) {
@@ -894,12 +899,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
                     int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
                     printf("Requested sample frequency: %d Hz.\n", frequency_hz);
                 }
-                if (strstr(cmd, "FUSION ON")) {
-                    fusion_set_enabled(true);
-                }
-                if (strstr(cmd, "FUSION OFF")) {
-                    fusion_set_enabled(false);
-                }
+                if (strstr(cmd, "FUSION ON")) fusion_set_enabled(true);
+                if (strstr(cmd, "FUSION OFF")) fusion_set_enabled(false);
                 if (strstr(cmd, "RECORD OFF")) {
                     record = false;
                     // Flush buffer when recording is toggled off manually
@@ -923,21 +924,9 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
 
         {
             bool old_with_fusion = with_fusion;
-            int old_bytes_per_frame = bytes_per_frame;
             update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
 
-            if (bytes_per_frame != old_bytes_per_frame) {
-                if (record && log_file != NULL && buf_idx > 0) {
-                    fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, log_file);
-                    fflush(log_file);
-                    buf_idx = 0;
-                }
-
-                buffered_bytes_per_frame = bytes_per_frame;
-                printf("Fusion %s during stream. Total channels now %d.\n",
-                       with_fusion ? "enabled" : "disabled",
-                       ctx->total_channels);
-            } else if (with_fusion != old_with_fusion) {
+            if (with_fusion != old_with_fusion) {
                 printf("Fusion %s during stream.\n", with_fusion ? "enabled" : "disabled");
             }
         }
@@ -1022,7 +1011,7 @@ int main(void) {
     // Plugin controls fusion state - default to OFF
     start_with_fusion = false;
     fusion_set_enabled(start_with_fusion);
-    ctx.total_channels = base_channels;
+    ctx.total_channels = base_channels + ctx.active_sensor_count * 4;
     printf("Sensor fusion disabled (controlled by plugin). Total channels: %d\n", ctx.total_channels);
 
     // Always use TCP streaming - plugin controls all operations, no prompts
@@ -1066,11 +1055,9 @@ int main(void) {
 
             if (strstr(buffer, "FUSION ON") && !fusion_is_enabled()) {
                 fusion_set_enabled(true);
-                ctx.total_channels = base_channels + ctx.active_sensor_count * 4;
             }
             else if (strstr(buffer, "FUSION OFF") && fusion_is_enabled()) {
                 fusion_set_enabled(false);
-                ctx.total_channels = base_channels;
             }
             else if (strstr(buffer, "REDPITAYA")) {
                 char msg[64];
@@ -1078,27 +1065,24 @@ int main(void) {
                 write(client_fd, msg, strlen(msg));
             }
             else if (strstr(buffer, "FILTER ON")) {
+                fusion_set_enabled(true);
                 printf("Filter enabled.\n");
-                write(client_fd, "OK\n", 3);
             }
             else if (strstr(buffer, "FILTER OFF")) {
+                fusion_set_enabled(false);
                 printf("Filter disabled.\n");
-                write(client_fd, "OK\n", 3);
             }
             else if (strstr(buffer, "AIN_GAIN:")) {
                 float gain = strtof(strstr(buffer, "AIN_GAIN:") + 9, NULL);
                 printf("Analog input gain set to %.2f.\n", gain);
-                write(client_fd, "OK\n", 3);
             }
             else if (strstr(buffer, "AOUT:")) {
                 float voltage = strtof(strstr(buffer, "AOUT:") + 5, NULL);
                 printf("Analog output voltage set to %.2f V.\n", voltage);
-                write(client_fd, "OK\n", 3);
             }
             else if (strstr(buffer, "FREQ:")) {
                 int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
                 printf("Requested sample frequency: %d Hz.\n", frequency_hz);
-                write(client_fd, "OK\n", 3);
             }
             else if (strstr(buffer, "START")) {
                 system("rw");
@@ -1115,7 +1099,9 @@ int main(void) {
                     write(client_fd, "ERROR_FILE\n", 11);
                     continue;
                 }
-                write(client_fd, "STARTED\n", 8);
+                char started_msg[192];
+                snprintf(started_msg, sizeof(started_msg), "STARTED %s\n", filename);
+                write(client_fd, started_msg, strlen(started_msg));
                 if (run_stream(client_fd, &ctx, fp, base_channels) < 0) { fclose(fp); break; }
                 fclose(fp);
                 system("sync");
