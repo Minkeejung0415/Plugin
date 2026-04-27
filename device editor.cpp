@@ -388,6 +388,11 @@ void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
 
 void DeviceEditor::channelStateChanged (Array<int> newChannels)
 {
+    if (board == nullptr || ! electrodeButtons.isValidIndex (int (activeAudioChannel)))
+    {
+        return;
+    }
+
     int selectedChannel = -1;
 
     if (newChannels.size() > 0)
@@ -748,27 +753,6 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
     ledButton->setToggleState (xml->getBoolAttribute ("LEDs", true), sendNotification);
     clockInterface->setClockDivideRatio (xml->getIntAttribute ("ClockDivideRatio"));
     */
-
-    int AudioOutputL = xml->getIntAttribute ("AudioOutputL", -1);
-    int AudioOutputR = xml->getIntAttribute ("AudioOutputR", -1);
-
-    if (electrodeButtons.size() >= 2)
-    {
-        auto restoreAudioOutput = [this] (int outputChannel, int savedChannelNumber)
-        {
-            const int channelCount = board != nullptr ? board->getNumChannels() : 0;
-            const int channelNumber = isPositiveAndBelow (savedChannelNumber - 1, channelCount)
-                                          ? savedChannelNumber
-                                          : -1;
-
-            electrodeButtons[outputChannel]->setChannelNum (channelNumber);
-            electrodeButtons[outputChannel]->setToggleState (channelNumber > -1, dontSendNotification);
-            board->connectHeadstageChannelToDAC (channelNumber > -1 ? channelNumber - 1 : -1, outputChannel);
-        };
-
-        restoreAudioOutput (LEFT, AudioOutputL);
-        restoreAudioOutput (RIGHT, AudioOutputR);
-    }
 
     forEachXmlChildElementWithTagName (*xml, hsOptions, "HSOPTIONS")
     {
