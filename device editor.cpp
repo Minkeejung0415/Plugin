@@ -751,15 +751,18 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
     int AudioOutputL = xml->getIntAttribute ("AudioOutputL", -1);
     int AudioOutputR = xml->getIntAttribute ("AudioOutputR", -1);
 
-    electrodeButtons[0]->setChannelNum (AudioOutputL);
-    board->connectHeadstageChannelToDAC (0, AudioOutputL);
-    if (AudioOutputL > -1)
-        electrodeButtons[0]->setToggleState (true, dontSendNotification);
+    if (electrodeButtons.size() >= 2)
+    {
+        electrodeButtons[0]->setChannelNum (AudioOutputL);
+        board->connectHeadstageChannelToDAC (0, AudioOutputL);
+        if (AudioOutputL > -1)
+            electrodeButtons[0]->setToggleState (true, dontSendNotification);
 
-    electrodeButtons[1]->setChannelNum (AudioOutputR);
-    board->connectHeadstageChannelToDAC (1, AudioOutputR);
-    if (AudioOutputR > -1)
-        electrodeButtons[1]->setToggleState (true, dontSendNotification);
+        electrodeButtons[1]->setChannelNum (AudioOutputR);
+        board->connectHeadstageChannelToDAC (1, AudioOutputR);
+        if (AudioOutputR > -1)
+            electrodeButtons[1]->setToggleState (true, dontSendNotification);
+    }
 
     forEachXmlChildElementWithTagName (*xml, hsOptions, "HSOPTIONS")
     {
