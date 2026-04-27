@@ -507,8 +507,9 @@ void DeviceEditor::startAcquisition()
     //adcButton->setEnabledState (false);
     //dspoffsetButton->setEnabledState (false);
 
-    if (filterButton != nullptr)
-        filterButton->setEnabledState (false);
+    // Allow filter to remain enabled during acquisition
+    // if (filterButton != nullptr)
+    //     filterButton->setEnabledState (false);
 
     if (analogInLabel != nullptr)
         analogInLabel->setEnabled (false);
@@ -539,8 +540,9 @@ void DeviceEditor::stopAcquisition()
     //adcButton->setEnabledState (true);
     //dspoffsetButton->setEnabledState (true);
 
-    if (filterButton != nullptr)
-        filterButton->setEnabledState (true);
+    // Allow filter to remain enabled during acquisition
+    // if (filterButton != nullptr)
+    //     filterButton->setEnabledState (true);
 
     if (analogInLabel != nullptr)
         analogInLabel->setEnabled (true);
