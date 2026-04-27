@@ -304,6 +304,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     commandSocket->write (msg, (int) strlen (msg));
 
     lastRecordingPath = {};
+    lastRecordingCsvPath = {};
 
     String responseText;
 
@@ -318,8 +319,24 @@ bool AcqBoardRedPitaya::startAcquisition()
 
     if (responseText.startsWith ("STARTED "))
     {
-        lastRecordingPath = responseText.fromFirstOccurrenceOf ("STARTED ", false, false).trim();
-        std::cout << "Red Pitaya: Streaming to " << lastRecordingPath << std::endl;
+        const String pathText = responseText.fromFirstOccurrenceOf ("STARTED ", false, false).trim();
+
+        if (pathText.contains ("BIN:") && pathText.contains (" CSV:"))
+        {
+            lastRecordingPath = pathText.fromFirstOccurrenceOf ("BIN:", false, false)
+                                      .upToFirstOccurrenceOf (" CSV:", false, false)
+                                      .trim();
+            lastRecordingCsvPath = pathText.fromFirstOccurrenceOf (" CSV:", false, false).trim();
+        }
+        else
+        {
+            lastRecordingPath = pathText;
+        }
+
+        std::cout << "Red Pitaya: Streaming to " << lastRecordingPath;
+        if (lastRecordingCsvPath.isNotEmpty())
+            std::cout << " and " << lastRecordingCsvPath;
+        std::cout << std::endl;
     }
 
     startThread();

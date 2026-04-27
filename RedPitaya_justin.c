@@ -825,7 +825,7 @@ static int init_hardware(HardwareContext *ctx) {
 }
 
 // --- Streaming Logic ---
-static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int base_channels) {
+static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
     uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4;
     const int max_bytes_per_frame = max_total_channels * 2;
@@ -870,10 +870,11 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
 
                 if (strstr(cmd, "STOP")) { 
                     // Flush any leftover data in RAM before stopping
-                    if (record && log_file != NULL && buf_idx > 0) {
-                        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, log_file);
-                        fflush(log_file);
+                    if (record && bin_file != NULL && buf_idx > 0) {
+                        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
+                        fflush(bin_file);
                     }
+                    if (csv_file != NULL) fflush(csv_file);
                     free(packet); free(frame_buffer); free(sd_write_buffer); 
                     return 0; 
                 }
@@ -904,17 +905,19 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
                 if (strstr(cmd, "RECORD OFF")) {
                     record = false;
                     // Flush buffer when recording is toggled off manually
-                    if (log_file != NULL && buf_idx > 0) {
-                        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, log_file);
-                        fflush(log_file);
+                    if (bin_file != NULL && buf_idx > 0) {
+                        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
+                        fflush(bin_file);
                         buf_idx = 0;
                     }
+                    if (csv_file != NULL) fflush(csv_file);
                 }
             } else if (n == 0) { 
                 // Client disconnected suddenly. Flush and exit.
-                if (record && log_file != NULL && buf_idx > 0) {
-                    fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, log_file);
+                if (record && bin_file != NULL && buf_idx > 0) {
+                    fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
                 }
+                if (csv_file != NULL) fflush(csv_file);
                 free(packet); free(frame_buffer); free(sd_write_buffer); 
                 return -1; 
             }
@@ -935,17 +938,21 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
         maybe_report_vqf_stats(with_fusion, ns, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
 
         // --- File Logging (The Unblocked Double-Buffer) ---
-        if (record && log_file != NULL) {
+        if (record && bin_file != NULL) {
             // Copy this single frame into our giant RAM block
             memcpy(sd_write_buffer + (buf_idx * buffered_bytes_per_frame), frame_buffer, bytes_per_frame);
             buf_idx++;
 
             // Only trigger the slow SD card write once the block is full
             if (buf_idx >= BUF_SAMPLES) {
-                fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * BUF_SAMPLES, log_file);
-                fflush(log_file);
+                fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * BUF_SAMPLES, bin_file);
+                fflush(bin_file);
                 buf_idx = 0;     
             }
+        }
+
+        if (record && csv_file != NULL) {
+            write_csv_row(csv_file, ctx, with_fusion, ns, frame_buffer);
         }
 
         // --- Network Send (Still fires instantly to keep GUI real-time) ---
@@ -959,9 +966,10 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
     }
 
     // Standard exit cleanup
-    if (record && log_file != NULL && buf_idx > 0) {
-        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, log_file);
+    if (record && bin_file != NULL && buf_idx > 0) {
+        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
     }
+    if (csv_file != NULL) fflush(csv_file);
     free(packet); free(frame_buffer); free(sd_write_buffer);
     return 0;
 }
@@ -1087,23 +1095,40 @@ int main(void) {
             else if (strstr(buffer, "START")) {
                 system("rw");
                 time_t rawtime; struct tm *timeinfo;
-                char time_str[20]; char filename[128];
+                char time_str[20]; char bin_filename[128]; char csv_filename[128];
                 time(&rawtime);
                 timeinfo = localtime(&rawtime);
                 strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
-                sprintf(filename, "/root/Measurements/recording_%s.bin", time_str);
+                sprintf(bin_filename, "/root/Measurements/recording_%s.bin", time_str);
+                sprintf(csv_filename, "/root/Measurements/recording_%s.csv", time_str);
 
-                FILE *fp = fopen(filename, "wb");
-                if (fp == NULL) {
-                    perror("Failed to open file");
+                FILE *bin_fp = fopen(bin_filename, "wb");
+                if (bin_fp == NULL) {
+                    perror("Failed to open binary file");
                     write(client_fd, "ERROR_FILE\n", 11);
                     continue;
                 }
-                char started_msg[192];
-                snprintf(started_msg, sizeof(started_msg), "STARTED %s\n", filename);
+
+                FILE *csv_fp = fopen(csv_filename, "w");
+                if (csv_fp == NULL) {
+                    perror("Failed to open CSV file");
+                    fclose(bin_fp);
+                    write(client_fd, "ERROR_FILE\n", 11);
+                    continue;
+                }
+
+                write_csv_header(csv_fp, &ctx, true);
+
+                char started_msg[320];
+                snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
                 write(client_fd, started_msg, strlen(started_msg));
-                if (run_stream(client_fd, &ctx, fp, base_channels) < 0) { fclose(fp); break; }
-                fclose(fp);
+                if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
+                    fclose(bin_fp);
+                    fclose(csv_fp);
+                    break;
+                }
+                fclose(bin_fp);
+                fclose(csv_fp);
                 system("sync");
                 write(client_fd, "STOPPED\n", 8);
             }

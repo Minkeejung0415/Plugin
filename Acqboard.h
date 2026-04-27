@@ -178,6 +178,8 @@ public:
 
     virtual String getLastRecordingPath() const { return {}; }
 
+    virtual String getLastRecordingCsvPath() const { return {}; }
+
     virtual void updateSampleFrequency (int newFreq) {}
 
     /** Enables or disables the hardware filter */

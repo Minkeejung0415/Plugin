@@ -466,16 +466,30 @@ void DeviceEditor::buttonClicked (Button* button)
     {
         if (recordButton->getToggleState())
         {
-            board->sendRecordOnCommand();
+            if (board->sendRecordOnCommand())
+            {
+                const String binPath = board->getLastRecordingPath();
+                const String csvPath = board->getLastRecordingCsvPath();
+
+                if (binPath.isNotEmpty() && csvPath.isNotEmpty())
+                    CoreServices::sendStatusMessage ("Recording to " + binPath + " and " + csvPath);
+                else if (binPath.isNotEmpty())
+                    CoreServices::sendStatusMessage ("Recording to " + binPath);
+                else
+                    CoreServices::sendStatusMessage ("Recording started.");
+            }
         }
         else
         {
             if (board->sendRecordOffCommand())
             {
-                const String recordingPath = board->getLastRecordingPath();
+                const String binPath = board->getLastRecordingPath();
+                const String csvPath = board->getLastRecordingCsvPath();
 
-                if (recordingPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording saved to " + recordingPath);
+                if (binPath.isNotEmpty() && csvPath.isNotEmpty())
+                    CoreServices::sendStatusMessage ("Recording saved to " + binPath + " and " + csvPath);
+                else if (binPath.isNotEmpty())
+                    CoreServices::sendStatusMessage ("Recording saved to " + binPath);
                 else
                     CoreServices::sendStatusMessage ("Recording stopped and saved.");
             }

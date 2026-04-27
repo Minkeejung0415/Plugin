@@ -154,6 +154,8 @@ public:
 
     String getLastRecordingPath() const override { return lastRecordingPath; }
 
+    String getLastRecordingCsvPath() const override { return lastRecordingCsvPath; }
+
     void updateSampleFrequency (int newFreq) override;
 
     /** Enables or disables hardware filter */
@@ -215,6 +217,7 @@ public:
     StreamingSocket* commandSocket = nullptr;
 
     String lastRecordingPath;
+    String lastRecordingCsvPath;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };
