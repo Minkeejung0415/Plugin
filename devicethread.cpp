@@ -236,7 +236,30 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
             }
         }
 
-        if (acquisitionBoard->areAdcChannelsEnabled())
+        if (acquisitionBoard->getBoardType() == AcquisitionBoard::BoardType::RedPitaya
+            && acquisitionBoard->areAdcChannelsEnabled())
+        {
+            const int numadcchannels = acquisitionBoard->getNumDataOutputs (ContinuousChannel::ADC);
+            for (int ch = 0; ch < numadcchannels; ch++)
+            {
+                String name = "Channel" + String (ch + 1);
+
+                ContinuousChannel::Settings channelSettings {
+                    ContinuousChannel::ELECTRODE,
+                    name,
+                    "Red Pitaya input channel",
+                    "acq-board.rhythm.continuous.ephys",
+
+                    acquisitionBoard->getBitVolts (ContinuousChannel::Type::ADC),
+
+                    stream
+                };
+
+                continuousChannels->add (new ContinuousChannel (channelSettings));
+                continuousChannels->getLast()->setUnits ("uV");
+            }
+        }
+        else if (acquisitionBoard->areAdcChannelsEnabled())
         {
             const int numadcchannels = acquisitionBoard->getNumDataOutputs (ContinuousChannel::ADC);
             for (int ch = 0; ch < numadcchannels; ch++)

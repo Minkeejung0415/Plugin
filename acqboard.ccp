@@ -338,6 +338,10 @@ bool AcqBoardRedPitaya::startAcquisition()
             std::cout << " and " << lastRecordingCsvPath;
         std::cout << std::endl;
     }
+    else if (responseText == "STARTED")
+    {
+        std::cout << "Red Pitaya: Streaming started." << std::endl;
+    }
 
     startThread();
     return true;
@@ -401,9 +405,13 @@ bool AcqBoardRedPitaya::sendRecordOnCommand()
     if (commandSocket == nullptr)
         return false;
 
-    const char* msg = "RECORD ON\n";
+    const String basePath = "/root/Measurements/recording_" + String (Time::currentTimeMillis());
+    lastRecordingPath = basePath + ".bin";
+    lastRecordingCsvPath = basePath + ".csv";
 
-    int written = commandSocket->write (msg, (int) strlen (msg));
+    const String msg = "RECORD ON " + basePath + "\n";
+
+    int written = commandSocket->write (msg.toRawUTF8(), (int) msg.getNumBytesAsUTF8());
 
     if (written <= 0)
         return false;

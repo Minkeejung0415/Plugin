@@ -826,7 +826,7 @@ static int init_hardware(HardwareContext *ctx) {
 }
 
 // --- Streaming Logic ---
-static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
+static int run_stream(int client_fd, HardwareContext *ctx, int base_channels) {
     uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4;
     const int max_bytes_per_frame = max_total_channels * 2;
@@ -840,8 +840,10 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     int current_channels = base_channels + ctx->active_sensor_count * 4;
     int bytes_per_frame = current_channels * 2;
     int buffered_bytes_per_frame = bytes_per_frame;
-    char cmd[32];
-    bool record = true;
+    char cmd[256];
+    FILE *bin_file = NULL;
+    FILE *csv_file = NULL;
+    bool record = false;
     int buf_idx = 0;
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
@@ -876,11 +878,53 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
                         fflush(bin_file);
                     }
                     if (csv_file != NULL) fflush(csv_file);
+                    if (bin_file != NULL) fclose(bin_file);
+                    if (csv_file != NULL) fclose(csv_file);
                     free(packet); free(frame_buffer); free(sd_write_buffer); 
                     return 0; 
                 }
 
-                if (strstr(cmd, "RECORD ON")) record = true;
+                if (strstr(cmd, "RECORD ON")) {
+                    if (bin_file == NULL && csv_file == NULL) {
+                        char base_path[160] = {0};
+                        char bin_path[180] = {0};
+                        char csv_path[180] = {0};
+                        const char *path_start = strstr(cmd, "RECORD ON") + 9;
+
+                        while (*path_start == ' ' || *path_start == '\t') path_start++;
+
+                        if (*path_start != '\0') {
+                            snprintf(base_path, sizeof(base_path), "%s", path_start);
+                            base_path[strcspn(base_path, "\r\n")] = '\0';
+                        } else {
+                            time_t rawtime; struct tm *timeinfo; char time_str[20];
+                            time(&rawtime);
+                            timeinfo = localtime(&rawtime);
+                            strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
+                            snprintf(base_path, sizeof(base_path), "/root/Measurements/recording_%s", time_str);
+                        }
+
+                        mkdir("/root/Measurements", 0775);
+                        snprintf(bin_path, sizeof(bin_path), "%s.bin", base_path);
+                        snprintf(csv_path, sizeof(csv_path), "%s.csv", base_path);
+
+                        bin_file = fopen(bin_path, "wb");
+                        csv_file = fopen(csv_path, "w");
+
+                        if (bin_file != NULL && csv_file != NULL) {
+                            write_csv_header(csv_file, ctx, true);
+                            record = true;
+                            printf("Recording to BIN: %s CSV: %s\n", bin_path, csv_path);
+                        } else {
+                            perror("Failed to open recording files");
+                            if (bin_file != NULL) { fclose(bin_file); bin_file = NULL; }
+                            if (csv_file != NULL) { fclose(csv_file); csv_file = NULL; }
+                            record = false;
+                        }
+                    } else {
+                        record = true;
+                    }
+                }
                 if (strstr(cmd, "FILTER ON")) {
                     fusion_set_enabled(true);
                     printf("Filter enabled.\n");
@@ -912,6 +956,9 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
                         buf_idx = 0;
                     }
                     if (csv_file != NULL) fflush(csv_file);
+                    if (bin_file != NULL) { fclose(bin_file); bin_file = NULL; }
+                    if (csv_file != NULL) { fclose(csv_file); csv_file = NULL; }
+                    printf("Recording stopped.\n");
                 }
             } else if (n == 0) { 
                 // Client disconnected suddenly. Flush and exit.
@@ -919,6 +966,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
                     fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
                 }
                 if (csv_file != NULL) fflush(csv_file);
+                if (bin_file != NULL) fclose(bin_file);
+                if (csv_file != NULL) fclose(csv_file);
                 free(packet); free(frame_buffer); free(sd_write_buffer); 
                 return -1; 
             }
@@ -971,6 +1020,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
     }
     if (csv_file != NULL) fflush(csv_file);
+    if (bin_file != NULL) fclose(bin_file);
+    if (csv_file != NULL) fclose(csv_file);
     free(packet); free(frame_buffer); free(sd_write_buffer);
     return 0;
 }
@@ -1094,44 +1145,12 @@ int main(void) {
                 printf("Requested sample frequency: %d Hz.\n", frequency_hz);
             }
             else if (strstr(buffer, "START")) {
-                system("rw");
-                mkdir("/root/Measurements", 0775);
-
-                time_t rawtime; struct tm *timeinfo;
-                char time_str[20]; char bin_filename[128]; char csv_filename[128];
-                time(&rawtime);
-                timeinfo = localtime(&rawtime);
-                strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
-                sprintf(bin_filename, "/root/Measurements/recording_%s.bin", time_str);
-                sprintf(csv_filename, "/root/Measurements/recording_%s.csv", time_str);
-
-                FILE *bin_fp = fopen(bin_filename, "wb");
-                if (bin_fp == NULL) {
-                    perror("Failed to open binary file");
-                    write(client_fd, "ERROR_FILE\n", 11);
-                    continue;
-                }
-
-                FILE *csv_fp = fopen(csv_filename, "w");
-                if (csv_fp == NULL) {
-                    perror("Failed to open CSV file");
-                    fclose(bin_fp);
-                    write(client_fd, "ERROR_FILE\n", 11);
-                    continue;
-                }
-
-                write_csv_header(csv_fp, &ctx, true);
-
-                char started_msg[320];
-                snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
+                char started_msg[64];
+                snprintf(started_msg, sizeof(started_msg), "STARTED\n");
                 write(client_fd, started_msg, strlen(started_msg));
-                if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
-                    fclose(bin_fp);
-                    fclose(csv_fp);
+                if (run_stream(client_fd, &ctx, base_channels) < 0) {
                     break;
                 }
-                fclose(bin_fp);
-                fclose(csv_fp);
                 system("sync");
                 write(client_fd, "STOPPED\n", 8);
             }
