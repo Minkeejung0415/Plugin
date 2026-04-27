@@ -864,6 +864,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
             int n = recv(client_fd, cmd, sizeof(cmd) - 1, MSG_DONTWAIT);
             if (n > 0) {
                 cmd[n] = '\0';
+
                 if (strstr(cmd, "STOP")) { 
                     // Flush any leftover data in RAM before stopping
                     if (record && log_file != NULL && buf_idx > 0) {
@@ -873,7 +874,26 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *log_file, int b
                     free(packet); free(frame_buffer); free(sd_write_buffer); 
                     return 0; 
                 }
+
                 if (strstr(cmd, "RECORD ON")) record = true;
+                if (strstr(cmd, "FILTER ON")) {
+                    printf("Filter enabled.\n");
+                }
+                if (strstr(cmd, "FILTER OFF")) {
+                    printf("Filter disabled.\n");
+                }
+                if (strstr(cmd, "AIN_GAIN:")) {
+                    float gain = strtof(strstr(cmd, "AIN_GAIN:") + 9, NULL);
+                    printf("Analog input gain set to %.2f.\n", gain);
+                }
+                if (strstr(cmd, "AOUT:")) {
+                    float voltage = strtof(strstr(cmd, "AOUT:") + 5, NULL);
+                    printf("Analog output voltage set to %.2f V.\n", voltage);
+                }
+                if (strstr(cmd, "FREQ:")) {
+                    int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
+                    printf("Requested sample frequency: %d Hz.\n", frequency_hz);
+                }
                 if (strstr(cmd, "FUSION ON")) {
                     fusion_set_enabled(true);
                 }
@@ -1056,6 +1076,29 @@ int main(void) {
                 char msg[64];
                 sprintf(msg, "OK CHANNELS:%d\n", ctx.total_channels);
                 write(client_fd, msg, strlen(msg));
+            }
+            else if (strstr(buffer, "FILTER ON")) {
+                printf("Filter enabled.\n");
+                write(client_fd, "OK\n", 3);
+            }
+            else if (strstr(buffer, "FILTER OFF")) {
+                printf("Filter disabled.\n");
+                write(client_fd, "OK\n", 3);
+            }
+            else if (strstr(buffer, "AIN_GAIN:")) {
+                float gain = strtof(strstr(buffer, "AIN_GAIN:") + 9, NULL);
+                printf("Analog input gain set to %.2f.\n", gain);
+                write(client_fd, "OK\n", 3);
+            }
+            else if (strstr(buffer, "AOUT:")) {
+                float voltage = strtof(strstr(buffer, "AOUT:") + 5, NULL);
+                printf("Analog output voltage set to %.2f V.\n", voltage);
+                write(client_fd, "OK\n", 3);
+            }
+            else if (strstr(buffer, "FREQ:")) {
+                int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
+                printf("Requested sample frequency: %d Hz.\n", frequency_hz);
+                write(client_fd, "OK\n", 3);
             }
             else if (strstr(buffer, "START")) {
                 system("rw");

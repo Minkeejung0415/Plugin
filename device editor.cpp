@@ -127,6 +127,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     filterButton->addListener (this);
     filterButton->setClickingTogglesState (true);
     filterButton->setToggleState (false, dontSendNotification);
+    filterButton->setEnabledState (true);
     filterButton->setTooltip ("Toggle hardware filter on/off");
     addAndMakeVisible (filterButton.get());
 
@@ -138,6 +139,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
     analogInLabel->setEditable (true);
+    analogInLabel->setEnabled (true);
     analogInLabel->setColour (Label::backgroundColourId, Colours::black);
     analogInLabel->setColour (Label::textColourId, Colours::white);
     analogInLabel->setBounds (xOffset + 155, 74, 65, 18);
@@ -153,6 +155,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
     analogOutLabel->setEditable (true);
+    analogOutLabel->setEnabled (true);
     analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
     analogOutLabel->setColour (Label::textColourId, Colours::white);
     analogOutLabel->setBounds (xOffset + 155, 108, 65, 18);
@@ -511,11 +514,14 @@ void DeviceEditor::startAcquisition()
     // if (filterButton != nullptr)
     //     filterButton->setEnabledState (false);
 
+    if (filterButton != nullptr)
+        filterButton->setEnabledState (true);
+
     if (analogInLabel != nullptr)
-        analogInLabel->setEnabled (false);
+        analogInLabel->setEnabled (true);
 
     if (analogOutLabel != nullptr)
-        analogOutLabel->setEnabled (false);
+        analogOutLabel->setEnabled (true);
 
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
@@ -540,9 +546,8 @@ void DeviceEditor::stopAcquisition()
     //adcButton->setEnabledState (true);
     //dspoffsetButton->setEnabledState (true);
 
-    // Allow filter to remain enabled during acquisition
-    // if (filterButton != nullptr)
-    //     filterButton->setEnabledState (true);
+    if (filterButton != nullptr)
+        filterButton->setEnabledState (true);
 
     if (analogInLabel != nullptr)
         analogInLabel->setEnabled (true);
