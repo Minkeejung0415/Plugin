@@ -388,7 +388,7 @@ void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
 
 void DeviceEditor::channelStateChanged (Array<int> newChannels)
 {
-    if (board == nullptr || ! electrodeButtons.isValidIndex (int (activeAudioChannel)))
+    if (board == nullptr || int (activeAudioChannel) < 0 || int (activeAudioChannel) >= electrodeButtons.size())
     {
         return;
     }
