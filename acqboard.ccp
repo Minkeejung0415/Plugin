@@ -354,56 +354,38 @@ bool AcqBoardRedPitaya::startAcquisition()
 
 bool AcqBoardRedPitaya::stopAcquisition()
 {
-    /*
-    if (commandSocket != nullptr)
+    // Signal the streaming thread before touching the socket so it knows to exit.
+    if (isThreadRunning())
+        signalThreadShouldExit();
+
+    // Send STOP so the server exits run_stream() cleanly on its side.
+    if (commandSocket != nullptr && commandSocket->isConnected())
     {
         const char* msg = "STOP\n";
         commandSocket->write (msg, (int) strlen (msg));
+        juce::Thread::sleep (50);
+    }
 
-        commandSocket->waitUntilReady (true, 100);
-
+    // Close the socket. This is what actually unblocks the run() thread: its
+    // blocking commandSocket->read() returns ≤ 0 and run() returns naturally.
+    // Without this, signalThreadShouldExit() alone cannot wake a blocked read,
+    // and startThread() on the next acquisition silently fails because JUCE
+    // will not start a thread that is still running.
+    if (commandSocket != nullptr)
+    {
         commandSocket->close();
         delete commandSocket;
         commandSocket = nullptr;
     }
 
-    if (isThreadRunning())
-        signalThreadShouldExit();
+    // Wait for run() to fully exit before returning. startAcquisition() must
+    // not call startThread() while the old thread is still alive.
+    stopThread (2000);
 
     if (buffer != nullptr)
         buffer->clear();
 
-    return true; */
-        if (commandSocket != nullptr && commandSocket->isConnected())
-        {
-            // 1. Send the STOP command to the Red Pitaya
-            const char* msg = "STOP\n";
-            commandSocket->write (msg, (int) strlen (msg));
-
-            // 2. Wait 50ms for the board to exit run_stream and the final packets to arrive
-            juce::Thread::sleep (50);
-
-            char trash[1024];
-            int flushCount = 0;
-            while (commandSocket->waitUntilReady (true, 0) == 1 && flushCount < 100)
-            {
-                commandSocket->read (trash, sizeof (trash), false);
-                flushCount++;
-            }
-
-            if (flushCount > 0)
-            {
-                std::cout << "Cleared " << flushCount << " leftover packets during stop." << std::endl;
-            }
-        }
-
-        if (isThreadRunning())
-            signalThreadShouldExit();
-
-        if (buffer != nullptr)
-            buffer->clear();
-
-        return true;
+    return true;
 }
 bool AcqBoardRedPitaya::sendRecordOnCommand()
 {
