@@ -64,3 +64,4 @@ AOUT:<value>
 
 - test analog input and output with ADC 
 - fix the Makefile issue where when the new code file uses the vqf.c or sensor_fusion.c it has to be manually implemented in the makefile and not automatically dealt with
+- the double start issue for opne ephys it requires me to start and stop and restart the acquisition for it to start the acquisition properly
