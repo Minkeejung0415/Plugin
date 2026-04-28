@@ -498,7 +498,12 @@ void DeviceEditor::buttonClicked (Button* button)
     else if (button == filterButton.get())
     {
         if (board != nullptr)
+        {
             board->setFilterEnabled (filterButton->getToggleState());
+            CoreServices::sendStatusMessage (filterButton->getToggleState()
+                                                 ? "Filter enabled for next data buffer."
+                                                 : "Filter disabled for next data buffer.");
+        }
     }
     /*
     else if (button == auxButton.get() && ! acquisitionIsActive)

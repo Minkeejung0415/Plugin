@@ -29,6 +29,7 @@
 #define DESIRED_SAMPLE_RATE_HZ 100
 #define CTR_CLK_RATE      125000000
 #define HEADER_SIZE       22
+#define ANALOG_WAVEFORM_CHANNELS 2
 #define GYRO_BIAS_CALIBRATION_SAMPLES 200
 #define ICM20948_BANK_0 0x00
 #define ICM20948_BANK_3 0x03
@@ -71,6 +72,7 @@ typedef struct {
 // Global jump buffer for the watchdog
 static sigjmp_buf watchdog_bucket;
 static volatile sig_atomic_t stop_requested = 0;
+static bool analog_inputs_ready = false;
 
 static long long timespec_diff_ns(const struct timespec *start, const struct timespec *end) {
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
@@ -250,6 +252,40 @@ static void build_measurement_path(char *buffer, size_t buffer_size, const char 
     snprintf(buffer, buffer_size, "/root/Measurements/%s_%s.%s", prefix, time_str, extension);
 }
 
+static void init_analog_waveform_inputs(void) {
+    if (rp_Init() != RP_OK) {
+        fprintf(stderr, "Red Pitaya analog input API init failed. Analog waveform channels will be zero.\n");
+        analog_inputs_ready = false;
+        return;
+    }
+
+    rp_AcqReset();
+    rp_AcqSetDecimation(RP_DEC_1);
+    rp_AcqStart();
+    analog_inputs_ready = true;
+    printf("Red Pitaya analog waveform inputs enabled (%d channels).\n", ANALOG_WAVEFORM_CHANNELS);
+}
+
+static void read_analog_waveform_channels(int16_t *channel_out) {
+    for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++) {
+        channel_out[ch] = 0;
+    }
+
+    if (!analog_inputs_ready) {
+        return;
+    }
+
+    for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++) {
+        uint32_t size = 1;
+        int16_t sample = 0;
+        rp_channel_t channel = ch == 0 ? RP_CH_1 : RP_CH_2;
+
+        if (rp_AcqGetLatestDataRaw(channel, &size, &sample) == RP_OK && size > 0) {
+            channel_out[ch] = sample;
+        }
+    }
+}
+
 static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
     s->mag_is_fresh = false;
 
@@ -425,6 +461,9 @@ static void write_csv_header(FILE *fp, HardwareContext *ctx, bool with_fusion) {
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         write_sensor_csv_labels(fp, &ctx->sensors[i], i, with_fusion);
     }
+    for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++) {
+        fprintf(fp, ",analog_input%d", ch + 1);
+    }
     fprintf(fp, "\n");
 }
 
@@ -445,12 +484,16 @@ static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int 
         channel_offset += sensor_channels;
     }
 
+    for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++) {
+        fprintf(fp, ",%d", frame_buffer[channel_offset + ch]);
+    }
+
     fprintf(fp, "\n");
 }
 
 static int update_frame_layout(HardwareContext *ctx, int base_channels, bool *with_fusion, int *current_channels, int *bytes_per_frame) {
     bool next_with_fusion = fusion_is_enabled();
-    int next_channels = base_channels + ctx->active_sensor_count * 4;
+    int next_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     int next_bytes_per_frame = next_channels * 2;
 
     *with_fusion = next_with_fusion;
@@ -519,6 +562,8 @@ static void acquire_sensor_samples(
 
         current_byte_offset += (s->num_channels + 4) * 2;
     }
+
+    read_analog_waveform_channels((int16_t*)(((uint8_t*)frame_buffer) + current_byte_offset));
 }
 
 static void maybe_report_vqf_stats(
@@ -539,14 +584,101 @@ static void maybe_report_vqf_stats(
     }
 }
 
+static int process_stream_commands(
+    int client_fd,
+    HardwareContext *ctx,
+    FILE **bin_file,
+    FILE **csv_file,
+    bool *record,
+    int *buf_idx,
+    uint8_t *sd_write_buffer,
+    int buffered_bytes_per_frame
+) {
+    char cmd[256];
+    int n = 0;
+    (void)ctx;
+
+    while ((n = recv(client_fd, cmd, sizeof(cmd) - 1, MSG_DONTWAIT)) > 0) {
+        cmd[n] = '\0';
+
+        if (strstr(cmd, "STOP")) {
+            if (*record && *bin_file != NULL && *buf_idx > 0) {
+                fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * (*buf_idx), *bin_file);
+                fflush(*bin_file);
+            }
+            if (*csv_file != NULL) fflush(*csv_file);
+            if (*bin_file != NULL) fclose(*bin_file);
+            if (*csv_file != NULL) fclose(*csv_file);
+            *bin_file = NULL;
+            *csv_file = NULL;
+            return 1;
+        }
+
+        if (strstr(cmd, "RECORD ON")) {
+            *record = true;
+        }
+
+        if (strstr(cmd, "FILTER ON") || strstr(cmd, "FUSION ON")) {
+            fusion_set_enabled(true);
+            printf("Filter enabled. Next frame will include filtered/VQF values.\n");
+        }
+
+        if (strstr(cmd, "FILTER OFF") || strstr(cmd, "FUSION OFF")) {
+            fusion_set_enabled(false);
+            printf("Filter disabled. Next frame will zero filtered/VQF channels.\n");
+        }
+
+        if (strstr(cmd, "AIN_GAIN:")) {
+            float gain = strtof(strstr(cmd, "AIN_GAIN:") + 9, NULL);
+            printf("Analog input gain set to %.2f.\n", gain);
+        }
+
+        if (strstr(cmd, "AOUT:")) {
+            float voltage = strtof(strstr(cmd, "AOUT:") + 5, NULL);
+            printf("Analog output voltage set to %.2f V.\n", voltage);
+        }
+
+        if (strstr(cmd, "FREQ:")) {
+            int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
+            printf("Requested sample frequency: %d Hz.\n", frequency_hz);
+        }
+
+        if (strstr(cmd, "RECORD OFF")) {
+            *record = false;
+            if (*bin_file != NULL && *buf_idx > 0) {
+                fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * (*buf_idx), *bin_file);
+                fflush(*bin_file);
+                *buf_idx = 0;
+            }
+            if (*csv_file != NULL) fflush(*csv_file);
+            printf("Recording stopped.\n");
+        }
+    }
+
+    if (n == 0) {
+        if (*record && *bin_file != NULL && *buf_idx > 0) {
+            fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * (*buf_idx), *bin_file);
+            fflush(*bin_file);
+        }
+        if (*csv_file != NULL) fflush(*csv_file);
+        if (*bin_file != NULL) fclose(*bin_file);
+        if (*csv_file != NULL) fclose(*csv_file);
+        *bin_file = NULL;
+        *csv_file = NULL;
+        return -1;
+    }
+
+    return 0;
+}
+
 static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int duration_seconds, const char *csv_path) {
     uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
-    const int max_total_channels = base_channels + ctx->active_sensor_count * 4;
+    const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     const int max_bytes_per_frame = max_total_channels * 2;
     const int total_samples = duration_seconds * DESIRED_SAMPLE_RATE_HZ;
     int16_t *frame_buffer = (int16_t *)malloc(max_bytes_per_frame);
     bool with_fusion = fusion_is_enabled();
-    int current_channels = base_channels + ctx->active_sensor_count * 4;
+    int current_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     int bytes_per_frame = current_channels * 2;
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
@@ -828,7 +960,7 @@ static int init_hardware(HardwareContext *ctx) {
 // --- Streaming Logic ---
 static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
     uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
-    const int max_total_channels = base_channels + ctx->active_sensor_count * 4;
+    const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     const int max_bytes_per_frame = max_total_channels * 2;
 
     // --- Memory Allocations ---
@@ -837,10 +969,9 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     uint8_t *sd_write_buffer = (uint8_t *)malloc(max_bytes_per_frame * BUF_SAMPLES); // The massive RAM queue
 
     bool with_fusion = fusion_is_enabled();
-    int current_channels = base_channels + ctx->active_sensor_count * 4;
+    int current_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     int bytes_per_frame = current_channels * 2;
     int buffered_bytes_per_frame = bytes_per_frame;
-    char cmd[256];
     bool record = true;
     int buf_idx = 0;
     long long vqf_total_ns = 0;
@@ -865,113 +996,22 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     while (1) {
         uint32_t now = *ctx->gpio_counter;
         if ((now - last_counter) < ticks_per_sample) {
-            int n = recv(client_fd, cmd, sizeof(cmd) - 1, MSG_DONTWAIT);
-            if (n > 0) {
-                cmd[n] = '\0';
-
-                if (strstr(cmd, "STOP")) { 
-                    // Flush any leftover data in RAM before stopping
-                    if (record && bin_file != NULL && buf_idx > 0) {
-                        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
-                        fflush(bin_file);
-                    }
-                    if (csv_file != NULL) fflush(csv_file);
-                    if (bin_file != NULL) fclose(bin_file);
-                    if (csv_file != NULL) fclose(csv_file);
-                    free(packet); free(frame_buffer); free(sd_write_buffer); 
-                    return 0; 
-                }
-
-                if (strstr(cmd, "RECORD ON")) {
-                    if (bin_file == NULL && csv_file == NULL) {
-                        char base_path[160] = {0};
-                        char bin_path[180] = {0};
-                        char csv_path[180] = {0};
-                        const char *path_start = strstr(cmd, "RECORD ON") + 9;
-
-                        while (*path_start == ' ' || *path_start == '\t') path_start++;
-
-                        if (*path_start != '\0') {
-                            snprintf(base_path, sizeof(base_path), "%s", path_start);
-                            base_path[strcspn(base_path, "\r\n")] = '\0';
-                        } else {
-                            time_t rawtime; struct tm *timeinfo; char time_str[20];
-                            time(&rawtime);
-                            timeinfo = localtime(&rawtime);
-                            strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
-                            snprintf(base_path, sizeof(base_path), "/root/Measurements/recording_%s", time_str);
-                        }
-
-                        mkdir("/root/Measurements", 0775);
-                        snprintf(bin_path, sizeof(bin_path), "%s.bin", base_path);
-                        snprintf(csv_path, sizeof(csv_path), "%s.csv", base_path);
-
-                        bin_file = fopen(bin_path, "wb");
-                        csv_file = fopen(csv_path, "w");
-
-                        if (bin_file != NULL && csv_file != NULL) {
-                            write_csv_header(csv_file, ctx, true);
-                            record = true;
-                            printf("Recording to BIN: %s CSV: %s\n", bin_path, csv_path);
-                        } else {
-                            perror("Failed to open recording files");
-                            if (bin_file != NULL) { fclose(bin_file); bin_file = NULL; }
-                            if (csv_file != NULL) { fclose(csv_file); csv_file = NULL; }
-                            record = false;
-                        }
-                    } else {
-                        record = true;
-                    }
-                }
-                if (strstr(cmd, "FILTER ON")) {
-                    fusion_set_enabled(true);
-                    printf("Filter enabled.\n");
-                }
-                if (strstr(cmd, "FILTER OFF")) {
-                    fusion_set_enabled(false);
-                    printf("Filter disabled.\n");
-                }
-                if (strstr(cmd, "AIN_GAIN:")) {
-                    float gain = strtof(strstr(cmd, "AIN_GAIN:") + 9, NULL);
-                    printf("Analog input gain set to %.2f.\n", gain);
-                }
-                if (strstr(cmd, "AOUT:")) {
-                    float voltage = strtof(strstr(cmd, "AOUT:") + 5, NULL);
-                    printf("Analog output voltage set to %.2f V.\n", voltage);
-                }
-                if (strstr(cmd, "FREQ:")) {
-                    int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
-                    printf("Requested sample frequency: %d Hz.\n", frequency_hz);
-                }
-                if (strstr(cmd, "FUSION ON")) fusion_set_enabled(true);
-                if (strstr(cmd, "FUSION OFF")) fusion_set_enabled(false);
-                if (strstr(cmd, "RECORD OFF")) {
-                    record = false;
-                    // Flush buffer when recording is toggled off manually
-                    if (bin_file != NULL && buf_idx > 0) {
-                        fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
-                        fflush(bin_file);
-                        buf_idx = 0;
-                    }
-                    if (csv_file != NULL) fflush(csv_file);
-                    if (bin_file != NULL) { fclose(bin_file); bin_file = NULL; }
-                    if (csv_file != NULL) { fclose(csv_file); csv_file = NULL; }
-                    printf("Recording stopped.\n");
-                }
-            } else if (n == 0) { 
-                // Client disconnected suddenly. Flush and exit.
-                if (record && bin_file != NULL && buf_idx > 0) {
-                    fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
-                }
-                if (csv_file != NULL) fflush(csv_file);
-                if (bin_file != NULL) fclose(bin_file);
-                if (csv_file != NULL) fclose(csv_file);
-                free(packet); free(frame_buffer); free(sd_write_buffer); 
-                return -1; 
+            int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
+            if (command_state != 0) {
+                free(packet); free(frame_buffer); free(sd_write_buffer);
+                return command_state > 0 ? 0 : -1;
             }
             usleep(100); continue;
         }
         last_counter += ticks_per_sample;
+
+        {
+            int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
+            if (command_state != 0) {
+                free(packet); free(frame_buffer); free(sd_write_buffer);
+                return command_state > 0 ? 0 : -1;
+            }
+        }
 
         {
             bool old_with_fusion = with_fusion;
@@ -1065,11 +1105,12 @@ int main(void) {
     }
 
     calibrate_gyro_biases(&ctx);
+    init_analog_waveform_inputs();
 
     // Plugin controls fusion state - default to OFF
     start_with_fusion = false;
     fusion_set_enabled(start_with_fusion);
-    ctx.total_channels = base_channels + ctx.active_sensor_count * 4;
+    ctx.total_channels = base_channels + ctx.active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     printf("Sensor fusion disabled (controlled by plugin). Total channels: %d\n", ctx.total_channels);
 
     // Always use TCP streaming - plugin controls all operations, no prompts
@@ -1184,5 +1225,8 @@ int main(void) {
         close(client_fd);
     }
     fusion_shutdown();
+    if (analog_inputs_ready) {
+        rp_Release();
+    }
     return 0;
 }

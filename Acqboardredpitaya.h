@@ -176,6 +176,9 @@ public:
     /** Maximum Red Pitaya channels, including reserved filtered/fusion outputs */
     static constexpr int MAX_CHANNELS = 64;
 
+    /** Red Pitaya analog voltage waveform channels appended to the stream */
+    static constexpr int ANALOG_WAVEFORM_CHANNELS = 2;
+
     /** Data buffers */
     float samples[MAX_CHANNELS * MAX_SAMPLES_PER_BUFFER];
     int64 sampleNumbers[MAX_SAMPLES_PER_BUFFER];

@@ -242,7 +242,10 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
             const int numadcchannels = acquisitionBoard->getNumDataOutputs (ContinuousChannel::ADC);
             for (int ch = 0; ch < numadcchannels; ch++)
             {
-                String name = "Channel" + String (ch + 1);
+                const int analogStartChannel = jmax (0, numadcchannels - AcqBoardRedPitaya::ANALOG_WAVEFORM_CHANNELS);
+                String name = ch >= analogStartChannel
+                                  ? "AnalogInput" + String (ch - analogStartChannel + 1)
+                                  : "Channel" + String (ch + 1);
 
                 ContinuousChannel::Settings channelSettings {
                     ContinuousChannel::ELECTRODE,
