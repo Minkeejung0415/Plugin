@@ -29,7 +29,7 @@
 #define DESIRED_SAMPLE_RATE_HZ 100
 #define CTR_CLK_RATE      125000000
 #define HEADER_SIZE       22
-#define ANALOG_WAVEFORM_CHANNELS 2
+#define ANALOG_WAVEFORM_CHANNELS 0
 #define GYRO_BIAS_CALIBRATION_SAMPLES 200
 #define ICM20948_BANK_0 0x00
 #define ICM20948_BANK_3 0x03
@@ -1117,7 +1117,7 @@ int main(void) {
     }
 
     calibrate_gyro_biases(&ctx);
-    init_analog_waveform_inputs();
+    // init_analog_waveform_inputs(); // Disabled: RP oscilloscope IP not in current bitstream
 
     // Plugin controls fusion state - default to OFF
     start_with_fusion = false;
