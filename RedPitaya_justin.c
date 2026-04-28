@@ -253,9 +253,20 @@ static void build_measurement_path(char *buffer, size_t buffer_size, const char 
 }
 
 static void init_analog_waveform_inputs(void) {
+    signal(SIGBUS, watchdog_handler);
+
+    if (sigsetjmp(watchdog_bucket, 1) != 0) {
+        fprintf(stderr, "SIGBUS caught during RP analog init: acquisition hardware not present in current FPGA bitstream.\n");
+        fprintf(stderr, "Analog waveform channels will be zero until a bitstream with the oscilloscope IP is loaded.\n");
+        analog_inputs_ready = false;
+        signal(SIGBUS, SIG_DFL);
+        return;
+    }
+
     if (rp_Init() != RP_OK) {
         fprintf(stderr, "Red Pitaya analog input API init failed. Analog waveform channels will be zero.\n");
         analog_inputs_ready = false;
+        signal(SIGBUS, SIG_DFL);
         return;
     }
 
@@ -263,6 +274,7 @@ static void init_analog_waveform_inputs(void) {
     rp_AcqSetDecimation(RP_DEC_1);
     rp_AcqStart();
     analog_inputs_ready = true;
+    signal(SIGBUS, SIG_DFL);
     printf("Red Pitaya analog waveform inputs enabled (%d channels).\n", ANALOG_WAVEFORM_CHANNELS);
 }
 
