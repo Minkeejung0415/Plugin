@@ -281,23 +281,23 @@ bool AcqBoardRedPitaya::startAcquisition()
     if (! deviceFound)
         return false;
 
-    if (commandSocket != nullptr && ! commandSocket->isConnected())
+    // Always use a new TCP session for each acquisition so the board's command
+    // loop never inherits stale RX data from a previous stream (same issue class
+    // as sending STOP while our reader thread still shares this socket).
+    if (commandSocket != nullptr)
     {
         commandSocket->close();
         delete commandSocket;
         commandSocket = nullptr;
     }
 
-    if (commandSocket == nullptr)
+    commandSocket = new StreamingSocket();
+    if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
     {
-        commandSocket = new StreamingSocket();
-        if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
-        {
-            std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
-            delete commandSocket;
-            commandSocket = nullptr;
-            return false;
-        }
+        std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
+        delete commandSocket;
+        commandSocket = nullptr;
+        return false;
     }
 
     const char* msg = "START\n";
@@ -382,31 +382,21 @@ bool AcqBoardRedPitaya::startAcquisition()
 
 bool AcqBoardRedPitaya::stopAcquisition()
 {
-    // 1. Signal the thread to exit so readFully() starts returning false
-    //    on the next 100ms waitUntilReady timeout.
+    // 1. Ask run() to exit on its next poll.
     if (isThreadRunning())
         signalThreadShouldExit();
 
-    // 2. Tell the server to stop streaming.
-    if (commandSocket != nullptr && commandSocket->isConnected())
-    {
-        const char* msg = "STOP\n";
-        commandSocket->write (msg, (int) strlen (msg));
-        juce::Thread::sleep (50);
-    }
-
-    // 3. Close the socket. This causes waitUntilReady() in run() to return -1
-    //    immediately (invalid handle), so the thread exits without waiting for
-    //    the full 100ms timeout — no blocking recv stuck forever.
+    // 2. Close the TCP connection first. The Red Pitaya server then sees EOF /
+    //    send failure and leaves run_stream; we must NOT write STOP (or anything)
+    //    on this socket while run() is still consuming the same byte stream as
+    //    binary packets — that corrupts framing and leaves stale bytes for the
+    //    next START (classic "second start works" failure).
     if (commandSocket != nullptr)
         commandSocket->close();
 
-    // 4. Wait for run() to fully exit BEFORE deleting the socket object.
-    //    With readFully() using 100ms timeouts the thread exits within ~100ms.
-    //    Deleting commandSocket before this point is a use-after-free.
+    // 3. Wait for run() to finish before deleting the socket object.
     stopThread (500);
 
-    // 5. Now safe to delete — thread is guaranteed done.
     if (commandSocket != nullptr)
     {
         delete commandSocket;

@@ -970,6 +970,16 @@ static int init_hardware(HardwareContext *ctx) {
 }
 
 // --- Streaming Logic ---
+/** Discard any bytes left in the TCP RX queue after a stream ends so the next
+ *  read() in the command loop does not see tail bytes from binary packets. */
+static void drain_client_rx(int fd) {
+    char buf[512];
+    ssize_t n;
+    while ((n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+        /* discard */
+    }
+}
+
 static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
     uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
@@ -1230,6 +1240,7 @@ int main(void) {
                 if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
                     break;
                 }
+                drain_client_rx(client_fd);
                 system("sync");
                 write(client_fd, "STOPPED\n", 8);
             }
