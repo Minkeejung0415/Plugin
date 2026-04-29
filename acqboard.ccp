@@ -348,17 +348,26 @@ bool AcqBoardRedPitaya::startAcquisition()
         return false;
     }
 
+    // Sync current filter state to server before data starts flowing.
+    // The UI may have toggled the filter while acquisition was stopped, so we
+    // always send the authoritative state here regardless of what the server assumes.
+    {
+        const char* filterMsg = filterEnabled ? "FILTER ON\n" : "FILTER OFF\n";
+        commandSocket->write (filterMsg, (int) strlen (filterMsg));
+    }
+
     startThread();
     return true;
 }
 
 bool AcqBoardRedPitaya::stopAcquisition()
 {
-    // Signal the streaming thread before touching the socket so it knows to exit.
+    // 1. Signal the thread to exit so readFully() starts returning false
+    //    on the next 100ms waitUntilReady timeout.
     if (isThreadRunning())
         signalThreadShouldExit();
 
-    // Send STOP so the server exits run_stream() cleanly on its side.
+    // 2. Tell the server to stop streaming.
     if (commandSocket != nullptr && commandSocket->isConnected())
     {
         const char* msg = "STOP\n";
@@ -366,21 +375,23 @@ bool AcqBoardRedPitaya::stopAcquisition()
         juce::Thread::sleep (50);
     }
 
-    // Close the socket. This is what actually unblocks the run() thread: its
-    // blocking commandSocket->read() returns ≤ 0 and run() returns naturally.
-    // Without this, signalThreadShouldExit() alone cannot wake a blocked read,
-    // and startThread() on the next acquisition silently fails because JUCE
-    // will not start a thread that is still running.
+    // 3. Close the socket. This causes waitUntilReady() in run() to return -1
+    //    immediately (invalid handle), so the thread exits without waiting for
+    //    the full 100ms timeout — no blocking recv stuck forever.
+    if (commandSocket != nullptr)
+        commandSocket->close();
+
+    // 4. Wait for run() to fully exit BEFORE deleting the socket object.
+    //    With readFully() using 100ms timeouts the thread exits within ~100ms.
+    //    Deleting commandSocket before this point is a use-after-free.
+    stopThread (500);
+
+    // 5. Now safe to delete — thread is guaranteed done.
     if (commandSocket != nullptr)
     {
-        commandSocket->close();
         delete commandSocket;
         commandSocket = nullptr;
     }
-
-    // Wait for run() to fully exit before returning. startAcquisition() must
-    // not call startThread() while the old thread is still alive.
-    stopThread (2000);
 
     if (buffer != nullptr)
         buffer->clear();
@@ -654,14 +665,34 @@ void AcqBoardRedPitaya::run()
     constexpr int MAX_PACKET_SIZE = 1024;
     uint8_t packet[MAX_PACKET_SIZE];
 
+    // Non-blocking read helper: polls in 100ms slices so threadShouldExit() is
+    // checked regularly and stopAcquisition()'s close() is noticed promptly.
+    auto readFully = [&] (void* buf, int size) -> bool
+    {
+        int done = 0;
+        char* ptr = static_cast<char*> (buf);
+        while (done < size && ! threadShouldExit())
+        {
+            int ready = commandSocket->waitUntilReady (true, 100);
+            if (ready < 0)
+                return false; // socket closed / error
+            if (ready == 0)
+                continue; // 100ms timeout — recheck threadShouldExit
+            int n = commandSocket->read (ptr + done, size - done, false);
+            if (n <= 0)
+                return false;
+            done += n;
+        }
+        return ! threadShouldExit();
+    };
+
     bool synchronized = false;
     uint8_t syncBuffer[headerSize];
     int bytesSearched = 0;
 
     while (! synchronized && ! threadShouldExit())
     {
-        int n = commandSocket->read (syncBuffer + bytesSearched, 1, true);
-        if (n <= 0)
+        if (! readFully (syncBuffer + bytesSearched, 1))
             return;
         bytesSearched++;
 
@@ -671,14 +702,8 @@ void AcqBoardRedPitaya::run()
             {
                 memcpy (packet, syncBuffer, headerSize);
 
-                int pRead = 0;
-                while (pRead < payloadSize && ! threadShouldExit())
-                {
-                    int pn = commandSocket->read (packet + headerSize + pRead, payloadSize - pRead, true);
-                    if (pn <= 0)
-                        return;
-                    pRead += pn;
-                }
+                if (! readFully (packet + headerSize, payloadSize))
+                    return;
                 synchronized = true;
             }
             else
@@ -695,14 +720,8 @@ void AcqBoardRedPitaya::run()
         {
             if (sampleIndex > 0 || ! synchronized)
             {
-                int bytesRead = 0;
-                while (bytesRead < packetSize && ! threadShouldExit())
-                {
-                    const int n = commandSocket->read (packet + bytesRead, packetSize - bytesRead, true);
-                    if (n <= 0)
-                        return;
-                    bytesRead += n;
-                }
+                if (! readFully (packet, packetSize))
+                    return;
             }
 
             synchronized = false;
