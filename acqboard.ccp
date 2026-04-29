@@ -7,6 +7,7 @@
 */
 
 #include "AcqBoardRedPitaya.h"
+#include <cstdint>
 #include <cstring>
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
@@ -668,11 +669,9 @@ void AcqBoardRedPitaya::run()
     if (numAdcChannelsLocal <= 0 || numAdcChannelsLocal > MAX_CHANNELS || samplesPerBuffer <= 0)
         return;
 
-    const int headerSize = 22;
-    const int payloadSize = numAdcChannelsLocal * 2;
-    const int packetSize = headerSize + payloadSize;
-
+    constexpr int headerSize = 22;
     constexpr int MAX_PACKET_SIZE = 1024;
+
     uint8_t packet[MAX_PACKET_SIZE];
 
     // Non-blocking read helper: polls in 100ms slices so threadShouldExit() is
@@ -696,53 +695,59 @@ void AcqBoardRedPitaya::run()
         return ! threadShouldExit();
     };
 
-    bool synchronized = false;
-    uint8_t syncBuffer[headerSize];
-    int bytesSearched = 0;
-
-    while (! synchronized && ! threadShouldExit())
+    auto parseHeaderBytesPerFrame = [] (const uint8_t* hdr, int32_t& outBytes) -> bool
     {
-        if (! readFully (syncBuffer + bytesSearched, 1))
-            return;
-        bytesSearched++;
+        if (hdr[8] != 0x03 || hdr[9] != 0x00)
+            return false;
 
-        if (bytesSearched == headerSize)
+        memcpy (&outBytes, hdr + 4, sizeof (int32_t));
+
+        // int16 samples per frame; keep in sync with Red Pitaya write_stream_header
+        if (outBytes < 2 || outBytes > (MAX_PACKET_SIZE - headerSize) || (outBytes & 1) != 0)
+            return false;
+
+        return true;
+    };
+
+    // Read one 22-byte header + variable payload. If the header is not valid,
+    // slide one byte and retry (same framing idea as the original sync loop).
+    auto readOneFrame = [&] (int32_t& outPayloadBytes) -> bool
+    {
+        if (! readFully (packet, headerSize))
+            return false;
+
+        constexpr int maxResync = 65536;
+
+        for (int guard = 0; guard < maxResync && ! threadShouldExit(); ++guard)
         {
-            if (syncBuffer[8] == 0x03 && syncBuffer[9] == 0x00)
-            {
-                memcpy (packet, syncBuffer, headerSize);
+            if (parseHeaderBytesPerFrame (packet, outPayloadBytes))
+                return readFully (packet + headerSize, outPayloadBytes);
 
-                if (! readFully (packet + headerSize, payloadSize))
-                    return;
-                synchronized = true;
-            }
-            else
-            {
-                memmove (syncBuffer, syncBuffer + 1, headerSize - 1);
-                bytesSearched--;
-            }
+            memmove (packet, packet + 1, (size_t) headerSize - 1);
+
+            if (! readFully (packet + headerSize - 1, 1))
+                return false;
         }
-    }
+
+        return false;
+    };
 
     while (! threadShouldExit())
     {
         for (int sampleIndex = 0; sampleIndex < samplesPerBuffer; ++sampleIndex)
         {
-            if (sampleIndex > 0 || ! synchronized)
-            {
-                if (! readFully (packet, packetSize))
-                    return;
-            }
+            int32_t payloadBytes = 0;
 
-            synchronized = false;
+            if (! readOneFrame (payloadBytes))
+                return;
 
             const int16_t* channels = reinterpret_cast<const int16_t*> (packet + headerSize);
+            const int channelsInPacket = payloadBytes / 2;
 
-            int ch = 0;
             for (int adc = 0; adc < numAdcChannelsLocal; ++adc)
             {
-                samples[(ch * samplesPerBuffer) + sampleIndex] = float (channels[adc]);
-                ++ch;
+                const float v = (adc < channelsInPacket) ? float (channels[adc]) : 0.0f;
+                samples[(adc * samplesPerBuffer) + sampleIndex] = v;
             }
 
             const double timeSeconds = double (sampleNumber) / double (settings.boardSampleRate);

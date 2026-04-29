@@ -1007,10 +1007,9 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         return -1;
     }
 
-    // --- Header Setup ---
-    int32_t ns = 1;
+    // --- Header Setup (first sent frame uses sequence 0; ns increments before each send) ---
+    int32_t ns = -1;
     ctx->total_channels = current_channels;
-    write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
 
     *ctx->gpio_reset = 1; usleep(1); *ctx->gpio_reset = 0;
     uint32_t last_counter = *ctx->gpio_counter;
@@ -1043,6 +1042,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
                 printf("Fusion %s during stream.\n", with_fusion ? "enabled" : "disabled");
             }
         }
+        ns++;
         acquire_sensor_samples(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
         maybe_report_vqf_stats(with_fusion, ns, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
@@ -1068,8 +1068,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         // --- Network Send (Still fires instantly to keep GUI real-time) ---
         memcpy(packet + HEADER_SIZE, frame_buffer, bytes_per_frame);
         
-        // Increment the ns counter so Open Ephys knows time is passing
-        ns++; 
         write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
 
         if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
@@ -1142,6 +1140,11 @@ int main(void) {
     struct sockaddr_in servaddr = {0};
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        perror("SO_REUSEPORT (ignored if unsupported)");
+    }
+#endif
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
     servaddr.sin_port = htons(PORT);
