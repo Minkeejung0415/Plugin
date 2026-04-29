@@ -9,73 +9,112 @@
 6. If you can find them but can't access both of them check if the router is connected to the power on the wall
 7. If that is also good, just unplug everything and let is rest for a bit
 
- 
-## Changes in the last week of April
+---
+
+## Final summary (Red Pitaya + Open Ephys plugin)
+
+This document describes the **current** behavior after the acquisition, streaming, UI, and stability work. Rebuild and deploy **both** the Open Ephys plugin and the Red Pitaya server binary when you change either side.
+
+### Red Pitaya server (`RedPitaya_justin.c`)
+
+| Topic | Behavior |
+|--------|----------|
+| **Recordings** | Streamed sessions still write **`.bin`** and **`.csv`** under `/root/Measurements/` as before. |
+| **TCP RX after stream** | After `run_stream()` returns, **`drain_client_rx()`** clears leftover bytes in the client socket receive buffer so the next command loop `read()` does not see tail data from binary packets. |
+| **Frame sequence** | First binary frame of each session uses sequence **`0`** in the 22-byte header (`ns` starts at `-1`, increments once per frame before acquire/send). |
+| **Listen socket** | **`SO_REUSEADDR`** (existing) and **`SO_REUSEPORT`** when the OS defines it, to reduce bind issues on rapid restart. |
+
+### Open Ephys plugin (Red Pitaya board)
+
+| Topic | Behavior |
+|--------|----------|
+| **Start handshake** | `startAcquisition()` requires a **`STARTED`** or **`STARTED …`** line from the board before `startThread()`. On failure, the command socket is closed and cleared. |
+| **Stop / restart** | **`stopAcquisition()`** does **not** send `STOP\n` on the same socket while `run()` reads binary data (that corrupted framing). Order: signal thread → **close socket** → `stopThread()` → delete socket. |
+| **Fresh TCP each run** | Each **`startAcquisition()`** opens a **new** TCP connection before sending `START\n`. |
+| **Variable frame size** | **`run()`** reads **`bytes_per_frame`** from byte **offset 4** of each 22-byte header and reads exactly that many payload bytes, with byte sliding resync if the magic bytes (`dtype` at offset 8–9) are wrong. Maps up to the configured channel count; pads with zeros if the frame is short. |
+| **MSVC** | Nested lambdas in `run()` use explicit capture / naming (`socketReadFully`, `parseHeaderBytesPerFrame` with `[=]`) so Visual Studio builds cleanly. |
+
+### Device editor (UI layout + acquisition)
+
+The acquisition board strip has a **fixed height**; controls must stay within roughly **y &lt; ~126** in the narrow strip or they are **clipped**.
+
+| Control | Position (relative to `xOffset`; `xOffset` is 0, or memory-monitor width on ONI) |
+|---------|-------------------------------------------------------------------------------------|
+| **Sample rate** | Title `(80, 22)`, editable value **`1000`** `(80, 38)` — this is the streaming **frequency** (Hz), not a separate combo. |
+| **FILTER** | Title `(155, 22)`, button **`FILTER`** `(155, 38)`. |
+| **Analog In Gain** | Title `(155, 62)`, value `(155, 74)`. |
+| **Analog Out (V)** | Title `(155, 94)`, value `(155, 108)`. |
+| **RECORD** | **`(6, 108, 65×18)`** — must stay at this **y** so it stays visible (moving it lower hid the button). |
+
+**During acquisition:** after `ChannelCanvas::beginAnimation()`, **`startAcquisition()`** calls **`toFront(false)`** on the sample-rate, filter, analog, and RECORD widgets so they remain **clickable** even though the canvas overlaps the right column (`x ≈ 155`).
+
+**Note:** A trial layout that moved filter/analog/RECORD into one tall left column (**“Option A”**) was **reverted** because **RECORD** at `y = 148` fell below the visible editor area.
+
+---
+
+## Changes in the last week of April (detail)
 
 ### `RedPitaya_justin.c`
-new changes: save recordings to .bin and .csv
-- After each streaming session, the server **drains the TCP receive buffer** on the client socket so leftover binary tail bytes are not read as the next command by the outer `read()` loop.
-- **Stream sequence (`ns`):** The first binary frame of each session uses sequence **0** in the header; the counter increments once per frame before send (CSV row index matches the header).
-- **`SO_REUSEPORT`:** Set on the listen socket when the OS supports it (in addition to `SO_REUSEADDR`) to reduce bind issues during rapid restart.
 
-# Open Ephys Plugin Changes
+- Save recordings to `.bin` and `.csv`.
+- After each streaming session, **drain the TCP receive buffer** on the client socket so leftover binary tail bytes are not read as the next command by the outer `read()` loop.
+- **Stream sequence (`ns`):** First binary frame of each session uses sequence **0** in the header; counter increments once per frame before send (CSV row index matches the header).
+- **`SO_REUSEPORT`:** On the listen socket when the OS supports it (in addition to `SO_REUSEADDR`).
 
-- Added fixed channel layout support for raw sensor data, VQF/filter channels, and analog waveform inputs. ex) sensor = 1 : 9 (raw) + 4 (filter) + 2 (analog input)
-- Added filter/VQF toggling during acquisition. 
-- Added two analog waveform input channels.
-- Added UI controls for recording, filtering, sample rate, analog input gain, and analog output voltage.
-- **Acquisition start validation (Red Pitaya plugin):** `startAcquisition()` now requires a `STARTED` (or `STARTED …`) line from the board before starting the reader thread. Empty, timed-out, or unexpected replies no longer return success; the command socket is closed so the next start gets a clean connection. This addresses the issue where acquisition sometimes needed a stop and second start to work.
-- **Stop / restart (stale stream):** `stopAcquisition()` no longer sends `STOP\n` on the same socket while `run()` may still be parsing binary frames (that could corrupt framing and leave garbage for the next session). Teardown is **close socket → join thread → delete**. Each `startAcquisition()` opens a **new TCP connection** before `START\n` so the board always starts from a clean session.
-- **Variable payload per packet:** `run()` now uses the **22-byte header’s `bytes_per_frame`** (field at offset 4) for each TCP read instead of assuming `numAdcChannels * 2`. That keeps the client aligned when the server changes frame size (e.g. filter/fusion toggling changes channel count). Extra samples in a frame are truncated to the Open Ephys channel count; missing channels are zero-filled.
-- **Device editor layout (Red Pitaya):** RECORD and sample rate use their **original** positions (`RECORD` at `y=108`; filter/analog in the `x=155` column). **Option A** (stacking everything in the left column) was reverted because the fixed editor height **clips** widgets below ~`y=126`, which hid **RECORD**. While acquisition is active, `startAcquisition()` still calls **`toFront()`** on the control strip so filter/analog stay clickable over the channel canvas.
+### Open Ephys plugin (bullet list)
+
+- Fixed channel layout: raw sensor, VQF/filter channels, analog waveform inputs (e.g. per sensor: 9 raw + 4 filter + 2 analog where applicable).
+- Filter/VQF toggling; two analog waveform input channels; UI for record, filter, sample rate, analog in gain, analog out voltage.
+- **Acquisition start validation:** `STARTED` required before reader thread; socket reset on failure.
+- **Stop / restart:** Close-first teardown; new TCP per start; no in-band `STOP` on the binary stream.
+- **Header-driven payload** in `run()` for fusion/frame-size changes.
+- **Device editor:** Original geometry + `toFront()` during acquisition (see table above).
 
 ![[Screenshot 2026-04-27 142836 1.png]]
 
+---
 
-## VQF / Filter Feature
+## VQF / Filter feature
 
-*The `FILTER` button controls whether VQF/filter values are written into the reserved VQF channels.*
+The **`FILTER`** button controls whether VQF/filter values are written into the reserved VQF channels.
 
-*When filter is on:*
+**When filter is on:** VQF channels contain calculated values.
 
-- *VQF channels are filled with calculated values.*
+**When filter is off:** VQF channels are still present and are filled with zeros.
 
-*When filter is off:*
+The Red Pitaya server applies filter commands between frames when possible. **Caveat:** filter commands share the same TCP connection as the binary stream from the plugin’s perspective; the plugin and server were hardened for start/stop and framing, but toggling filter very rapidly during streaming can still stress framing—prefer toggling when idle if you see glitches.
 
-- *VQF channels are still present;*
-- *VQF channels are filled with zeros.*
+---
 
-*The filter can be changed while data is being collected. The Red Pitaya server checks for filter commands before building the next frame, so the next frame uses the latest filter state.*
+## Analog output voltage control
 
-## *Analog Output Voltage Control*
+The UI has an editable **`Analog Out (V)`** field.
 
-*The UI has an editable `Analog Out (V)` field.*
+**Valid range:** `0.0` to `1.8` V
 
-*Valid range:*
-
-```
-0.0 to 1.8 V
-```
-
-*When changed, Open Ephys sends:*
+**Command sent to the board:**
 
 ```
 AOUT:<value>
 ```
 
-*The Red Pitaya server currently receives and logs this command.*
+The Red Pitaya server receives and logs this command. Analog output is a **command**, not a measured waveform channel; to show the real voltage on-screen you would need to sense it on an input channel.
 
-*Analog output is a command, not a measured waveform channel. If the physical output voltage needs to be displayed, it must be measured back through an input channel.*
+---
 
 # What more needs to be done
 
-- test analog input and output with ADC 
-- fix the Makefile issue where when the new code file uses the vqf.c or sensor_fusion.c it has to be manually implemented in the makefile and not automatically dealt with
+- Test analog input and output with ADC hardware.
+- Fix the Makefile issue where new files using `vqf.c` or `sensor_fusion.c` must be wired in manually instead of being picked up automatically.
+
+---
 
 ## Tests (no Open Ephys build required)
 
-From the repo root, run the TCP framing self-test:
+From the repo root:
 
 ```bash
 cc -std=c99 -Wall -Wextra -o /tmp/rp_framing_test tests/redpitaya_stream_framing_test.c && /tmp/rp_framing_test
 ```
+
+This checks variable-payload framing and header resync logic used by the plugin reader.
