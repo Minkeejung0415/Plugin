@@ -325,6 +325,8 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     ledButton->setToggleState (true, dontSendNotification);
     addAndMakeVisible (ledButton.get());
     */
+
+    applyAcquisitionDependentControls();
 }
 
 void DeviceEditor::measureImpedances()
@@ -462,8 +464,18 @@ void DeviceEditor::buttonClicked (Button* button)
                                                               nullptr);
     }
     */
-    if (button == recordButton.get() && acquisitionIsActive)
+    if (button == recordButton.get())
     {
+        if (! acquisitionIsActive)
+        {
+            if (recordButton->getToggleState())
+            {
+                recordButton->setToggleState (false, dontSendNotification);
+                CoreServices::sendStatusMessage ("Start acquisition before recording.");
+            }
+            return;
+        }
+
         if (recordButton->getToggleState())
         {
             if (board->sendRecordOnCommand())
@@ -534,6 +546,27 @@ void DeviceEditor::buttonClicked (Button* button)
     */
 }
 
+void DeviceEditor::applyAcquisitionDependentControls()
+{
+    if (board == nullptr)
+        return;
+
+    if (recordButton != nullptr)
+        recordButton->setEnabledState (true);
+
+    if (filterButton != nullptr)
+        filterButton->setEnabledState (true);
+
+    if (sampleRateLabel != nullptr)
+        sampleRateLabel->setEnabled (true);
+
+    if (analogInLabel != nullptr)
+        analogInLabel->setEnabled (true);
+
+    if (analogOutLabel != nullptr)
+        analogOutLabel->setEnabled (true);
+}
+
 void DeviceEditor::startAcquisition()
 {
     //rescanButton->setEnabledState (false);
@@ -541,18 +574,7 @@ void DeviceEditor::startAcquisition()
     //adcButton->setEnabledState (false);
     //dspoffsetButton->setEnabledState (false);
 
-    // Allow filter to remain enabled during acquisition
-    // if (filterButton != nullptr)
-    //     filterButton->setEnabledState (false);
-
-    if (filterButton != nullptr)
-        filterButton->setEnabledState (true);
-
-    if (analogInLabel != nullptr)
-        analogInLabel->setEnabled (true);
-
-    if (analogOutLabel != nullptr)
-        analogOutLabel->setEnabled (true);
+    applyAcquisitionDependentControls();
 
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
@@ -577,14 +599,9 @@ void DeviceEditor::stopAcquisition()
     //adcButton->setEnabledState (true);
     //dspoffsetButton->setEnabledState (true);
 
-    if (filterButton != nullptr)
-        filterButton->setEnabledState (true);
+    acquisitionIsActive = false;
 
-    if (analogInLabel != nullptr)
-        analogInLabel->setEnabled (true);
-
-    if (analogOutLabel != nullptr)
-        analogOutLabel->setEnabled (true);
+    applyAcquisitionDependentControls();
 
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
@@ -598,8 +615,6 @@ void DeviceEditor::stopAcquisition()
 
     if (memoryUsage != nullptr)
         memoryUsage->stopAcquisition();
-
-    acquisitionIsActive = false;
 }
 
 // --- ADD THIS METHOD TO HANDLE YOUR NEW TEXT BOX ---

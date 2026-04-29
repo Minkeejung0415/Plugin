@@ -271,12 +271,7 @@ ChannelNamingScheme AcqBoardRedPitaya::getNamingScheme()
     return channelNamingScheme;
 }
 
-bool AcqBoardRedPitaya::isReady()
-{
-    return deviceFound;
-}
-
-bool AcqBoardRedPitaya::startAcquisition()
+bool AcqBoardRedPitaya::ensureCommandSocketConnected()
 {
     if (! deviceFound)
         return false;
@@ -291,6 +286,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     if (commandSocket == nullptr)
     {
         commandSocket = new StreamingSocket();
+
         if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
         {
             std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
@@ -300,6 +296,22 @@ bool AcqBoardRedPitaya::startAcquisition()
         }
     }
 
+    return true;
+}
+
+bool AcqBoardRedPitaya::isReady()
+{
+    return deviceFound;
+}
+
+bool AcqBoardRedPitaya::startAcquisition()
+{
+    if (! deviceFound)
+        return false;
+
+    if (! ensureCommandSocketConnected())
+        return false;
+
     const char* msg = "START\n";
     commandSocket->write (msg, (int) strlen (msg));
 
@@ -308,13 +320,52 @@ bool AcqBoardRedPitaya::startAcquisition()
 
     String responseText;
 
-    while (commandSocket->waitUntilReady (true, 1000))
+    char lineBuf[512];
+    const int maxLen = (int) sizeof (lineBuf) - 1;
+    int lineLen = 0;
+
+    const double deadlineMs = Time::getMillisecondCounterHiRes() + 3000.0;
+
+    while (lineLen < maxLen)
     {
-        char c = 0;
-        if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+        if (Time::getMillisecondCounterHiRes() > deadlineMs)
             break;
 
-        responseText += c;
+        if (! commandSocket->waitUntilReady (true, 200))
+            continue;
+
+        char c = 0;
+        const int n = commandSocket->read (&c, 1, false);
+
+        if (n <= 0)
+            break;
+
+        if (c == '\n')
+            break;
+
+        if (c != '\r')
+            lineBuf[lineLen++] = c;
+    }
+
+    lineBuf[lineLen] = '\0';
+    responseText = String (lineBuf);
+
+    if (responseText.isEmpty())
+    {
+        std::cout << "Red Pitaya ERROR: Timed out waiting for STARTED response." << std::endl;
+        return false;
+    }
+
+    if (responseText.startsWith ("ERROR_FILE"))
+    {
+        std::cout << "Red Pitaya ERROR: Server could not open recording files." << std::endl;
+        return false;
+    }
+
+    if (! responseText.startsWith ("STARTED"))
+    {
+        std::cout << "Red Pitaya ERROR: Unexpected START response: " << responseText << std::endl;
+        return false;
     }
 
     if (responseText.startsWith ("STARTED "))
@@ -341,11 +392,6 @@ bool AcqBoardRedPitaya::startAcquisition()
     else if (responseText == "STARTED")
     {
         std::cout << "Red Pitaya: Streaming started." << std::endl;
-    }
-    else if (responseText.startsWith ("ERROR_FILE"))
-    {
-        std::cout << "Red Pitaya ERROR: Server could not open recording files." << std::endl;
-        return false;
     }
 
     // Sync current filter state to server before data starts flowing.
@@ -442,33 +488,10 @@ bool AcqBoardRedPitaya::sendRecordOffCommand()
 
 void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
 {
-    if (! deviceFound)
+    if (! ensureCommandSocketConnected())
         return;
 
-    // 1. SELF-HEALING: Trash dead sockets
-    if (commandSocket != nullptr && ! commandSocket->isConnected())
-    {
-        commandSocket->close();
-        delete commandSocket;
-        commandSocket = nullptr;
-    }
-
-    // 2. SELF-HEALING: Build a new connection if needed
-    if (commandSocket == nullptr)
-    {
-        commandSocket = new StreamingSocket();
-
-        // Connect (consider swapping to direct IP like "192.168.x.x" if mDNS lags)
-        if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
-        {
-            std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
-            delete commandSocket;
-            commandSocket = nullptr;
-            return;
-        }
-    }
-
-    // 3. FIRE AND FORGET
+    // FIRE AND FORGET
     char msg[32];
     snprintf (msg, sizeof (msg), "FREQ:%d\n", newFreq);
 
@@ -487,7 +510,9 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
 
 void AcqBoardRedPitaya::setFilterEnabled (bool enabled)
 {
-    if (commandSocket == nullptr)
+    filterEnabled = enabled;
+
+    if (! ensureCommandSocketConnected())
         return;
 
     const char* msg = enabled ? "FILTER ON\n" : "FILTER OFF\n";
@@ -498,13 +523,13 @@ void AcqBoardRedPitaya::setFilterEnabled (bool enabled)
         std::cout << "Red Pitaya: Sent command -> " << msg;
     else
         std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
-
-    filterEnabled = enabled;
 }
 
 void AcqBoardRedPitaya::setAnalogInGain (float gain)
 {
-    if (commandSocket == nullptr)
+    analogInGain = gain;
+
+    if (! ensureCommandSocketConnected())
         return;
 
     char msg[32];
@@ -516,13 +541,13 @@ void AcqBoardRedPitaya::setAnalogInGain (float gain)
         std::cout << "Red Pitaya: Sent command -> " << msg;
     else
         std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
-
-    analogInGain = gain;
 }
 
 void AcqBoardRedPitaya::setAnalogOutVoltage (float voltage)
 {
-    if (commandSocket == nullptr)
+    analogOutVoltage = voltage;
+
+    if (! ensureCommandSocketConnected())
         return;
 
     char msg[32];
@@ -534,8 +559,6 @@ void AcqBoardRedPitaya::setAnalogOutVoltage (float voltage)
         std::cout << "Red Pitaya: Sent command -> " << msg;
     else
         std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
-
-    analogOutVoltage = voltage;
 }
 
 double AcqBoardRedPitaya::setUpperBandwidth (double upperBandwidth)

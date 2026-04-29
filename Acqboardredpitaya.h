@@ -222,6 +222,9 @@ public:
     String lastRecordingPath;
     String lastRecordingCsvPath;
 
+    /** Ensures a live command socket when idle (after stop, socket is closed). */
+    bool ensureCommandSocketConnected();
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };
 
