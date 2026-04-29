@@ -562,6 +562,28 @@ void DeviceEditor::startAcquisition()
     if (canvas != nullptr)
     {
         canvas->beginAnimation();
+        // ChannelCanvas is brought forward / expanded during acquisition; without
+        // re-stacking, it can sit above the filter and analog controls and steal
+        // mouse hits even though those widgets stay "enabled" (record / sample
+        // rate often remain usable because they sit outside the canvas hit area).
+        if (sampleRateTitle != nullptr)
+            sampleRateTitle->toFront (false);
+        if (sampleRateLabel != nullptr)
+            sampleRateLabel->toFront (false);
+        if (filterTitle != nullptr)
+            filterTitle->toFront (false);
+        if (filterButton != nullptr)
+            filterButton->toFront (false);
+        if (analogInTitle != nullptr)
+            analogInTitle->toFront (false);
+        if (analogInLabel != nullptr)
+            analogInLabel->toFront (false);
+        if (analogOutTitle != nullptr)
+            analogOutTitle->toFront (false);
+        if (analogOutLabel != nullptr)
+            analogOutLabel->toFront (false);
+        if (recordButton != nullptr)
+            recordButton->toFront (false);
     }
 
     if (memoryUsage != nullptr)
