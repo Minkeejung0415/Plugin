@@ -90,7 +90,15 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         hsOptions->setBounds (xOffset + 3, 28 + i * 20, 70, 18);
     }
     */
-    // --- Sample rate (reference: title + editable value at x = 80) ---
+    //add record button (original position — panel height clips controls below ~126)
+    recordButton = std::make_unique<UtilityButton> ("RECORD");
+    recordButton->setRadius (3.0f);
+    recordButton->setBounds (xOffset + 6, 108, 65, 18);
+    recordButton->addListener (this);
+    recordButton->setClickingTogglesState (true);
+    recordButton->setTooltip ("Record streaming data");
+    addAndMakeVisible (recordButton.get());
+
     sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", "Sample Rate (Hz)");
     sampleRateTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
     sampleRateTitle->setBounds (xOffset + 80, 22, 100, 15);
@@ -105,15 +113,15 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     sampleRateLabel->setTooltip ("Set streaming frequency (100 - 2000 Hz)");
     addAndMakeVisible (sampleRateLabel.get());
 
-    // --- Filter (reference: RECORD — same left column x = 6, same button size) ---
+    // Filter + analog: original right column (x = 155); toFront() during acquisition keeps them clickable over the canvas
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    filterTitle->setBounds (xOffset + 6, 54, 70, 14);
+    filterTitle->setBounds (xOffset + 155, 22, 65, 15);
     addAndMakeVisible (filterTitle.get());
 
     filterButton = std::make_unique<UtilityButton> ("FILTER");
     filterButton->setRadius (3.0f);
-    filterButton->setBounds (xOffset + 6, 68, 65, 18);
+    filterButton->setBounds (xOffset + 155, 38, 65, 18);
     filterButton->addListener (this);
     filterButton->setClickingTogglesState (true);
     filterButton->setToggleState (false, dontSendNotification);
@@ -121,10 +129,9 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     filterButton->setTooltip ("Toggle hardware filter on/off");
     addAndMakeVisible (filterButton.get());
 
-    // --- Analog in / out (reference: sample rate — title + value at x = 80) ---
     analogInTitle = std::make_unique<Label> ("analogInTitle", "Analog In Gain");
     analogInTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogInTitle->setBounds (xOffset + 80, 90, 110, 15);
+    analogInTitle->setBounds (xOffset + 155, 62, 80, 12);
     addAndMakeVisible (analogInTitle.get());
 
     analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
@@ -132,14 +139,14 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogInLabel->setEnabled (true);
     analogInLabel->setColour (Label::backgroundColourId, Colours::black);
     analogInLabel->setColour (Label::textColourId, Colours::white);
-    analogInLabel->setBounds (xOffset + 80, 106, 60, 18);
+    analogInLabel->setBounds (xOffset + 155, 74, 65, 18);
     analogInLabel->addListener (this);
     analogInLabel->setTooltip ("Set ADC input gain (0.1 - 100.0)");
     addAndMakeVisible (analogInLabel.get());
 
     analogOutTitle = std::make_unique<Label> ("analogOutTitle", "Analog Out (V)");
     analogOutTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogOutTitle->setBounds (xOffset + 80, 126, 110, 15);
+    analogOutTitle->setBounds (xOffset + 155, 94, 80, 12);
     addAndMakeVisible (analogOutTitle.get());
 
     analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
@@ -147,19 +154,10 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogOutLabel->setEnabled (true);
     analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
     analogOutLabel->setColour (Label::textColourId, Colours::white);
-    analogOutLabel->setBounds (xOffset + 80, 142, 60, 18);
+    analogOutLabel->setBounds (xOffset + 155, 108, 65, 18);
     analogOutLabel->addListener (this);
     analogOutLabel->setTooltip ("Set DAC output voltage (0.0 - 1.8 V)");
     addAndMakeVisible (analogOutLabel.get());
-
-    // --- RECORD (reference: left column; placed after analog rows) ---
-    recordButton = std::make_unique<UtilityButton> ("RECORD");
-    recordButton->setRadius (3.0f);
-    recordButton->setBounds (xOffset + 6, 148, 65, 18);
-    recordButton->addListener (this);
-    recordButton->setClickingTogglesState (true);
-    recordButton->setTooltip ("Record streaming data");
-    addAndMakeVisible (recordButton.get());
 
     // add rescan button
     /*
@@ -558,7 +556,28 @@ void DeviceEditor::startAcquisition()
     }
 
     if (canvas != nullptr)
+    {
         canvas->beginAnimation();
+        // Right-column controls sit under the canvas z-order; bring strip to front for hit-testing.
+        if (sampleRateTitle != nullptr)
+            sampleRateTitle->toFront (false);
+        if (sampleRateLabel != nullptr)
+            sampleRateLabel->toFront (false);
+        if (filterTitle != nullptr)
+            filterTitle->toFront (false);
+        if (filterButton != nullptr)
+            filterButton->toFront (false);
+        if (analogInTitle != nullptr)
+            analogInTitle->toFront (false);
+        if (analogInLabel != nullptr)
+            analogInLabel->toFront (false);
+        if (analogOutTitle != nullptr)
+            analogOutTitle->toFront (false);
+        if (analogOutLabel != nullptr)
+            analogOutLabel->toFront (false);
+        if (recordButton != nullptr)
+            recordButton->toFront (false);
+    }
 
     if (memoryUsage != nullptr)
         memoryUsage->startAcquisition();
