@@ -282,6 +282,8 @@ bool AcqBoardRedPitaya::startAcquisition()
     if (! deviceFound)
         return false;
 
+    streamSensorNames.clear();
+
     // Always use a new TCP session for each acquisition so the board's command
     // loop never inherits stale RX data from a previous stream (same issue class
     // as sending STOP while our reader thread still shares this socket).
@@ -369,6 +371,36 @@ bool AcqBoardRedPitaya::startAcquisition()
         std::cout << std::endl;
     }
 
+    // Second line: SENSORS:0,Name;1,Name2 (snapshot at stream start)
+    {
+        String sensorsLine;
+        while (commandSocket->waitUntilReady (true, 1000))
+        {
+            char c = 0;
+            if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+                break;
+            sensorsLine += c;
+        }
+
+        if (sensorsLine.startsWith ("SENSORS:"))
+        {
+            const String body = sensorsLine.fromFirstOccurrenceOf ("SENSORS:", false, false).trim();
+            StringArray segments;
+            segments.addTokens (body, ";", "");
+
+            for (int si = 0; si < segments.size(); ++si)
+            {
+                const String seg = segments[si].trim();
+                const int comma = seg.indexOfChar (',');
+
+                if (comma > 0)
+                    streamSensorNames.add (seg.substring (comma + 1).trim());
+                else if (seg.isNotEmpty())
+                    streamSensorNames.add (seg);
+            }
+        }
+    }
+
     // Sync current filter state to server before data starts flowing.
     // The UI may have toggled the filter while acquisition was stopped, so we
     // always send the authoritative state here regardless of what the server assumes.
@@ -406,6 +438,8 @@ bool AcqBoardRedPitaya::stopAcquisition()
 
     if (buffer != nullptr)
         buffer->clear();
+
+    streamSensorNames.clear();
 
     return true;
 }
@@ -547,6 +581,43 @@ void AcqBoardRedPitaya::setAnalogOutVoltage (float voltage)
         std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
 
     analogOutVoltage = voltage;
+}
+
+String AcqBoardRedPitaya::getStreamSensorName (int index) const
+{
+    if (index < 0 || index >= streamSensorNames.size())
+        return {};
+    return streamSensorNames.getReference (index);
+}
+
+bool AcqBoardRedPitaya::sendSensorCfgAcc (int sensorIndex, int presetId)
+{
+    if (commandSocket == nullptr)
+        return false;
+
+    char msg[48];
+    snprintf (msg, sizeof (msg), "CFG %d ACC %d\n", sensorIndex, presetId);
+    return commandSocket->write (msg, (int) strlen (msg)) > 0;
+}
+
+bool AcqBoardRedPitaya::sendSensorCfgGyr (int sensorIndex, int presetId)
+{
+    if (commandSocket == nullptr)
+        return false;
+
+    char msg[48];
+    snprintf (msg, sizeof (msg), "CFG %d GYR %d\n", sensorIndex, presetId);
+    return commandSocket->write (msg, (int) strlen (msg)) > 0;
+}
+
+bool AcqBoardRedPitaya::sendSensorCfgSrate (int sensorIndex, int targetHz)
+{
+    if (commandSocket == nullptr)
+        return false;
+
+    char msg[48];
+    snprintf (msg, sizeof (msg), "CFG %d SRATE %d\n", sensorIndex, targetHz);
+    return commandSocket->write (msg, (int) strlen (msg)) > 0;
 }
 
 double AcqBoardRedPitaya::setUpperBandwidth (double upperBandwidth)

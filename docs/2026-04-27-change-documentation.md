@@ -22,7 +22,10 @@ This document describes the **current** behavior after the acquisition, streamin
 | **Recordings** | Streamed sessions still write **`.bin`** and **`.csv`** under `/root/Measurements/` as before. |
 | **TCP RX after stream** | After `run_stream()` returns, **`drain_client_rx()`** clears leftover bytes in the client socket receive buffer so the next command loop `read()` does not see tail data from binary packets. |
 | **Frame sequence** | First binary frame of each session uses sequence **`0`** in the 22-byte header (`ns` starts at `-1`, increments once per frame before acquire/send). |
-| **Listen socket** | **`SO_REUSEADDR`** (existing) and **`SO_REUSEPORT`** when the OS defines it, to reduce bind issues on rapid restart. |
+| **Hardware tick** | Global stream interval uses **`g_stream_hw_hz`** (default `DESIRED_SAMPLE_RATE_HZ`). **`FREQ:n\n`** (1–2000) updates it (idle + during stream). |
+| **Per-sensor rate** | **`CFG i SRATE h\n`** sets desired effective Hz for sensor index `i` (capped to HW rate). **`run_stream`** **holds** prior sample when decimating (integer `hw/target` ratio). |
+| **Sensor snapshot** | Immediately after **`STARTED …`**, server sends **`SENSORS:0,Name;1,Name2\n`** (active sensors at stream start). |
+| **Accel/gyro presets** | **`CFG i ACC p\n`** / **`CFG i GYR p\n`** stored per sensor (`cfg_acc_id`, `cfg_gyr_id`); logged (register mapping can be added later). |
 
 ### Open Ephys plugin (Red Pitaya board)
 
@@ -34,21 +37,20 @@ This document describes the **current** behavior after the acquisition, streamin
 | **Variable frame size** | **`run()`** reads **`bytes_per_frame`** from byte **offset 4** of each 22-byte header and reads exactly that many payload bytes, with byte sliding resync if the magic bytes (`dtype` at offset 8–9) are wrong. Maps up to the configured channel count; pads with zeros if the frame is short. |
 | **MSVC** | Nested lambdas in `run()` use explicit capture / naming (`socketReadFully`, `parseHeaderBytesPerFrame` with `[=]`) so Visual Studio builds cleanly. |
 
-### Device editor (UI layout + acquisition)
+| **Sensor list** | After **`STARTED`**, reads **`SENSORS:`** line into **`streamSensorNames`**; cleared on **`stopAcquisition()`**. |
+| **CFG send** | **`sendSensorCfgAcc/Gyr/Srate`** send **`CFG …\n`** when the command socket is open. |
 
-The acquisition board strip has a **fixed height**; controls must stay within roughly **y &lt; ~126** in the narrow strip or they are **clipped**.
+### Device editor (Red Pitaya wide layout)
 
-| Control | Position (relative to `xOffset`; `xOffset` is 0, or memory-monitor width on ONI) |
-|---------|-------------------------------------------------------------------------------------|
-| **Sample rate** | Title `(80, 22)`, editable value **`1000`** `(80, 38)` — this is the streaming **frequency** (Hz), not a separate combo. |
-| **FILTER** | Title `(155, 22)`, button **`FILTER`** `(155, 38)`. |
-| **Analog In Gain** | Title `(155, 62)`, value `(155, 74)`. |
-| **Analog Out (V)** | Title `(155, 94)`, value `(155, 108)`. |
-| **RECORD** | **`(6, 108, 65×18)`** — must stay at this **y** so it stays visible (moving it lower hid the button). |
+- Editor width **560** for Red Pitaya only.
+- **Left column (~x 6):** sample rate, filter, compact analog in/out, **RECORD** at bottom (y 118).
+- **Middle (~x 200):** three **ComboBox** rows — Accel preset, Gyro preset, Sensor Hz (choices derived from HW rate from the sample-rate field).
+- **Right (~x 430):** **Sensor** combo filled from **`SENSORS:`** after acquisition starts (freeze **A**).
+- **`toFront()`** includes the new combos during animation.
 
-**During acquisition:** after `ChannelCanvas::beginAnimation()`, **`startAcquisition()`** calls **`toFront(false)`** on the sample-rate, filter, analog, and RECORD widgets so they remain **clickable** even though the canvas overlaps the right column (`x ≈ 155`).
+Other board types keep the original **340** width and **x=155** column for filter/analog.
 
-**Note:** A trial layout that moved filter/analog/RECORD into one tall left column (**“Option A”**) was **reverted** because **RECORD** at `y = 148` fell below the visible editor area.
+**Note:** Option A full-stack-only layout was reverted earlier due to **RECORD** clipping at fixed panel height.
 
 ---
 
