@@ -670,13 +670,13 @@ void AcqBoardRedPitaya::run()
         return;
 
     constexpr int headerSize = 22;
-    constexpr int MAX_PACKET_SIZE = 1024;
+    constexpr int maxPacketSize = 1024;
 
-    uint8_t packet[MAX_PACKET_SIZE];
+    uint8_t packet[maxPacketSize];
 
     // Non-blocking read helper: polls in 100ms slices so threadShouldExit() is
     // checked regularly and stopAcquisition()'s close() is noticed promptly.
-    auto readFully = [&] (void* buf, int size) -> bool
+    auto socketReadFully = [&] (void* buf, int size) -> bool
     {
         int done = 0;
         char* ptr = static_cast<char*> (buf);
@@ -695,7 +695,8 @@ void AcqBoardRedPitaya::run()
         return ! threadShouldExit();
     };
 
-    auto parseHeaderBytesPerFrame = [] (const uint8_t* hdr, int32_t& outBytes) -> bool
+    // MSVC: nested lambda must capture constexpr locals explicitly (no implicit capture in []).
+    auto parseHeaderBytesPerFrame = [=] (const uint8_t* hdr, int32_t& outBytes) -> bool
     {
         if (hdr[8] != 0x03 || hdr[9] != 0x00)
             return false;
@@ -703,7 +704,7 @@ void AcqBoardRedPitaya::run()
         memcpy (&outBytes, hdr + 4, sizeof (int32_t));
 
         // int16 samples per frame; keep in sync with Red Pitaya write_stream_header
-        if (outBytes < 2 || outBytes > (MAX_PACKET_SIZE - headerSize) || (outBytes & 1) != 0)
+        if (outBytes < 2 || outBytes > (maxPacketSize - headerSize) || (outBytes & 1) != 0)
             return false;
 
         return true;
@@ -713,7 +714,7 @@ void AcqBoardRedPitaya::run()
     // slide one byte and retry (same framing idea as the original sync loop).
     auto readOneFrame = [&] (int32_t& outPayloadBytes) -> bool
     {
-        if (! readFully (packet, headerSize))
+        if (! socketReadFully (packet, headerSize))
             return false;
 
         constexpr int maxResync = 65536;
@@ -721,11 +722,11 @@ void AcqBoardRedPitaya::run()
         for (int guard = 0; guard < maxResync && ! threadShouldExit(); ++guard)
         {
             if (parseHeaderBytesPerFrame (packet, outPayloadBytes))
-                return readFully (packet + headerSize, outPayloadBytes);
+                return socketReadFully (packet + headerSize, (int) outPayloadBytes);
 
             memmove (packet, packet + 1, (size_t) headerSize - 1);
 
-            if (! readFully (packet + headerSize - 1, 1))
+            if (! socketReadFully (packet + headerSize - 1, 1))
                 return false;
         }
 
