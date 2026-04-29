@@ -167,6 +167,16 @@ public:
     /** Sets analog output voltage */
     void setAnalogOutVoltage (float voltage) override;
 
+    /** Sensors active at last successful stream start (from SENSORS: line). */
+    int getStreamSensorCount() const { return streamSensorNames.size(); }
+
+    String getStreamSensorName (int index) const;
+
+    /** Send CFG lines (during acquisition when socket is open). */
+    bool sendSensorCfgAcc (int sensorIndex, int presetId);
+    bool sendSensorCfgGyr (int sensorIndex, int presetId);
+    bool sendSensorCfgSrate (int sensorIndex, int targetHz);
+
     /** Fills data buffer */
     void run();
 
@@ -221,6 +231,9 @@ public:
 
     String lastRecordingPath;
     String lastRecordingCsvPath;
+
+    /** Populated after STARTED + SENSORS: snapshot from board. */
+    Array<String> streamSensorNames;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };

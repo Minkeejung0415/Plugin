@@ -45,6 +45,11 @@
 #define ICM20948_AK09916_CNTL2 0x31
 
 #define BUF_SAMPLES 1000 // Flushes to SD card every 1,000 samples
+#define MAX_STREAM_SENSORS 6
+
+/* Hardware tick rate for streaming (Hz); FREQ: command updates this before START. */
+static volatile int g_stream_hw_hz = DESIRED_SAMPLE_RATE_HZ;
+
 // --- Discovery Logic Structures ---
 typedef struct {
     char name[16];
@@ -57,6 +62,10 @@ typedef struct {
     bool is_spi; // NEW: Flag to tell run_stream which protocol to use
     int16_t gyro_bias[3];
     bool mag_is_fresh;
+    /* Per-sensor UI config (CFG lines from Open Ephys); applied during stream */
+    int cfg_acc_id;
+    int cfg_gyr_id;
+    int cfg_target_hz; /* desired effective sample rate for this sensor (<= hw rate) */
 } SensorInstance;
 
 typedef struct {
@@ -578,6 +587,127 @@ static void acquire_sensor_samples(
     read_analog_waveform_channels((int16_t*)(((uint8_t*)frame_buffer) + current_byte_offset));
 }
 
+#define HOLD_SLOTS 6
+#define HOLD_INT16 32
+static int16_t g_sensor_hold[HOLD_SLOTS][HOLD_INT16];
+static int g_decim_counter[HOLD_SLOTS];
+static int g_decim_interval[HOLD_SLOTS];
+
+static void init_sensor_decimation(HardwareContext *ctx, int hw_hz)
+{
+    for (int i = 0; i < HOLD_SLOTS; i++) {
+        g_decim_counter[i] = 0;
+        g_decim_interval[i] = 1;
+        memset(g_sensor_hold[i], 0, sizeof(g_sensor_hold[i]));
+    }
+    for (int i = 0; i < ctx->active_sensor_count && i < HOLD_SLOTS; i++) {
+        SensorInstance *s = &ctx->sensors[i];
+        int t = s->cfg_target_hz;
+        if (t < 1) t = 1;
+        if (t > hw_hz) t = hw_hz;
+        int inv = (t >= hw_hz) ? 1 : (hw_hz + t - 1) / t;
+        if (inv < 1) inv = 1;
+        g_decim_interval[i] = inv;
+        g_decim_counter[i] = g_decim_interval[i];
+    }
+}
+
+static void acquire_sensor_samples_decimated(
+    HardwareContext *ctx,
+    bool with_fusion,
+    int bytes_per_frame,
+    int16_t *frame_buffer,
+    long long *vqf_total_ns,
+    long long *vqf_max_ns,
+    unsigned long long *vqf_call_count
+) {
+    memset(frame_buffer, 0, bytes_per_frame);
+    int current_byte_offset = 0;
+
+    for (int i = 0; i < ctx->active_sensor_count; i++) {
+        SensorInstance *s = &ctx->sensors[i];
+        int slot_ints = s->num_channels + 4;
+        int slot_bytes = slot_ints * 2;
+        int16_t *channel_out = (int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset);
+
+        if (i < HOLD_SLOTS) {
+            g_decim_counter[i]++;
+            if (g_decim_counter[i] >= g_decim_interval[i]) {
+                g_decim_counter[i] = 0;
+                read_sensor_raw_channels(s, channel_out);
+
+                if (with_fusion) {
+                    int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
+                    int16_t raw_gyr[3];
+                    const int16_t *raw_mag = NULL;
+                    bool mag_is_fresh = false;
+
+                    if (strcmp(s->name, "BNO055") == 0) {
+                        get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                        raw_mag = &channel_out[3];
+                        mag_is_fresh = true;
+                    } else {
+                        get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                        if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+                            raw_mag = &channel_out[6];
+                            mag_is_fresh = true;
+                        } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                            raw_mag = &channel_out[6];
+                            mag_is_fresh = s->mag_is_fresh;
+                        }
+                    }
+
+                    raw_gyr[0] -= s->gyro_bias[0];
+                    raw_gyr[1] -= s->gyro_bias[1];
+                    raw_gyr[2] -= s->gyro_bias[2];
+
+                    struct timespec vqf_start;
+                    struct timespec vqf_end;
+                    clock_gettime(CLOCK_MONOTONIC, &vqf_start);
+                    fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
+                    clock_gettime(CLOCK_MONOTONIC, &vqf_end);
+
+                    long long vqf_elapsed_ns = timespec_diff_ns(&vqf_start, &vqf_end);
+                    *vqf_total_ns += vqf_elapsed_ns;
+                    (*vqf_call_count)++;
+                    if (vqf_elapsed_ns > *vqf_max_ns) {
+                        *vqf_max_ns = vqf_elapsed_ns;
+                    }
+                }
+                if (slot_ints <= HOLD_INT16)
+                    memcpy(g_sensor_hold[i], channel_out, (size_t) slot_bytes);
+            } else {
+                if (slot_ints <= HOLD_INT16)
+                    memcpy(channel_out, g_sensor_hold[i], (size_t) slot_bytes);
+            }
+        } else {
+            read_sensor_raw_channels(s, channel_out);
+            if (with_fusion) {
+                int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
+                int16_t raw_gyr[3];
+                const int16_t *raw_mag = NULL;
+                bool mag_is_fresh = false;
+                get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+                    raw_mag = &channel_out[6];
+                    mag_is_fresh = true;
+                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                    raw_mag = &channel_out[6];
+                    mag_is_fresh = s->mag_is_fresh;
+                }
+                raw_gyr[0] -= s->gyro_bias[0];
+                raw_gyr[1] -= s->gyro_bias[1];
+                raw_gyr[2] -= s->gyro_bias[2];
+                fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
+            }
+        }
+
+        current_byte_offset += slot_bytes;
+    }
+
+    read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
+}
+
 static void maybe_report_vqf_stats(
     bool with_fusion,
     int sample_number,
@@ -608,7 +738,6 @@ static int process_stream_commands(
 ) {
     char cmd[256];
     int n = 0;
-    (void)ctx;
 
     while ((n = recv(client_fd, cmd, sizeof(cmd) - 1, MSG_DONTWAIT)) > 0) {
         cmd[n] = '\0';
@@ -652,7 +781,34 @@ static int process_stream_commands(
 
         if (strstr(cmd, "FREQ:")) {
             int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
-            printf("Requested sample frequency: %d Hz.\n", frequency_hz);
+            if (frequency_hz < 1) frequency_hz = 1;
+            if (frequency_hz > 2000) frequency_hz = 2000;
+            g_stream_hw_hz = frequency_hz;
+            printf("Hardware stream tick rate set to %d Hz (per-sensor SRATE decimates from this).\n", g_stream_hw_hz);
+        }
+
+        if (strstr(cmd, "CFG ")) {
+            int si = -1, val = -1;
+            if (sscanf(cmd, "CFG %d ACC %d", &si, &val) == 2) {
+                if (si >= 0 && si < ctx->active_sensor_count && val >= 0) {
+                    ctx->sensors[si].cfg_acc_id = val;
+                    printf("CFG sensor %d ACC preset %d\n", si, val);
+                }
+            } else if (sscanf(cmd, "CFG %d GYR %d", &si, &val) == 2) {
+                if (si >= 0 && si < ctx->active_sensor_count && val >= 0) {
+                    ctx->sensors[si].cfg_gyr_id = val;
+                    printf("CFG sensor %d GYR preset %d\n", si, val);
+                }
+            } else if (sscanf(cmd, "CFG %d SRATE %d", &si, &val) == 2) {
+                if (si >= 0 && si < ctx->active_sensor_count && val >= 1) {
+                    ctx->sensors[si].cfg_target_hz = val;
+                    if (ctx->sensors[si].cfg_target_hz > g_stream_hw_hz)
+                        ctx->sensors[si].cfg_target_hz = g_stream_hw_hz;
+                    printf("CFG sensor %d SRATE target %d Hz (hold/decimate vs hw %d Hz)\n",
+                           si, ctx->sensors[si].cfg_target_hz, g_stream_hw_hz);
+                    init_sensor_decimation(ctx, g_stream_hw_hz);
+                }
+            }
         }
 
         if (strstr(cmd, "RECORD OFF")) {
@@ -778,30 +934,30 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
         usleep(5000);  // 5ms Wake delay
     }
     else if (id == 0x71) { // MPU9250
-    strcpy(s->name, "MPU9250");
-    s->split_read = false; 
-    s->num_channels = 9;   
-    s->data_reg_start = 0x3B;
+        strcpy(s->name, "MPU9250");
+        s->split_read = false;
+        s->num_channels = 9;
+        s->data_reg_start = 0x3B;
 
-    if (is_spi) {
-        axi_spi_write(map, 0x6B, 0x01); // Wake up Accel/Gyro
-        usleep(5000);
-        printf("  -> MPU9250 (SPI) initialized (6-axis only for now).\n");
-    } else {
-        // --- I2C PATH ---
-        axi_iic_write_byte(map, addr, 0x6B, 0x01); // Wake
-        usleep(5000);
-        
-        // Disable I2C Master and Enable Bypass to see the Magnetometer (0x0C)
-        axi_iic_write_byte(map, addr, 0x6A, 0x00); 
-        axi_iic_write_byte(map, addr, 0x37, 0x02); 
-        usleep(5000);
+        if (is_spi) {
+            axi_spi_write(map, 0x6B, 0x01); // Wake up Accel/Gyro
+            usleep(5000);
+            printf("  -> MPU9250 (SPI) initialized (6-axis only for now).\n");
+        } else {
+            // --- I2C PATH ---
+            axi_iic_write_byte(map, addr, 0x6B, 0x01); // Wake
+            usleep(5000);
 
-        // This call is safe here because we are actually on an I2C bus
-        axi_iic_write_byte(map, 0x0C, 0x0A, 0x16); 
-        printf("  -> MPU9250 (I2C) initialized (9-axis enabled).\n");
+            // Disable I2C Master and Enable Bypass to see the Magnetometer (0x0C)
+            axi_iic_write_byte(map, addr, 0x6A, 0x00);
+            axi_iic_write_byte(map, addr, 0x37, 0x02);
+            usleep(5000);
+
+            // This call is safe here because we are actually on an I2C bus
+            axi_iic_write_byte(map, 0x0C, 0x0A, 0x16);
+            printf("  -> MPU9250 (I2C) initialized (9-axis enabled).\n");
+        }
     }
-}
     else if (id == 0xEA) { // ICM20948
         strcpy(s->name, "ICM20948");
         s->split_read = false;
@@ -830,6 +986,9 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
     }
 
     ctx->total_channels += s->num_channels;
+    s->cfg_acc_id = 0;
+    s->cfg_gyr_id = 0;
+    s->cfg_target_hz = DESIRED_SAMPLE_RATE_HZ;
     ctx->active_sensor_count++;
 }
 
@@ -980,8 +1139,37 @@ static void drain_client_rx(int fd) {
     }
 }
 
+/** One line after STARTED: active sensors at stream start (indices 0..n-1). */
+static void write_sensors_snapshot_line(int client_fd, HardwareContext *ctx) {
+    char line[512];
+    int pos = snprintf(line, sizeof(line), "SENSORS:");
+    if (ctx->active_sensor_count <= 0) {
+        snprintf(line + pos, sizeof(line) - (size_t) pos, "\n");
+        write(client_fd, line, strlen(line));
+        return;
+    }
+    for (int i = 0; i < ctx->active_sensor_count; i++) {
+        char safe[20];
+        strncpy(safe, ctx->sensors[i].name, sizeof(safe) - 1);
+        safe[sizeof(safe) - 1] = '\0';
+        for (char *p = safe; *p; p++) {
+            if (*p == ',' || *p == ';' || *p == '\n' || *p == '\r')
+                *p = '_';
+        }
+        pos += snprintf(line + pos, sizeof(line) - (size_t) pos, "%d,%s%s",
+                        i, safe, (i + 1 < ctx->active_sensor_count) ? ";" : "");
+        if (pos >= (int) sizeof(line) - 4)
+            break;
+    }
+    snprintf(line + pos, sizeof(line) - (size_t) pos, "\n");
+    write(client_fd, line, strlen(line));
+}
+
 static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
-    uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
+    int hw_hz = g_stream_hw_hz;
+    if (hw_hz < 1) hw_hz = 1;
+    if (hw_hz > 2000) hw_hz = 2000;
+    uint32_t ticks_per_sample = (uint32_t)(CTR_CLK_RATE / hw_hz);
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     const int max_bytes_per_frame = max_total_channels * 2;
 
@@ -1013,6 +1201,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
 
     *ctx->gpio_reset = 1; usleep(1); *ctx->gpio_reset = 0;
     uint32_t last_counter = *ctx->gpio_counter;
+    init_sensor_decimation(ctx, hw_hz);
 
     while (1) {
         uint32_t now = *ctx->gpio_counter;
@@ -1043,7 +1232,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
             }
         }
         ns++;
-        acquire_sensor_samples(ctx, with_fusion, bytes_per_frame, frame_buffer,
+        acquire_sensor_samples_decimated(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
         maybe_report_vqf_stats(with_fusion, ns, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
 
@@ -1206,7 +1395,10 @@ int main(void) {
             }
             else if (strstr(buffer, "FREQ:")) {
                 int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
-                printf("Requested sample frequency: %d Hz.\n", frequency_hz);
+                if (frequency_hz < 1) frequency_hz = 1;
+                if (frequency_hz > 2000) frequency_hz = 2000;
+                g_stream_hw_hz = frequency_hz;
+                printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
             }
             else if (strstr(buffer, "START")) {
                 system("rw");
@@ -1237,9 +1429,15 @@ int main(void) {
 
                 write_csv_header(csv_fp, &ctx, true);
 
+                for (int si = 0; si < ctx.active_sensor_count; si++) {
+                    if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
+                        ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
+                }
+
                 char started_msg[320];
                 snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
                 write(client_fd, started_msg, strlen(started_msg));
+                write_sensors_snapshot_line(client_fd, &ctx);
                 if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
                     break;
                 }
