@@ -21,6 +21,7 @@ new changes: save recordings to .bin and .csv
 - Added filter/VQF toggling during acquisition. 
 - Added two analog waveform input channels.
 - Added UI controls for recording, filtering, sample rate, analog input gain, and analog output voltage.
+- **Acquisition start validation (Red Pitaya plugin):** `startAcquisition()` now requires a `STARTED` (or `STARTED …`) line from the board before starting the reader thread. Empty, timed-out, or unexpected replies no longer return success; the command socket is closed so the next start gets a clean connection. This addresses the issue where acquisition sometimes needed a stop and second start to work.
 
 ![[Screenshot 2026-04-27 142836 1.png]]
 
@@ -64,4 +65,3 @@ AOUT:<value>
 
 - test analog input and output with ADC 
 - fix the Makefile issue where when the new code file uses the vqf.c or sensor_fusion.c it has to be manually implemented in the makefile and not automatically dealt with
-- the double start issue for opne ephys it requires me to start and stop and restart the acquisition for it to start the acquisition properly

@@ -317,15 +317,44 @@ bool AcqBoardRedPitaya::startAcquisition()
         responseText += c;
     }
 
-    if (responseText.startsWith ("STARTED "))
+    auto failStartAndResetSocket = [this]()
+    {
+        if (commandSocket != nullptr)
+        {
+            commandSocket->close();
+            delete commandSocket;
+            commandSocket = nullptr;
+        }
+    };
+
+    if (responseText.startsWith ("ERROR_FILE"))
+    {
+        std::cout << "Red Pitaya ERROR: Server could not open recording files." << std::endl;
+        failStartAndResetSocket();
+        return false;
+    }
+
+    if (! (responseText == "STARTED" || responseText.startsWith ("STARTED ")))
+    {
+        std::cout << "Red Pitaya ERROR: Expected STARTED from board, got: "
+                  << (responseText.isEmpty() ? String ("(empty / timeout)") : responseText) << std::endl;
+        failStartAndResetSocket();
+        return false;
+    }
+
+    if (responseText == "STARTED")
+    {
+        std::cout << "Red Pitaya: Streaming started." << std::endl;
+    }
+    else
     {
         const String pathText = responseText.fromFirstOccurrenceOf ("STARTED ", false, false).trim();
 
         if (pathText.contains ("BIN:") && pathText.contains (" CSV:"))
         {
             lastRecordingPath = pathText.fromFirstOccurrenceOf ("BIN:", false, false)
-                                      .upToFirstOccurrenceOf (" CSV:", false, false)
-                                      .trim();
+                                  .upToFirstOccurrenceOf (" CSV:", false, false)
+                                  .trim();
             lastRecordingCsvPath = pathText.fromFirstOccurrenceOf (" CSV:", false, false).trim();
         }
         else
@@ -337,15 +366,6 @@ bool AcqBoardRedPitaya::startAcquisition()
         if (lastRecordingCsvPath.isNotEmpty())
             std::cout << " and " << lastRecordingCsvPath;
         std::cout << std::endl;
-    }
-    else if (responseText == "STARTED")
-    {
-        std::cout << "Red Pitaya: Streaming started." << std::endl;
-    }
-    else if (responseText.startsWith ("ERROR_FILE"))
-    {
-        std::cout << "Red Pitaya ERROR: Server could not open recording files." << std::endl;
-        return false;
     }
 
     // Sync current filter state to server before data starts flowing.
