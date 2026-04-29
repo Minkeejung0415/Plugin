@@ -24,7 +24,7 @@
 #include "DeviceEditor.h"
 
 #include "devices/AcquisitionBoard.h"
-#include "Acqboardredpitaya.h"
+#include "devices/redpitaya/AcqBoardRedPitaya.h"
 #include "devices/oni/AcqBoardONI.h"
 
 #include "UI/ChannelCanvas.h"
@@ -453,8 +453,6 @@ void DeviceEditor::repopulateSensorRateComboForHwHz (int hwHz)
 
     const int toSelect = jlimit (1, sensorCfgRateCombo->getNumItems(), prevChoiceId > 0 ? prevChoiceId : 1);
     sensorCfgRateCombo->setSelectedId (toSelect, dontSendNotification);
-
-    (void) prevSensor;
 }
 
 void DeviceEditor::refreshRedPitayaSensorCombosFromBoard()

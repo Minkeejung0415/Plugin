@@ -6,7 +6,7 @@
     ------------------------------------------------------------------
 */
 
-#include "AcqBoardRedPitaya.h"
+#include "Acqboardredpitaya.h"
 #include <cstdint>
 #include <cstring>
 
