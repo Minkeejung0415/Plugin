@@ -14,6 +14,7 @@
 
 ### `RedPitaya_justin.c`
 new changes: save recordings to .bin and .csv
+- After each streaming session, the server **drains the TCP receive buffer** on the client socket so leftover binary tail bytes are not read as the next command by the outer `read()` loop.
 
 # Open Ephys Plugin Changes
 
@@ -22,6 +23,7 @@ new changes: save recordings to .bin and .csv
 - Added two analog waveform input channels.
 - Added UI controls for recording, filtering, sample rate, analog input gain, and analog output voltage.
 - **Acquisition start validation (Red Pitaya plugin):** `startAcquisition()` now requires a `STARTED` (or `STARTED …`) line from the board before starting the reader thread. Empty, timed-out, or unexpected replies no longer return success; the command socket is closed so the next start gets a clean connection. This addresses the issue where acquisition sometimes needed a stop and second start to work.
+- **Stop / restart (stale stream):** `stopAcquisition()` no longer sends `STOP\n` on the same socket while `run()` may still be parsing binary frames (that could corrupt framing and leave garbage for the next session). Teardown is **close socket → join thread → delete**. Each `startAcquisition()` opens a **new TCP connection** before `START\n` so the board always starts from a clean session.
 
 ![[Screenshot 2026-04-27 142836 1.png]]
 
