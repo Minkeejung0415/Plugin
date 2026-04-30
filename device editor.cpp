@@ -84,9 +84,10 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     }
 
     const bool isRedPitaya = (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya);
-    const int leftCol = xOffset + 6;
-    const int midCol = isRedPitaya ? (xOffset + 200) : (xOffset + 155);
-    const int rightCol = isRedPitaya ? (xOffset + 430) : (xOffset + 155);
+    const int leftCol  = xOffset + 6;
+    const int col2     = xOffset + 145;
+    const int midCol   = isRedPitaya ? (xOffset + 285) : (xOffset + 155);
+    const int rightCol = isRedPitaya ? (xOffset + 420) : (xOffset + 155);
 
     // add headstage-specific controls (currently just a toggle button)
     /*
@@ -101,7 +102,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     //add record button
     recordButton = std::make_unique<UtilityButton> ("RECORD");
     recordButton->setRadius (3.0f);
-    recordButton->setBounds (isRedPitaya ? leftCol : (xOffset + 6), isRedPitaya ? 118 : 108, 65, 18);
+    recordButton->setBounds (isRedPitaya ? leftCol : (xOffset + 6), isRedPitaya ? 100 : 108, isRedPitaya ? 120 : 65, 18);
     recordButton->addListener (this);
     recordButton->setClickingTogglesState (true);
     recordButton->setTooltip ("Record streaming data");
@@ -125,12 +126,12 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    filterTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 52 : 22, 65, 12);
+    filterTitle->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 18 : 22, 65, 12);
     addAndMakeVisible (filterTitle.get());
 
     filterButton = std::make_unique<UtilityButton> ("FILTER");
     filterButton->setRadius (3.0f);
-    filterButton->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 64 : 38, 65, 18);
+    filterButton->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 30 : 38, isRedPitaya ? 120 : 65, 18);
     filterButton->addListener (this);
     filterButton->setClickingTogglesState (true);
     filterButton->setToggleState (false, dontSendNotification);
@@ -140,7 +141,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     analogInTitle = std::make_unique<Label> ("analogInTitle", isRedPitaya ? "Ain" : "Analog In Gain");
     analogInTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogInTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 86 : 62, 80, 12);
+    analogInTitle->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 58 : 62, 80, 12);
     addAndMakeVisible (analogInTitle.get());
 
     analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
@@ -148,14 +149,14 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogInLabel->setEnabled (true);
     analogInLabel->setColour (Label::backgroundColourId, Colours::black);
     analogInLabel->setColour (Label::textColourId, Colours::white);
-    analogInLabel->setBounds (isRedPitaya ? (leftCol + 38) : (xOffset + 155), isRedPitaya ? 84 : 74, 52, 18);
+    analogInLabel->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 72 : 74, 52, 18);
     analogInLabel->addListener (this);
     analogInLabel->setTooltip ("Set ADC input gain (0.1 - 100.0)");
     addAndMakeVisible (analogInLabel.get());
 
     analogOutTitle = std::make_unique<Label> ("analogOutTitle", isRedPitaya ? "Aout" : "Analog Out (V)");
     analogOutTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogOutTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 104 : 94, 80, 12);
+    analogOutTitle->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 94 : 94, 80, 12);
     addAndMakeVisible (analogOutTitle.get());
 
     analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
@@ -163,7 +164,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogOutLabel->setEnabled (true);
     analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
     analogOutLabel->setColour (Label::textColourId, Colours::white);
-    analogOutLabel->setBounds (isRedPitaya ? (leftCol + 38) : (xOffset + 155), isRedPitaya ? 102 : 108, 52, 18);
+    analogOutLabel->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 108 : 108, 52, 18);
     analogOutLabel->addListener (this);
     analogOutLabel->setTooltip ("Set DAC output voltage (0.0 - 1.8 V)");
     addAndMakeVisible (analogOutLabel.get());
@@ -176,10 +177,12 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (sensorCfgAccelTitle.get());
 
         sensorCfgAccelCombo = std::make_unique<ComboBox> ("sensorCfgAccel");
-        sensorCfgAccelCombo->setBounds (midCol, 30, 115, 20);
+        sensorCfgAccelCombo->setBounds (midCol, 30, 120, 20);
         sensorCfgAccelCombo->addListener (this);
-        for (int i = 0; i < 4; ++i)
-            sensorCfgAccelCombo->addItem ("Preset " + String (i), i + 1);
+        sensorCfgAccelCombo->addItem ("\xc2\xb12 g",  1);
+        sensorCfgAccelCombo->addItem ("\xc2\xb14 g",  2);
+        sensorCfgAccelCombo->addItem ("\xc2\xb18 g",  3);
+        sensorCfgAccelCombo->addItem ("\xc2\xb116 g", 4);
         sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorCfgAccelCombo.get());
 
@@ -189,10 +192,12 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (sensorCfgGyroTitle.get());
 
         sensorCfgGyroCombo = std::make_unique<ComboBox> ("sensorCfgGyro");
-        sensorCfgGyroCombo->setBounds (midCol, 66, 115, 20);
+        sensorCfgGyroCombo->setBounds (midCol, 66, 120, 20);
         sensorCfgGyroCombo->addListener (this);
-        for (int i = 0; i < 4; ++i)
-            sensorCfgGyroCombo->addItem ("Preset " + String (i), i + 1);
+        sensorCfgGyroCombo->addItem ("\xc2\xb1250 \xc2\xb0/s",  1);
+        sensorCfgGyroCombo->addItem ("\xc2\xb1500 \xc2\xb0/s",  2);
+        sensorCfgGyroCombo->addItem ("\xc2\xb11000 \xc2\xb0/s", 3);
+        sensorCfgGyroCombo->addItem ("\xc2\xb12000 \xc2\xb0/s", 4);
         sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorCfgGyroCombo.get());
 
@@ -202,7 +207,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (sensorCfgRateTitle.get());
 
         sensorCfgRateCombo = std::make_unique<ComboBox> ("sensorCfgRate");
-        sensorCfgRateCombo->setBounds (midCol, 102, 115, 20);
+        sensorCfgRateCombo->setBounds (midCol, 102, 120, 20);
         sensorCfgRateCombo->addListener (this);
         addAndMakeVisible (sensorCfgRateCombo.get());
 
@@ -212,7 +217,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (sensorSelectTitle.get());
 
         sensorSelectCombo = std::make_unique<ComboBox> ("sensorSelect");
-        sensorSelectCombo->setBounds (rightCol, 30, 115, 20);
+        sensorSelectCombo->setBounds (rightCol, 30, 120, 20);
         sensorSelectCombo->addListener (this);
         sensorSelectCombo->addItem ("(start acquisition)", 1);
         sensorSelectCombo->setSelectedId (1, dontSendNotification);
@@ -413,6 +418,20 @@ void DeviceEditor::updateSettings()
     if (canvas != nullptr)
     {
         canvas->update();
+    }
+}
+
+void DeviceEditor::paint (Graphics& g)
+{
+    VisualizerEditor::paint (g);
+
+    if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+    {
+        g.setColour (findColour (ThemeColours::defaultText).withAlpha (0.25f));
+        const int divTop = 12;
+        const int divBottom = getHeight() - 8;
+        for (int divX : { 135, 275, 410 })
+            g.fillRect (divX, divTop, 1, divBottom - divTop);
     }
 }
 

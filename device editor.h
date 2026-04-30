@@ -101,6 +101,8 @@ public:
 
     void labelTextChanged (Label* labelThatHasChanged) override;
 
+    void paint (Graphics& g) override;
+
     void refreshRedPitayaSensorCombosFromBoard();
     void repopulateSensorRateComboForHwHz (int hwHz);
     int getSelectedStreamSensorIndex() const;
