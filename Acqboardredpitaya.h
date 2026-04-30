@@ -167,14 +167,15 @@ public:
     /** Sets analog output voltage */
     void setAnalogOutVoltage (float voltage) override;
 
-    /** Sets accelerometer full-scale preset (0=±2g, 1=±4g, 2=±8g, 3=±16g) */
-    void setAccelPreset (int preset) override;
+    /** Sensors active at last successful stream start (from SENSORS: line). */
+    int getStreamSensorCount() const { return streamSensorNames.size(); }
 
-    /** Sets gyroscope full-scale preset (0=±250, 1=±500, 2=±1000, 3=±2000 °/s) */
-    void setGyroPreset (int preset) override;
+    String getStreamSensorName (int index) const;
 
-    /** Sets IMU polling rate in Hz; 0 = match hardware sample rate */
-    void setSensorHz (int hz) override;
+    /** Send CFG lines (during acquisition when socket is open). */
+    bool sendSensorCfgAcc (int sensorIndex, int presetId);
+    bool sendSensorCfgGyr (int sensorIndex, int presetId);
+    bool sendSensorCfgSrate (int sensorIndex, int targetHz);
 
     /** Fills data buffer */
     void run();
@@ -225,14 +226,14 @@ public:
     bool filterEnabled = false;
     float analogInGain = 1.0f;
     float analogOutVoltage = 0.0f;
-    int accelPreset = 0;
-    int gyroPreset = 0;
-    int sensorHz = 0;
 
     StreamingSocket* commandSocket = nullptr;
 
     String lastRecordingPath;
     String lastRecordingCsvPath;
+
+    /** Populated after STARTED + SENSORS: snapshot from board. */
+    Array<String> streamSensorNames;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };

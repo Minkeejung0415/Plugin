@@ -6,7 +6,8 @@
     ------------------------------------------------------------------
 */
 
-#include "AcqBoardRedPitaya.h"
+#include "Acqboardredpitaya.h"
+#include <cstdint>
 #include <cstring>
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
@@ -281,23 +282,25 @@ bool AcqBoardRedPitaya::startAcquisition()
     if (! deviceFound)
         return false;
 
-    if (commandSocket != nullptr && ! commandSocket->isConnected())
+    streamSensorNames.clear();
+
+    // Always use a new TCP session for each acquisition so the board's command
+    // loop never inherits stale RX data from a previous stream (same issue class
+    // as sending STOP while our reader thread still shares this socket).
+    if (commandSocket != nullptr)
     {
         commandSocket->close();
         delete commandSocket;
         commandSocket = nullptr;
     }
 
-    if (commandSocket == nullptr)
+    commandSocket = new StreamingSocket();
+    if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
     {
-        commandSocket = new StreamingSocket();
-        if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
-        {
-            std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
-            delete commandSocket;
-            commandSocket = nullptr;
-            return false;
-        }
+        std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
+        delete commandSocket;
+        commandSocket = nullptr;
+        return false;
     }
 
     const char* msg = "START\n";
@@ -317,15 +320,44 @@ bool AcqBoardRedPitaya::startAcquisition()
         responseText += c;
     }
 
-    if (responseText.startsWith ("STARTED "))
+    auto failStartAndResetSocket = [this]()
+    {
+        if (commandSocket != nullptr)
+        {
+            commandSocket->close();
+            delete commandSocket;
+            commandSocket = nullptr;
+        }
+    };
+
+    if (responseText.startsWith ("ERROR_FILE"))
+    {
+        std::cout << "Red Pitaya ERROR: Server could not open recording files." << std::endl;
+        failStartAndResetSocket();
+        return false;
+    }
+
+    if (! (responseText == "STARTED" || responseText.startsWith ("STARTED ")))
+    {
+        std::cout << "Red Pitaya ERROR: Expected STARTED from board, got: "
+                  << (responseText.isEmpty() ? String ("(empty / timeout)") : responseText) << std::endl;
+        failStartAndResetSocket();
+        return false;
+    }
+
+    if (responseText == "STARTED")
+    {
+        std::cout << "Red Pitaya: Streaming started." << std::endl;
+    }
+    else
     {
         const String pathText = responseText.fromFirstOccurrenceOf ("STARTED ", false, false).trim();
 
         if (pathText.contains ("BIN:") && pathText.contains (" CSV:"))
         {
             lastRecordingPath = pathText.fromFirstOccurrenceOf ("BIN:", false, false)
-                                      .upToFirstOccurrenceOf (" CSV:", false, false)
-                                      .trim();
+                                  .upToFirstOccurrenceOf (" CSV:", false, false)
+                                  .trim();
             lastRecordingCsvPath = pathText.fromFirstOccurrenceOf (" CSV:", false, false).trim();
         }
         else
@@ -338,14 +370,35 @@ bool AcqBoardRedPitaya::startAcquisition()
             std::cout << " and " << lastRecordingCsvPath;
         std::cout << std::endl;
     }
-    else if (responseText == "STARTED")
+
+    // Second line: SENSORS:0,Name;1,Name2 (snapshot at stream start)
     {
-        std::cout << "Red Pitaya: Streaming started." << std::endl;
-    }
-    else if (responseText.startsWith ("ERROR_FILE"))
-    {
-        std::cout << "Red Pitaya ERROR: Server could not open recording files." << std::endl;
-        return false;
+        String sensorsLine;
+        while (commandSocket->waitUntilReady (true, 1000))
+        {
+            char c = 0;
+            if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+                break;
+            sensorsLine += c;
+        }
+
+        if (sensorsLine.startsWith ("SENSORS:"))
+        {
+            const String body = sensorsLine.fromFirstOccurrenceOf ("SENSORS:", false, false).trim();
+            StringArray segments;
+            segments.addTokens (body, ";", "");
+
+            for (int si = 0; si < segments.size(); ++si)
+            {
+                const String seg = segments[si].trim();
+                const int comma = seg.indexOfChar (',');
+
+                if (comma > 0)
+                    streamSensorNames.add (seg.substring (comma + 1).trim());
+                else if (seg.isNotEmpty())
+                    streamSensorNames.add (seg);
+            }
+        }
     }
 
     // Sync current filter state to server before data starts flowing.
@@ -362,31 +415,21 @@ bool AcqBoardRedPitaya::startAcquisition()
 
 bool AcqBoardRedPitaya::stopAcquisition()
 {
-    // 1. Signal the thread to exit so readFully() starts returning false
-    //    on the next 100ms waitUntilReady timeout.
+    // 1. Ask run() to exit on its next poll.
     if (isThreadRunning())
         signalThreadShouldExit();
 
-    // 2. Tell the server to stop streaming.
-    if (commandSocket != nullptr && commandSocket->isConnected())
-    {
-        const char* msg = "STOP\n";
-        commandSocket->write (msg, (int) strlen (msg));
-        juce::Thread::sleep (50);
-    }
-
-    // 3. Close the socket. This causes waitUntilReady() in run() to return -1
-    //    immediately (invalid handle), so the thread exits without waiting for
-    //    the full 100ms timeout — no blocking recv stuck forever.
+    // 2. Close the TCP connection first. The Red Pitaya server then sees EOF /
+    //    send failure and leaves run_stream; we must NOT write STOP (or anything)
+    //    on this socket while run() is still consuming the same byte stream as
+    //    binary packets — that corrupts framing and leaves stale bytes for the
+    //    next START (classic "second start works" failure).
     if (commandSocket != nullptr)
         commandSocket->close();
 
-    // 4. Wait for run() to fully exit BEFORE deleting the socket object.
-    //    With readFully() using 100ms timeouts the thread exits within ~100ms.
-    //    Deleting commandSocket before this point is a use-after-free.
+    // 3. Wait for run() to finish before deleting the socket object.
     stopThread (500);
 
-    // 5. Now safe to delete — thread is guaranteed done.
     if (commandSocket != nullptr)
     {
         delete commandSocket;
@@ -395,6 +438,8 @@ bool AcqBoardRedPitaya::stopAcquisition()
 
     if (buffer != nullptr)
         buffer->clear();
+
+    streamSensorNames.clear();
 
     return true;
 }
@@ -538,46 +583,41 @@ void AcqBoardRedPitaya::setAnalogOutVoltage (float voltage)
     analogOutVoltage = voltage;
 }
 
-void AcqBoardRedPitaya::setAccelPreset (int preset)
+String AcqBoardRedPitaya::getStreamSensorName (int index) const
 {
-    accelPreset = preset;
-
-    if (commandSocket == nullptr)
-        return;
-
-    char msg[32];
-    snprintf (msg, sizeof (msg), "ACCEL_PRESET:%d\n", preset);
-    commandSocket->write (msg, (int) strlen (msg));
-    std::cout << "Red Pitaya: Sent command -> " << msg;
+    if (index < 0 || index >= streamSensorNames.size())
+        return {};
+    return streamSensorNames.getReference (index);
 }
 
-void AcqBoardRedPitaya::setGyroPreset (int preset)
+bool AcqBoardRedPitaya::sendSensorCfgAcc (int sensorIndex, int presetId)
 {
-    gyroPreset = preset;
-
     if (commandSocket == nullptr)
-        return;
+        return false;
 
-    char msg[32];
-    snprintf (msg, sizeof (msg), "GYRO_PRESET:%d\n", preset);
-    commandSocket->write (msg, (int) strlen (msg));
-    std::cout << "Red Pitaya: Sent command -> " << msg;
+    char msg[48];
+    snprintf (msg, sizeof (msg), "CFG %d ACC %d\n", sensorIndex, presetId);
+    return commandSocket->write (msg, (int) strlen (msg)) > 0;
 }
 
-void AcqBoardRedPitaya::setSensorHz (int hz)
+bool AcqBoardRedPitaya::sendSensorCfgGyr (int sensorIndex, int presetId)
 {
-    sensorHz = hz;
-
     if (commandSocket == nullptr)
-        return;
+        return false;
 
-    char msg[32];
-    if (hz == 0)
-        snprintf (msg, sizeof (msg), "SENSOR_HZ:same\n");
-    else
-        snprintf (msg, sizeof (msg), "SENSOR_HZ:%d\n", hz);
-    commandSocket->write (msg, (int) strlen (msg));
-    std::cout << "Red Pitaya: Sent command -> " << msg;
+    char msg[48];
+    snprintf (msg, sizeof (msg), "CFG %d GYR %d\n", sensorIndex, presetId);
+    return commandSocket->write (msg, (int) strlen (msg)) > 0;
+}
+
+bool AcqBoardRedPitaya::sendSensorCfgSrate (int sensorIndex, int targetHz)
+{
+    if (commandSocket == nullptr)
+        return false;
+
+    char msg[48];
+    snprintf (msg, sizeof (msg), "CFG %d SRATE %d\n", sensorIndex, targetHz);
+    return commandSocket->write (msg, (int) strlen (msg)) > 0;
 }
 
 double AcqBoardRedPitaya::setUpperBandwidth (double upperBandwidth)
@@ -700,16 +740,14 @@ void AcqBoardRedPitaya::run()
     if (numAdcChannelsLocal <= 0 || numAdcChannelsLocal > MAX_CHANNELS || samplesPerBuffer <= 0)
         return;
 
-    const int headerSize = 22;
-    const int payloadSize = numAdcChannelsLocal * 2;
-    const int packetSize = headerSize + payloadSize;
+    constexpr int headerSize = 22;
+    constexpr int maxPacketSize = 1024;
 
-    constexpr int MAX_PACKET_SIZE = 1024;
-    uint8_t packet[MAX_PACKET_SIZE];
+    uint8_t packet[maxPacketSize];
 
     // Non-blocking read helper: polls in 100ms slices so threadShouldExit() is
     // checked regularly and stopAcquisition()'s close() is noticed promptly.
-    auto readFully = [&] (void* buf, int size) -> bool
+    auto socketReadFully = [&] (void* buf, int size) -> bool
     {
         int done = 0;
         char* ptr = static_cast<char*> (buf);
@@ -728,53 +766,60 @@ void AcqBoardRedPitaya::run()
         return ! threadShouldExit();
     };
 
-    bool synchronized = false;
-    uint8_t syncBuffer[headerSize];
-    int bytesSearched = 0;
-
-    while (! synchronized && ! threadShouldExit())
+    // MSVC: nested lambda must capture constexpr locals explicitly (no implicit capture in []).
+    auto parseHeaderBytesPerFrame = [=] (const uint8_t* hdr, int32_t& outBytes) -> bool
     {
-        if (! readFully (syncBuffer + bytesSearched, 1))
-            return;
-        bytesSearched++;
+        if (hdr[8] != 0x03 || hdr[9] != 0x00)
+            return false;
 
-        if (bytesSearched == headerSize)
+        memcpy (&outBytes, hdr + 4, sizeof (int32_t));
+
+        // int16 samples per frame; keep in sync with Red Pitaya write_stream_header
+        if (outBytes < 2 || outBytes > (maxPacketSize - headerSize) || (outBytes & 1) != 0)
+            return false;
+
+        return true;
+    };
+
+    // Read one 22-byte header + variable payload. If the header is not valid,
+    // slide one byte and retry (same framing idea as the original sync loop).
+    auto readOneFrame = [&] (int32_t& outPayloadBytes) -> bool
+    {
+        if (! socketReadFully (packet, headerSize))
+            return false;
+
+        constexpr int maxResync = 65536;
+
+        for (int guard = 0; guard < maxResync && ! threadShouldExit(); ++guard)
         {
-            if (syncBuffer[8] == 0x03 && syncBuffer[9] == 0x00)
-            {
-                memcpy (packet, syncBuffer, headerSize);
+            if (parseHeaderBytesPerFrame (packet, outPayloadBytes))
+                return socketReadFully (packet + headerSize, (int) outPayloadBytes);
 
-                if (! readFully (packet + headerSize, payloadSize))
-                    return;
-                synchronized = true;
-            }
-            else
-            {
-                memmove (syncBuffer, syncBuffer + 1, headerSize - 1);
-                bytesSearched--;
-            }
+            memmove (packet, packet + 1, (size_t) headerSize - 1);
+
+            if (! socketReadFully (packet + headerSize - 1, 1))
+                return false;
         }
-    }
+
+        return false;
+    };
 
     while (! threadShouldExit())
     {
         for (int sampleIndex = 0; sampleIndex < samplesPerBuffer; ++sampleIndex)
         {
-            if (sampleIndex > 0 || ! synchronized)
-            {
-                if (! readFully (packet, packetSize))
-                    return;
-            }
+            int32_t payloadBytes = 0;
 
-            synchronized = false;
+            if (! readOneFrame (payloadBytes))
+                return;
 
             const int16_t* channels = reinterpret_cast<const int16_t*> (packet + headerSize);
+            const int channelsInPacket = payloadBytes / 2;
 
-            int ch = 0;
             for (int adc = 0; adc < numAdcChannelsLocal; ++adc)
             {
-                samples[(ch * samplesPerBuffer) + sampleIndex] = float (channels[adc]);
-                ++ch;
+                const float v = (adc < channelsInPacket) ? float (channels[adc]) : 0.0f;
+                samples[(adc * samplesPerBuffer) + sampleIndex] = v;
             }
 
             const double timeSeconds = double (sampleNumber) / double (settings.boardSampleRate);

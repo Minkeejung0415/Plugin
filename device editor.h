@@ -101,6 +101,10 @@ public:
 
     void labelTextChanged (Label* labelThatHasChanged) override;
 
+    void refreshRedPitayaSensorCombosFromBoard();
+    void repopulateSensorRateComboForHwHz (int hwHz);
+    int getSelectedStreamSensorIndex() const;
+
 private:
     /** Pointer to acquisition board device */
     class AcquisitionBoard* board;
@@ -146,17 +150,15 @@ private:
     std::unique_ptr<Label> analogOutTitle;
     std::unique_ptr<Label> analogOutLabel;
 
-    std::unique_ptr<Label> accelTitle;
-    std::unique_ptr<ComboBox> accelCombo;
-
-    std::unique_ptr<Label> gyroTitle;
-    std::unique_ptr<ComboBox> gyroCombo;
-
-    std::unique_ptr<Label> sensorHzTitle;
-    std::unique_ptr<ComboBox> sensorHzCombo;
-
-    std::unique_ptr<Label> sensorTitle;
-    std::unique_ptr<ComboBox> sensorCombo;
+    bool redPitayaSensorUiBuilt = false;
+    std::unique_ptr<Label> sensorCfgAccelTitle;
+    std::unique_ptr<ComboBox> sensorCfgAccelCombo;
+    std::unique_ptr<Label> sensorCfgGyroTitle;
+    std::unique_ptr<ComboBox> sensorCfgGyroCombo;
+    std::unique_ptr<Label> sensorCfgRateTitle;
+    std::unique_ptr<ComboBox> sensorCfgRateCombo;
+    std::unique_ptr<Label> sensorSelectTitle;
+    std::unique_ptr<ComboBox> sensorSelectCombo;
 
     enum AudioChannel
     {

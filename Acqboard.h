@@ -191,15 +191,6 @@ public:
     /** Sets the analog output voltage */
     virtual void setAnalogOutVoltage (float voltage) {}
 
-    /** Sets accelerometer full-scale preset (0-3) */
-    virtual void setAccelPreset (int preset) {}
-
-    /** Sets gyroscope full-scale preset (0-3) */
-    virtual void setGyroPreset (int preset) {}
-
-    /** Sets IMU sensor polling rate in Hz; 0 = match hardware sample rate */
-    virtual void setSensorHz (int hz) {}
-
     /** Returns total number of continuous channels */
     int getNumChannels()
     {

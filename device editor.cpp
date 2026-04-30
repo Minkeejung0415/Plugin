@@ -24,6 +24,7 @@
 #include "DeviceEditor.h"
 
 #include "devices/AcquisitionBoard.h"
+#include "devices/redpitaya/AcqBoardRedPitaya.h"
 #include "devices/oni/AcqBoardONI.h"
 
 #include "UI/ChannelCanvas.h"
@@ -41,7 +42,9 @@ inline double round (double x)
 
 DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
                             AcquisitionBoard* board_)
-    : VisualizerEditor (parentNode, "Acq Board", 345),
+    : VisualizerEditor (parentNode,
+                        "Acq Board",
+                        (board_ != nullptr && board_->getBoardType() == AcquisitionBoard::BoardType::RedPitaya) ? 560 : 340),
       board (board_),
       activeAudioChannel (LEFT)
 {
@@ -80,6 +83,11 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         }
     }
 
+    const bool isRedPitaya = (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya);
+    const int leftCol = xOffset + 6;
+    const int midCol = isRedPitaya ? (xOffset + 200) : (xOffset + 155);
+    const int rightCol = isRedPitaya ? (xOffset + 430) : (xOffset + 155);
+
     // add headstage-specific controls (currently just a toggle button)
     /*
     for (int i = 0; i < 4; i++)
@@ -90,38 +98,39 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         hsOptions->setBounds (xOffset + 3, 28 + i * 20, 70, 18);
     }
     */
-    // ---- Column 1: Sample Rate + Record  (x=6, w=74) ----
+    //add record button
+    recordButton = std::make_unique<UtilityButton> ("RECORD");
+    recordButton->setRadius (3.0f);
+    recordButton->setBounds (isRedPitaya ? leftCol : (xOffset + 6), isRedPitaya ? 118 : 108, 65, 18);
+    recordButton->addListener (this);
+    recordButton->setClickingTogglesState (true);
+    recordButton->setTooltip ("Record streaming data");
+    addAndMakeVisible (recordButton.get());
+
     sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", "Sample Rate (Hz)");
     sampleRateTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    sampleRateTitle->setBounds (xOffset + 6, 22, 74, 14);
+    sampleRateTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 80), isRedPitaya ? 18 : 22,
+                                isRedPitaya ? 90 : 100, isRedPitaya ? 12 : 15);
     addAndMakeVisible (sampleRateTitle.get());
 
     sampleRateLabel = std::make_unique<Label> ("sampleRateLabel", "1000");
     sampleRateLabel->setEditable (true);
     sampleRateLabel->setColour (Label::backgroundColourId, Colours::black);
     sampleRateLabel->setColour (Label::textColourId, Colours::white);
-    sampleRateLabel->setBounds (xOffset + 6, 37, 70, 18);
+    sampleRateLabel->setBounds (isRedPitaya ? leftCol : (xOffset + 80), isRedPitaya ? 30 : 38, 60, 18);
     sampleRateLabel->addListener (this);
-    sampleRateLabel->setTooltip ("Set streaming frequency (100 - 2000 Hz)");
+    sampleRateLabel->setTooltip (isRedPitaya ? "Hardware tick rate 1–2000 Hz (per-sensor SRATE decimates from this)"
+                                             : "Set streaming frequency (100 - 2000 Hz)");
     addAndMakeVisible (sampleRateLabel.get());
 
-    recordButton = std::make_unique<UtilityButton> ("RECORD");
-    recordButton->setRadius (3.0f);
-    recordButton->setBounds (xOffset + 6, 100, 70, 20);
-    recordButton->addListener (this);
-    recordButton->setClickingTogglesState (true);
-    recordButton->setTooltip ("Record streaming data");
-    addAndMakeVisible (recordButton.get());
-
-    // ---- Column 2: Filter + Analog inputs  (x=85, w=74) ----
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    filterTitle->setBounds (xOffset + 85, 22, 70, 14);
+    filterTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 52 : 22, 65, 12);
     addAndMakeVisible (filterTitle.get());
 
     filterButton = std::make_unique<UtilityButton> ("FILTER");
     filterButton->setRadius (3.0f);
-    filterButton->setBounds (xOffset + 85, 37, 70, 18);
+    filterButton->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 64 : 38, 65, 18);
     filterButton->addListener (this);
     filterButton->setClickingTogglesState (true);
     filterButton->setToggleState (false, dontSendNotification);
@@ -129,9 +138,9 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     filterButton->setTooltip ("Toggle hardware filter on/off");
     addAndMakeVisible (filterButton.get());
 
-    analogInTitle = std::make_unique<Label> ("analogInTitle", "Ain");
+    analogInTitle = std::make_unique<Label> ("analogInTitle", isRedPitaya ? "Ain" : "Analog In Gain");
     analogInTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogInTitle->setBounds (xOffset + 85, 62, 70, 12);
+    analogInTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 86 : 62, 80, 12);
     addAndMakeVisible (analogInTitle.get());
 
     analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
@@ -139,14 +148,14 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogInLabel->setEnabled (true);
     analogInLabel->setColour (Label::backgroundColourId, Colours::black);
     analogInLabel->setColour (Label::textColourId, Colours::white);
-    analogInLabel->setBounds (xOffset + 85, 74, 65, 18);
+    analogInLabel->setBounds (isRedPitaya ? (leftCol + 38) : (xOffset + 155), isRedPitaya ? 84 : 74, 52, 18);
     analogInLabel->addListener (this);
     analogInLabel->setTooltip ("Set ADC input gain (0.1 - 100.0)");
     addAndMakeVisible (analogInLabel.get());
 
-    analogOutTitle = std::make_unique<Label> ("analogOutTitle", "Aout (V)");
+    analogOutTitle = std::make_unique<Label> ("analogOutTitle", isRedPitaya ? "Aout" : "Analog Out (V)");
     analogOutTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogOutTitle->setBounds (xOffset + 85, 94, 70, 12);
+    analogOutTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 104 : 94, 80, 12);
     addAndMakeVisible (analogOutTitle.get());
 
     analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
@@ -154,73 +163,63 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogOutLabel->setEnabled (true);
     analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
     analogOutLabel->setColour (Label::textColourId, Colours::white);
-    analogOutLabel->setBounds (xOffset + 85, 106, 65, 18);
+    analogOutLabel->setBounds (isRedPitaya ? (leftCol + 38) : (xOffset + 155), isRedPitaya ? 102 : 108, 52, 18);
     analogOutLabel->addListener (this);
     analogOutLabel->setTooltip ("Set DAC output voltage (0.0 - 1.8 V)");
     addAndMakeVisible (analogOutLabel.get());
 
-    // ---- Column 3: Accel + Gyro + Sensor Hz  (x=164, w=88) ----
-    accelTitle = std::make_unique<Label> ("accelTitle", "Accel");
-    accelTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    accelTitle->setBounds (xOffset + 164, 22, 88, 12);
-    addAndMakeVisible (accelTitle.get());
+    if (isRedPitaya)
+    {
+        sensorCfgAccelTitle = std::make_unique<Label> ("sensorCfgAccelTitle", "Accel");
+        sensorCfgAccelTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        sensorCfgAccelTitle->setBounds (midCol, 18, 100, 12);
+        addAndMakeVisible (sensorCfgAccelTitle.get());
 
-    accelCombo = std::make_unique<ComboBox> ("accelCombo");
-    accelCombo->addItem ("Preset 0 (\xc2\xb12g)",  1);
-    accelCombo->addItem ("Preset 1 (\xc2\xb14g)",  2);
-    accelCombo->addItem ("Preset 2 (\xc2\xb18g)",  3);
-    accelCombo->addItem ("Preset 3 (\xc2\xb116g)", 4);
-    accelCombo->setSelectedId (1, dontSendNotification);
-    accelCombo->setBounds (xOffset + 164, 35, 88, 18);
-    accelCombo->addListener (this);
-    accelCombo->setTooltip ("Accelerometer full-scale range");
-    addAndMakeVisible (accelCombo.get());
+        sensorCfgAccelCombo = std::make_unique<ComboBox> ("sensorCfgAccel");
+        sensorCfgAccelCombo->setBounds (midCol, 30, 115, 20);
+        sensorCfgAccelCombo->addListener (this);
+        for (int i = 0; i < 4; ++i)
+            sensorCfgAccelCombo->addItem ("Preset " + String (i), i + 1);
+        sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
+        addAndMakeVisible (sensorCfgAccelCombo.get());
 
-    gyroTitle = std::make_unique<Label> ("gyroTitle", "Gyro");
-    gyroTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    gyroTitle->setBounds (xOffset + 164, 58, 88, 12);
-    addAndMakeVisible (gyroTitle.get());
+        sensorCfgGyroTitle = std::make_unique<Label> ("sensorCfgGyroTitle", "Gyro");
+        sensorCfgGyroTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        sensorCfgGyroTitle->setBounds (midCol, 54, 100, 12);
+        addAndMakeVisible (sensorCfgGyroTitle.get());
 
-    gyroCombo = std::make_unique<ComboBox> ("gyroCombo");
-    gyroCombo->addItem ("Preset 0 (\xc2\xb1250\xc2\xb0/s)",  1);
-    gyroCombo->addItem ("Preset 1 (\xc2\xb1500\xc2\xb0/s)",  2);
-    gyroCombo->addItem ("Preset 2 (\xc2\xb11000\xc2\xb0/s)", 3);
-    gyroCombo->addItem ("Preset 3 (\xc2\xb12000\xc2\xb0/s)", 4);
-    gyroCombo->setSelectedId (1, dontSendNotification);
-    gyroCombo->setBounds (xOffset + 164, 71, 88, 18);
-    gyroCombo->addListener (this);
-    gyroCombo->setTooltip ("Gyroscope full-scale range");
-    addAndMakeVisible (gyroCombo.get());
+        sensorCfgGyroCombo = std::make_unique<ComboBox> ("sensorCfgGyro");
+        sensorCfgGyroCombo->setBounds (midCol, 66, 115, 20);
+        sensorCfgGyroCombo->addListener (this);
+        for (int i = 0; i < 4; ++i)
+            sensorCfgGyroCombo->addItem ("Preset " + String (i), i + 1);
+        sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
+        addAndMakeVisible (sensorCfgGyroCombo.get());
 
-    sensorHzTitle = std::make_unique<Label> ("sensorHzTitle", "Sensor Hz");
-    sensorHzTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    sensorHzTitle->setBounds (xOffset + 164, 93, 88, 12);
-    addAndMakeVisible (sensorHzTitle.get());
+        sensorCfgRateTitle = std::make_unique<Label> ("sensorCfgRateTitle", "Sensor Hz");
+        sensorCfgRateTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        sensorCfgRateTitle->setBounds (midCol, 90, 100, 12);
+        addAndMakeVisible (sensorCfgRateTitle.get());
 
-    sensorHzCombo = std::make_unique<ComboBox> ("sensorHzCombo");
-    sensorHzCombo->addItem ("Same as HW", 1);
-    sensorHzCombo->addItem ("100 Hz",     2);
-    sensorHzCombo->addItem ("200 Hz",     3);
-    sensorHzCombo->addItem ("500 Hz",     4);
-    sensorHzCombo->setSelectedId (1, dontSendNotification);
-    sensorHzCombo->setBounds (xOffset + 164, 106, 88, 18);
-    sensorHzCombo->addListener (this);
-    sensorHzCombo->setTooltip ("IMU polling rate (or match HW sample rate)");
-    addAndMakeVisible (sensorHzCombo.get());
+        sensorCfgRateCombo = std::make_unique<ComboBox> ("sensorCfgRate");
+        sensorCfgRateCombo->setBounds (midCol, 102, 115, 20);
+        sensorCfgRateCombo->addListener (this);
+        addAndMakeVisible (sensorCfgRateCombo.get());
 
-    // ---- Column 4: Sensor  (x=259, w=74) ----
-    sensorTitle = std::make_unique<Label> ("sensorTitle", "Sensor");
-    sensorTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    sensorTitle->setBounds (xOffset + 259, 22, 74, 12);
-    addAndMakeVisible (sensorTitle.get());
+        sensorSelectTitle = std::make_unique<Label> ("sensorSelectTitle", "Sensor");
+        sensorSelectTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        sensorSelectTitle->setBounds (rightCol, 18, 110, 12);
+        addAndMakeVisible (sensorSelectTitle.get());
 
-    sensorCombo = std::make_unique<ComboBox> ("sensorCombo");
-    sensorCombo->addItem ("[0] MPU6050", 1);
-    sensorCombo->setSelectedId (1, dontSendNotification);
-    sensorCombo->setBounds (xOffset + 259, 35, 74, 18);
-    sensorCombo->addListener (this);
-    sensorCombo->setTooltip ("Connected IMU sensor");
-    addAndMakeVisible (sensorCombo.get());
+        sensorSelectCombo = std::make_unique<ComboBox> ("sensorSelect");
+        sensorSelectCombo->setBounds (rightCol, 30, 115, 20);
+        sensorSelectCombo->addListener (this);
+        sensorSelectCombo->addItem ("(start acquisition)", 1);
+        sensorSelectCombo->setSelectedId (1, dontSendNotification);
+        addAndMakeVisible (sensorSelectCombo.get());
+
+        redPitayaSensorUiBuilt = true;
+    }
 
     // add rescan button
     /*
@@ -417,26 +416,190 @@ void DeviceEditor::updateSettings()
     }
 }
 
-void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
+int DeviceEditor::getSelectedStreamSensorIndex() const
 {
-    if (board == nullptr)
+    if (sensorSelectCombo == nullptr || sensorSelectCombo->getNumItems() <= 0)
+        return 0;
+
+    const int id = sensorSelectCombo->getSelectedId();
+    return jmax (0, id - 1);
+}
+
+void DeviceEditor::repopulateSensorRateComboForHwHz (int hwHz)
+{
+    if (sensorCfgRateCombo == nullptr)
         return;
 
-    if (comboBox == accelCombo.get())
+    const int prevChoiceId = sensorCfgRateCombo->getSelectedId();
+
+    sensorCfgRateCombo->clear (dontSendNotification);
+
+    struct RateDiv { const char* label; int hz; };
+    const RateDiv choices[] = {
+        { "Same as HW", hwHz },
+        { "HW / 2", jmax (1, hwHz / 2) },
+        { "HW / 5", jmax (1, hwHz / 5) },
+        { "HW / 10", jmax (1, hwHz / 10) },
+        { "1 Hz", 1 },
+        { "10 Hz", 10 },
+        { "25 Hz", 25 },
+    };
+
+    for (int i = 0; i < (int) (sizeof (choices) / sizeof (choices[0])); ++i)
     {
-        board->setAccelPreset (accelCombo->getSelectedId() - 1);
+        String item = String (choices[i].label) + " (" + String (choices[i].hz) + " Hz)";
+        sensorCfgRateCombo->addItem (item, i + 1);
     }
-    else if (comboBox == gyroCombo.get())
+
+    const int toSelect = jlimit (1, sensorCfgRateCombo->getNumItems(), prevChoiceId > 0 ? prevChoiceId : 1);
+    sensorCfgRateCombo->setSelectedId (toSelect, dontSendNotification);
+}
+
+void DeviceEditor::refreshRedPitayaSensorCombosFromBoard()
+{
+    if (! redPitayaSensorUiBuilt || board == nullptr
+        || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    sensorSelectCombo->clear (dontSendNotification);
+
+    const int n = rp->getStreamSensorCount();
+
+    if (n <= 0)
     {
-        board->setGyroPreset (gyroCombo->getSelectedId() - 1);
+        sensorSelectCombo->addItem ("(no sensors)", 1);
+        sensorSelectCombo->setSelectedId (1, dontSendNotification);
     }
-    else if (comboBox == sensorHzCombo.get())
+    else
     {
-        const int id = sensorHzCombo->getSelectedId();
-        const int hzValues[] = { 0, 100, 200, 500 };
-        board->setSensorHz (hzValues[id - 1]);
+        for (int i = 0; i < n; ++i)
+        {
+            const String nm = rp->getStreamSensorName (i);
+            sensorSelectCombo->addItem ("[" + String (i) + "] " + (nm.isNotEmpty() ? nm : "sensor"), i + 1);
+        }
+
+        sensorSelectCombo->setSelectedId (1, dontSendNotification);
     }
-    // sensorCombo: no action yet — only one sensor supported
+
+    const int hz = sampleRateLabel != nullptr ? sampleRateLabel->getText().getIntValue() : 0;
+    repopulateSensorRateComboForHwHz (hz > 0 ? hz : 100);
+
+    sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
+    sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
+}
+
+void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
+{
+    if (redPitayaSensorUiBuilt && board != nullptr
+        && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya
+        && acquisitionIsActive)
+    {
+        auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+        const int si = getSelectedStreamSensorIndex();
+
+        if (comboBox == sensorSelectCombo.get())
+        {
+            const int hz = sampleRateLabel != nullptr ? sampleRateLabel->getText().getIntValue() : 100;
+            repopulateSensorRateComboForHwHz (hz > 0 ? hz : 100);
+
+            sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
+            sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
+
+            if (acquisitionIsActive && board != nullptr
+                && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+            {
+                auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+                const int si = getSelectedStreamSensorIndex();
+                rp->sendSensorCfgAcc (si, 0);
+                rp->sendSensorCfgGyr (si, 0);
+
+                const int hwHz = sampleRateLabel != nullptr ? sampleRateLabel->getText().getIntValue() : 100;
+                const int hw = hwHz > 0 ? hwHz : 100;
+                struct RateDiv { int hz; };
+                const RateDiv choices[] = {
+                    { hw },
+                    { jmax (1, hw / 2) },
+                    { jmax (1, hw / 5) },
+                    { jmax (1, hw / 10) },
+                    { 1 },
+                    { 10 },
+                    { 25 },
+                };
+                const int pick = sensorCfgRateCombo->getSelectedId() - 1;
+
+                if (pick >= 0 && pick < (int) (sizeof (choices) / sizeof (choices[0])))
+                    rp->sendSensorCfgSrate (si, choices[pick].hz);
+            }
+
+            return;
+        }
+
+        if (comboBox == sensorCfgAccelCombo.get())
+        {
+            rp->sendSensorCfgAcc (si, sensorCfgAccelCombo->getSelectedId() - 1);
+            return;
+        }
+
+        if (comboBox == sensorCfgGyroCombo.get())
+        {
+            rp->sendSensorCfgGyr (si, sensorCfgGyroCombo->getSelectedId() - 1);
+            return;
+        }
+
+        if (comboBox == sensorCfgRateCombo.get())
+        {
+            const int hwHz = sampleRateLabel != nullptr ? sampleRateLabel->getText().getIntValue() : 100;
+            const int hw = hwHz > 0 ? hwHz : 100;
+
+            struct RateDiv { int hz; };
+            const RateDiv choices[] = {
+                { hw },
+                { jmax (1, hw / 2) },
+                { jmax (1, hw / 5) },
+                { jmax (1, hw / 10) },
+                { 1 },
+                { 10 },
+                { 25 },
+            };
+
+            const int pick = sensorCfgRateCombo->getSelectedId() - 1;
+
+            if (pick >= 0 && pick < (int) (sizeof (choices) / sizeof (choices[0])))
+                rp->sendSensorCfgSrate (si, choices[pick].hz);
+
+            return;
+        }
+    }
+
+    /*
+    if (comboBox == ttlSettleCombo.get())
+    {
+        int selectedChannel = ttlSettleCombo->getSelectedId();
+        if (selectedChannel == 1)
+        {
+            board->setFastTTLSettle (false, 0);
+        }
+        else
+        {
+            board->setFastTTLSettle (true, selectedChannel - 2);
+        }
+    }
+    else if (comboBox == dacHPFcombo.get())
+    {
+        int selection = dacHPFcombo->getSelectedId();
+        if (selection == 1)
+        {
+            board->setDAChpf (100, false);
+        }
+        else
+        {
+            int HPFvalues[10] = { 50, 100, 200, 300, 400, 500, 600, 700, 800, 900 };
+            board->setDAChpf (HPFvalues[selection - 2], true);
+        }
+    }
+    */
 }
 
 void DeviceEditor::channelStateChanged (Array<int> newChannels)
@@ -604,15 +767,6 @@ void DeviceEditor::startAcquisition()
     if (analogOutLabel != nullptr)
         analogOutLabel->setEnabled (true);
 
-    if (accelCombo != nullptr)
-        accelCombo->setEnabled (false);
-
-    if (gyroCombo != nullptr)
-        gyroCombo->setEnabled (false);
-
-    if (sensorHzCombo != nullptr)
-        sensorHzCombo->setEnabled (false);
-
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
         headstageOptions->setEnabled (false);
@@ -621,12 +775,49 @@ void DeviceEditor::startAcquisition()
     if (canvas != nullptr)
     {
         canvas->beginAnimation();
+        // Right-column controls sit under the canvas z-order; bring strip to front for hit-testing.
+        if (sampleRateTitle != nullptr)
+            sampleRateTitle->toFront (false);
+        if (sampleRateLabel != nullptr)
+            sampleRateLabel->toFront (false);
+        if (filterTitle != nullptr)
+            filterTitle->toFront (false);
+        if (filterButton != nullptr)
+            filterButton->toFront (false);
+        if (analogInTitle != nullptr)
+            analogInTitle->toFront (false);
+        if (analogInLabel != nullptr)
+            analogInLabel->toFront (false);
+        if (analogOutTitle != nullptr)
+            analogOutTitle->toFront (false);
+        if (analogOutLabel != nullptr)
+            analogOutLabel->toFront (false);
+        if (recordButton != nullptr)
+            recordButton->toFront (false);
+        if (sensorCfgAccelTitle != nullptr)
+            sensorCfgAccelTitle->toFront (false);
+        if (sensorCfgAccelCombo != nullptr)
+            sensorCfgAccelCombo->toFront (false);
+        if (sensorCfgGyroTitle != nullptr)
+            sensorCfgGyroTitle->toFront (false);
+        if (sensorCfgGyroCombo != nullptr)
+            sensorCfgGyroCombo->toFront (false);
+        if (sensorCfgRateTitle != nullptr)
+            sensorCfgRateTitle->toFront (false);
+        if (sensorCfgRateCombo != nullptr)
+            sensorCfgRateCombo->toFront (false);
+        if (sensorSelectTitle != nullptr)
+            sensorSelectTitle->toFront (false);
+        if (sensorSelectCombo != nullptr)
+            sensorSelectCombo->toFront (false);
     }
 
     if (memoryUsage != nullptr)
         memoryUsage->startAcquisition();
 
     acquisitionIsActive = true;
+
+    refreshRedPitayaSensorCombosFromBoard();
 }
 
 void DeviceEditor::stopAcquisition()
@@ -644,15 +835,6 @@ void DeviceEditor::stopAcquisition()
 
     if (analogOutLabel != nullptr)
         analogOutLabel->setEnabled (true);
-
-    if (accelCombo != nullptr)
-        accelCombo->setEnabled (true);
-
-    if (gyroCombo != nullptr)
-        gyroCombo->setEnabled (true);
-
-    if (sensorHzCombo != nullptr)
-        sensorHzCombo->setEnabled (true);
 
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
@@ -683,6 +865,9 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
             board->updateSampleFrequency (newFreq);
         }
+
+        if (redPitayaSensorUiBuilt && acquisitionIsActive)
+            repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
     }
     else if (labelThatHasChanged == analogInLabel.get())
     {
