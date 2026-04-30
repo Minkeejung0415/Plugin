@@ -26,10 +26,12 @@
 #define RANGE             64000
 #define IIC_RANGE         64000
 #define PORT              5000
-#define DESIRED_SAMPLE_RATE_HZ 100
+/* Default hardware tick (Hz); must match plugin UI default and g_stream_hw_hz initial value. */
+#define DESIRED_SAMPLE_RATE_HZ 1000
 #define CTR_CLK_RATE      125000000
 #define HEADER_SIZE       22
-#define ANALOG_WAVEFORM_CHANNELS 0
+/* Reserved int16 slots per frame (Red Pitaya IN1/IN2); zeros if oscilloscope IP absent. */
+#define ANALOG_WAVEFORM_CHANNELS 2
 #define GYRO_BIAS_CALIBRATION_SAMPLES 200
 #define ICM20948_BANK_0 0x00
 #define ICM20948_BANK_3 0x03
@@ -1287,7 +1289,7 @@ int main(void) {
     int base_channels = ctx.total_channels;
     bool start_with_fusion = false;
 
-    fusion_init(ctx.active_sensor_count, (float)DESIRED_SAMPLE_RATE_HZ);
+    fusion_init(ctx.active_sensor_count, (float)g_stream_hw_hz);
     for (int i = 0; i < ctx.active_sensor_count; i++) {
         SensorInstance *s = &ctx.sensors[i];
         FusionSensorType ftype;
@@ -1314,7 +1316,7 @@ int main(void) {
     }
 
     calibrate_gyro_biases(&ctx);
-    // init_analog_waveform_inputs(); // Disabled: RP oscilloscope IP not in current bitstream
+    init_analog_waveform_inputs();
 
     // Plugin controls fusion state - default to OFF
     start_with_fusion = false;
