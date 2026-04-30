@@ -1206,6 +1206,14 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     unsigned long long vqf_call_count = 0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL) {
+        if (bin_file != NULL) {
+            fclose(bin_file);
+            bin_file = NULL;
+        }
+        if (csv_file != NULL) {
+            fclose(csv_file);
+            csv_file = NULL;
+        }
         free(packet);
         free(frame_buffer);
         free(sd_write_buffer);
@@ -1348,8 +1356,7 @@ static int dispatch_idle_command_line(char *line, int client_fd, HardwareContext
         write(client_fd, started_msg, strlen(started_msg));
         write_sensors_snapshot_line(client_fd, ctx);
         if (run_stream(client_fd, ctx, bin_fp, csv_fp, base_channels) < 0) {
-            fclose(bin_fp);
-            fclose(csv_fp);
+            /* run_stream or process_stream_commands already closed the files on error paths. */
             return -1;
         }
         drain_client_rx(client_fd);
