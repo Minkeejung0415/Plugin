@@ -877,16 +877,19 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
     if (labelThatHasChanged == sampleRateLabel.get())
     {
         int newFreq = sampleRateLabel->getText().getIntValue();
+        const int hwHz = jlimit (1, 2000, newFreq > 0 ? newFreq : 1000);
 
         if (board != nullptr)
         {
-            // Send the command to the Red Pitaya!
+            if (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+                board->setSampleRate (hwHz);
+
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
-            board->updateSampleFrequency (newFreq);
+            board->updateSampleFrequency (hwHz);
         }
 
         if (redPitayaSensorUiBuilt && acquisitionIsActive)
-            repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
+            repopulateSensorRateComboForHwHz (hwHz);
     }
     else if (labelThatHasChanged == analogInLabel.get())
     {
