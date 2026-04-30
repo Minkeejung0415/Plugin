@@ -882,7 +882,10 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
         if (board != nullptr)
         {
             if (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+            {
                 board->setSampleRate (hwHz);
+                CoreServices::updateSignalChain (this);
+            }
 
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
             board->updateSampleFrequency (hwHz);
