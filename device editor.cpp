@@ -84,9 +84,12 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     }
 
     const bool isRedPitaya = (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya);
-    const int leftCol = xOffset + 6;
-    const int midCol = isRedPitaya ? (xOffset + 200) : (xOffset + 155);
-    const int rightCol = isRedPitaya ? (xOffset + 430) : (xOffset + 155);
+    const int col1 = xOffset + 6;
+    const int col2 = xOffset + 135;
+    const int col3 = xOffset + 275;
+    const int col4 = xOffset + 420;
+    const int midCol = isRedPitaya ? col3 : (xOffset + 155);
+    const int rightCol = isRedPitaya ? col4 : (xOffset + 155);
 
     // add headstage-specific controls (currently just a toggle button)
     /*
@@ -101,23 +104,23 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     //add record button
     recordButton = std::make_unique<UtilityButton> ("RECORD");
     recordButton->setRadius (3.0f);
-    recordButton->setBounds (isRedPitaya ? leftCol : (xOffset + 6), isRedPitaya ? 118 : 108, 65, 18);
+    recordButton->setBounds (isRedPitaya ? col1 : (xOffset + 6), isRedPitaya ? 118 : 108, isRedPitaya ? 120 : 65, 18);
     recordButton->addListener (this);
     recordButton->setClickingTogglesState (true);
     recordButton->setTooltip ("Record streaming data");
     addAndMakeVisible (recordButton.get());
 
-    sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", "Sample Rate (Hz)");
+    sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", isRedPitaya ? "Sample Rate" : "Sample Rate (Hz)");
     sampleRateTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    sampleRateTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 80), isRedPitaya ? 18 : 22,
-                                isRedPitaya ? 90 : 100, isRedPitaya ? 12 : 15);
+    sampleRateTitle->setBounds (isRedPitaya ? col1 : (xOffset + 80), isRedPitaya ? 28 : 22,
+                                isRedPitaya ? 110 : 100, isRedPitaya ? 12 : 15);
     addAndMakeVisible (sampleRateTitle.get());
 
     sampleRateLabel = std::make_unique<Label> ("sampleRateLabel", "1000");
     sampleRateLabel->setEditable (true);
     sampleRateLabel->setColour (Label::backgroundColourId, Colours::black);
     sampleRateLabel->setColour (Label::textColourId, Colours::white);
-    sampleRateLabel->setBounds (isRedPitaya ? leftCol : (xOffset + 80), isRedPitaya ? 30 : 38, 60, 18);
+    sampleRateLabel->setBounds (isRedPitaya ? col1 : (xOffset + 80), isRedPitaya ? 42 : 38, isRedPitaya ? 118 : 60, isRedPitaya ? 20 : 18);
     sampleRateLabel->addListener (this);
     sampleRateLabel->setTooltip (isRedPitaya ? "Hardware tick rate 1–2000 Hz (per-sensor SRATE decimates from this)"
                                              : "Set streaming frequency (100 - 2000 Hz)");
@@ -125,12 +128,12 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    filterTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 52 : 22, 65, 12);
+    filterTitle->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 28 : 22, 65, 12);
     addAndMakeVisible (filterTitle.get());
 
     filterButton = std::make_unique<UtilityButton> ("FILTER");
     filterButton->setRadius (3.0f);
-    filterButton->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 64 : 38, 65, 18);
+    filterButton->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 42 : 38, isRedPitaya ? 118 : 65, isRedPitaya ? 20 : 18);
     filterButton->addListener (this);
     filterButton->setClickingTogglesState (true);
     filterButton->setToggleState (false, dontSendNotification);
@@ -140,7 +143,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     analogInTitle = std::make_unique<Label> ("analogInTitle", isRedPitaya ? "Ain" : "Analog In Gain");
     analogInTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogInTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 86 : 62, 80, 12);
+    analogInTitle->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 68 : 62, 80, 12);
     addAndMakeVisible (analogInTitle.get());
 
     analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
@@ -148,14 +151,14 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogInLabel->setEnabled (true);
     analogInLabel->setColour (Label::backgroundColourId, Colours::black);
     analogInLabel->setColour (Label::textColourId, Colours::white);
-    analogInLabel->setBounds (isRedPitaya ? (leftCol + 38) : (xOffset + 155), isRedPitaya ? 84 : 74, 52, 18);
+    analogInLabel->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 82 : 74, isRedPitaya ? 118 : 52, isRedPitaya ? 20 : 18);
     analogInLabel->addListener (this);
     analogInLabel->setTooltip ("Set ADC input gain (0.1 - 100.0)");
     addAndMakeVisible (analogInLabel.get());
 
-    analogOutTitle = std::make_unique<Label> ("analogOutTitle", isRedPitaya ? "Aout" : "Analog Out (V)");
+    analogOutTitle = std::make_unique<Label> ("analogOutTitle", isRedPitaya ? "Aout (V)" : "Analog Out (V)");
     analogOutTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogOutTitle->setBounds (isRedPitaya ? leftCol : (xOffset + 155), isRedPitaya ? 104 : 94, 80, 12);
+    analogOutTitle->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 106 : 94, 90, 12);
     addAndMakeVisible (analogOutTitle.get());
 
     analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
@@ -163,56 +166,62 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogOutLabel->setEnabled (true);
     analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
     analogOutLabel->setColour (Label::textColourId, Colours::white);
-    analogOutLabel->setBounds (isRedPitaya ? (leftCol + 38) : (xOffset + 155), isRedPitaya ? 102 : 108, 52, 18);
+    analogOutLabel->setBounds (isRedPitaya ? col2 : (xOffset + 155), isRedPitaya ? 120 : 108, isRedPitaya ? 118 : 52, isRedPitaya ? 20 : 18);
     analogOutLabel->addListener (this);
     analogOutLabel->setTooltip ("Set DAC output voltage (0.0 - 1.8 V)");
     addAndMakeVisible (analogOutLabel.get());
 
     if (isRedPitaya)
     {
+        const int comboW = 118;
+
         sensorCfgAccelTitle = std::make_unique<Label> ("sensorCfgAccelTitle", "Accel");
         sensorCfgAccelTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        sensorCfgAccelTitle->setBounds (midCol, 18, 100, 12);
+        sensorCfgAccelTitle->setBounds (col3, 28, 100, 12);
         addAndMakeVisible (sensorCfgAccelTitle.get());
 
         sensorCfgAccelCombo = std::make_unique<ComboBox> ("sensorCfgAccel");
-        sensorCfgAccelCombo->setBounds (midCol, 30, 115, 20);
+        sensorCfgAccelCombo->setBounds (col3, 42, comboW, 20);
         sensorCfgAccelCombo->addListener (this);
-        for (int i = 0; i < 4; ++i)
-            sensorCfgAccelCombo->addItem ("Preset " + String (i), i + 1);
+        sensorCfgAccelCombo->addItem ("±2 g", 1);
+        sensorCfgAccelCombo->addItem ("±4 g", 2);
+        sensorCfgAccelCombo->addItem ("±8 g", 3);
+        sensorCfgAccelCombo->addItem ("±16 g", 4);
         sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorCfgAccelCombo.get());
 
         sensorCfgGyroTitle = std::make_unique<Label> ("sensorCfgGyroTitle", "Gyro");
         sensorCfgGyroTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        sensorCfgGyroTitle->setBounds (midCol, 54, 100, 12);
+        sensorCfgGyroTitle->setBounds (col3, 68, 100, 12);
         addAndMakeVisible (sensorCfgGyroTitle.get());
 
         sensorCfgGyroCombo = std::make_unique<ComboBox> ("sensorCfgGyro");
-        sensorCfgGyroCombo->setBounds (midCol, 66, 115, 20);
+        sensorCfgGyroCombo->setBounds (col3, 82, comboW, 20);
         sensorCfgGyroCombo->addListener (this);
-        for (int i = 0; i < 4; ++i)
-            sensorCfgGyroCombo->addItem ("Preset " + String (i), i + 1);
+        sensorCfgGyroCombo->addItem ("±250 °/s", 1);
+        sensorCfgGyroCombo->addItem ("±500 °/s", 2);
+        sensorCfgGyroCombo->addItem ("±1000 °/s", 3);
+        sensorCfgGyroCombo->addItem ("±2000 °/s", 4);
         sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorCfgGyroCombo.get());
 
         sensorCfgRateTitle = std::make_unique<Label> ("sensorCfgRateTitle", "Sensor Hz");
         sensorCfgRateTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        sensorCfgRateTitle->setBounds (midCol, 90, 100, 12);
+        sensorCfgRateTitle->setBounds (col3, 106, 100, 12);
         addAndMakeVisible (sensorCfgRateTitle.get());
 
         sensorCfgRateCombo = std::make_unique<ComboBox> ("sensorCfgRate");
-        sensorCfgRateCombo->setBounds (midCol, 102, 115, 20);
+        sensorCfgRateCombo->setBounds (col3, 120, comboW, 20);
         sensorCfgRateCombo->addListener (this);
         addAndMakeVisible (sensorCfgRateCombo.get());
 
         sensorSelectTitle = std::make_unique<Label> ("sensorSelectTitle", "Sensor");
         sensorSelectTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        sensorSelectTitle->setBounds (rightCol, 18, 110, 12);
+        sensorSelectTitle->setBounds (col4, 28, 110, 12);
         addAndMakeVisible (sensorSelectTitle.get());
 
         sensorSelectCombo = std::make_unique<ComboBox> ("sensorSelect");
-        sensorSelectCombo->setBounds (rightCol, 30, 115, 20);
+        sensorSelectCombo->setBounds (col4, 42, comboW, 20);
         sensorSelectCombo->addListener (this);
         sensorSelectCombo->addItem ("(start acquisition)", 1);
         sensorSelectCombo->setSelectedId (1, dontSendNotification);
@@ -413,6 +422,36 @@ void DeviceEditor::updateSettings()
     if (canvas != nullptr)
     {
         canvas->update();
+    }
+}
+
+void DeviceEditor::paint (Graphics& g)
+{
+    VisualizerEditor::paint (g);
+
+    if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+    {
+        const int x0 = 0;
+        const int top = 12;
+        const int bottom = getHeight() - 8;
+        const int h = jmax (1, bottom - top);
+
+        g.setColour (findColour (ThemeColours::defaultText).withAlpha (0.55f));
+        g.setFont (FontOptions ("Inter", "Regular", 9.0f));
+
+        const int col1 = 6;
+        const int col2 = 135;
+        const int col3 = 275;
+        const int col4 = 420;
+
+        g.drawText ("Col 1", col1, top, 110, 14, Justification::left, false);
+        g.drawText ("Col 2", col2, top, 120, 14, Justification::left, false);
+        g.drawText ("Col 3", col3, top, 120, 14, Justification::left, false);
+        g.drawText ("Col 4", col4, top, 120, 14, Justification::left, false);
+
+        g.setColour (findColour (ThemeColours::defaultText).withAlpha (0.22f));
+        for (int divX : { 135, 275, 410 })
+            g.fillRect (divX, top, 1, h);
     }
 }
 

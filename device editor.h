@@ -105,6 +105,8 @@ public:
     void repopulateSensorRateComboForHwHz (int hwHz);
     int getSelectedStreamSensorIndex() const;
 
+    void paint (Graphics& g) override;
+
 private:
     /** Pointer to acquisition board device */
     class AcquisitionBoard* board;
