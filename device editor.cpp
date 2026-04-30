@@ -431,7 +431,6 @@ void DeviceEditor::paint (Graphics& g)
 
     if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
     {
-        const int x0 = 0;
         const int top = 12;
         const int bottom = getHeight() - 8;
         const int h = jmax (1, bottom - top);
@@ -449,7 +448,7 @@ void DeviceEditor::paint (Graphics& g)
         g.drawText ("Col 3", col3, top, 120, 14, Justification::left, false);
         g.drawText ("Col 4", col4, top, 120, 14, Justification::left, false);
 
-        g.setColour (findColour (ThemeColours::defaultText).withAlpha (0.22f));
+        g.setColour (findColour (ThemeColours::defaultText).withAlpha (0.25f));
         for (int divX : { 135, 275, 410 })
             g.fillRect (divX, top, 1, h);
     }
@@ -897,16 +896,22 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
     if (labelThatHasChanged == sampleRateLabel.get())
     {
         int newFreq = sampleRateLabel->getText().getIntValue();
+        const int hwHz = jlimit (1, 2000, newFreq > 0 ? newFreq : 1000);
 
         if (board != nullptr)
         {
-            // Send the command to the Red Pitaya!
+            if (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+            {
+                board->setSampleRate (hwHz);
+                CoreServices::updateSignalChain (this);
+            }
+
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
-            board->updateSampleFrequency (newFreq);
+            board->updateSampleFrequency (hwHz);
         }
 
         if (redPitayaSensorUiBuilt && acquisitionIsActive)
-            repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
+            repopulateSensorRateComboForHwHz (hwHz);
     }
     else if (labelThatHasChanged == analogInLabel.get())
     {

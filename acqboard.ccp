@@ -303,6 +303,13 @@ bool AcqBoardRedPitaya::startAcquisition()
         return false;
     }
 
+    {
+        const int hz = jlimit (1, 2000, roundToInt (getSampleRate()));
+        char freqMsg[40];
+        snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", hz);
+        commandSocket->write (freqMsg, (int) strlen (freqMsg));
+    }
+
     const char* msg = "START\n";
     commandSocket->write (msg, (int) strlen (msg));
 
