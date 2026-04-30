@@ -146,6 +146,18 @@ private:
     std::unique_ptr<Label> analogOutTitle;
     std::unique_ptr<Label> analogOutLabel;
 
+    std::unique_ptr<Label> accelTitle;
+    std::unique_ptr<ComboBox> accelCombo;
+
+    std::unique_ptr<Label> gyroTitle;
+    std::unique_ptr<ComboBox> gyroCombo;
+
+    std::unique_ptr<Label> sensorHzTitle;
+    std::unique_ptr<ComboBox> sensorHzCombo;
+
+    std::unique_ptr<Label> sensorTitle;
+    std::unique_ptr<ComboBox> sensorCombo;
+
     enum AudioChannel
     {
         LEFT = 0,

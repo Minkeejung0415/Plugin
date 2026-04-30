@@ -167,6 +167,15 @@ public:
     /** Sets analog output voltage */
     void setAnalogOutVoltage (float voltage) override;
 
+    /** Sets accelerometer full-scale preset (0=±2g, 1=±4g, 2=±8g, 3=±16g) */
+    void setAccelPreset (int preset) override;
+
+    /** Sets gyroscope full-scale preset (0=±250, 1=±500, 2=±1000, 3=±2000 °/s) */
+    void setGyroPreset (int preset) override;
+
+    /** Sets IMU polling rate in Hz; 0 = match hardware sample rate */
+    void setSensorHz (int hz) override;
+
     /** Fills data buffer */
     void run();
 
@@ -216,6 +225,9 @@ public:
     bool filterEnabled = false;
     float analogInGain = 1.0f;
     float analogOutVoltage = 0.0f;
+    int accelPreset = 0;
+    int gyroPreset = 0;
+    int sensorHz = 0;
 
     StreamingSocket* commandSocket = nullptr;
 

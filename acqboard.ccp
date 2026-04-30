@@ -538,6 +538,48 @@ void AcqBoardRedPitaya::setAnalogOutVoltage (float voltage)
     analogOutVoltage = voltage;
 }
 
+void AcqBoardRedPitaya::setAccelPreset (int preset)
+{
+    accelPreset = preset;
+
+    if (commandSocket == nullptr)
+        return;
+
+    char msg[32];
+    snprintf (msg, sizeof (msg), "ACCEL_PRESET:%d\n", preset);
+    commandSocket->write (msg, (int) strlen (msg));
+    std::cout << "Red Pitaya: Sent command -> " << msg;
+}
+
+void AcqBoardRedPitaya::setGyroPreset (int preset)
+{
+    gyroPreset = preset;
+
+    if (commandSocket == nullptr)
+        return;
+
+    char msg[32];
+    snprintf (msg, sizeof (msg), "GYRO_PRESET:%d\n", preset);
+    commandSocket->write (msg, (int) strlen (msg));
+    std::cout << "Red Pitaya: Sent command -> " << msg;
+}
+
+void AcqBoardRedPitaya::setSensorHz (int hz)
+{
+    sensorHz = hz;
+
+    if (commandSocket == nullptr)
+        return;
+
+    char msg[32];
+    if (hz == 0)
+        snprintf (msg, sizeof (msg), "SENSOR_HZ:same\n");
+    else
+        snprintf (msg, sizeof (msg), "SENSOR_HZ:%d\n", hz);
+    commandSocket->write (msg, (int) strlen (msg));
+    std::cout << "Red Pitaya: Sent command -> " << msg;
+}
+
 double AcqBoardRedPitaya::setUpperBandwidth (double upperBandwidth)
 {
     upperBandwidthHz = upperBandwidth;

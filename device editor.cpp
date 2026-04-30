@@ -41,7 +41,7 @@ inline double round (double x)
 
 DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
                             AcquisitionBoard* board_)
-    : VisualizerEditor (parentNode, "Acq Board", 340),
+    : VisualizerEditor (parentNode, "Acq Board", 345),
       board (board_),
       activeAudioChannel (LEFT)
 {
@@ -90,40 +90,38 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         hsOptions->setBounds (xOffset + 3, 28 + i * 20, 70, 18);
     }
     */
-    //add record button
+    // ---- Column 1: Sample Rate + Record  (x=6, w=74) ----
+    sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", "Sample Rate (Hz)");
+    sampleRateTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    sampleRateTitle->setBounds (xOffset + 6, 22, 74, 14);
+    addAndMakeVisible (sampleRateTitle.get());
+
+    sampleRateLabel = std::make_unique<Label> ("sampleRateLabel", "1000");
+    sampleRateLabel->setEditable (true);
+    sampleRateLabel->setColour (Label::backgroundColourId, Colours::black);
+    sampleRateLabel->setColour (Label::textColourId, Colours::white);
+    sampleRateLabel->setBounds (xOffset + 6, 37, 70, 18);
+    sampleRateLabel->addListener (this);
+    sampleRateLabel->setTooltip ("Set streaming frequency (100 - 2000 Hz)");
+    addAndMakeVisible (sampleRateLabel.get());
+
     recordButton = std::make_unique<UtilityButton> ("RECORD");
     recordButton->setRadius (3.0f);
-    recordButton->setBounds (xOffset + 6, 108, 65, 18);
+    recordButton->setBounds (xOffset + 6, 100, 70, 20);
     recordButton->addListener (this);
     recordButton->setClickingTogglesState (true);
     recordButton->setTooltip ("Record streaming data");
     addAndMakeVisible (recordButton.get());
 
-    // --- Add Sample Rate Title ---
-    sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", "Sample Rate (Hz)");
-    sampleRateTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    sampleRateTitle->setBounds (xOffset + 80, 22, 100, 15);
-    addAndMakeVisible (sampleRateTitle.get());
-
-    // --- Add Editable Sample Rate Input Box ---
-    sampleRateLabel = std::make_unique<Label> ("sampleRateLabel", "1000");
-    sampleRateLabel->setEditable (true); // This enables text input
-    sampleRateLabel->setColour (Label::backgroundColourId, Colours::black);
-    sampleRateLabel->setColour (Label::textColourId, Colours::white);
-    sampleRateLabel->setBounds (xOffset + 80, 38, 60, 18);
-    sampleRateLabel->addListener (this); // Catches the 'Enter' key
-    sampleRateLabel->setTooltip ("Set streaming frequency (100 - 2000 Hz)");
-    addAndMakeVisible (sampleRateLabel.get());
-
-    // --- Filter Toggle ---
+    // ---- Column 2: Filter + Analog inputs  (x=85, w=74) ----
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    filterTitle->setBounds (xOffset + 155, 22, 65, 15);
+    filterTitle->setBounds (xOffset + 85, 22, 70, 14);
     addAndMakeVisible (filterTitle.get());
 
     filterButton = std::make_unique<UtilityButton> ("FILTER");
     filterButton->setRadius (3.0f);
-    filterButton->setBounds (xOffset + 155, 38, 65, 18);
+    filterButton->setBounds (xOffset + 85, 37, 70, 18);
     filterButton->addListener (this);
     filterButton->setClickingTogglesState (true);
     filterButton->setToggleState (false, dontSendNotification);
@@ -131,10 +129,9 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     filterButton->setTooltip ("Toggle hardware filter on/off");
     addAndMakeVisible (filterButton.get());
 
-    // --- Analog Input Gain ---
-    analogInTitle = std::make_unique<Label> ("analogInTitle", "Analog In Gain");
+    analogInTitle = std::make_unique<Label> ("analogInTitle", "Ain");
     analogInTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogInTitle->setBounds (xOffset + 155, 62, 80, 12);
+    analogInTitle->setBounds (xOffset + 85, 62, 70, 12);
     addAndMakeVisible (analogInTitle.get());
 
     analogInLabel = std::make_unique<Label> ("analogInLabel", "1.00");
@@ -142,15 +139,14 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogInLabel->setEnabled (true);
     analogInLabel->setColour (Label::backgroundColourId, Colours::black);
     analogInLabel->setColour (Label::textColourId, Colours::white);
-    analogInLabel->setBounds (xOffset + 155, 74, 65, 18);
+    analogInLabel->setBounds (xOffset + 85, 74, 65, 18);
     analogInLabel->addListener (this);
     analogInLabel->setTooltip ("Set ADC input gain (0.1 - 100.0)");
     addAndMakeVisible (analogInLabel.get());
 
-    // --- Analog Output Voltage ---
-    analogOutTitle = std::make_unique<Label> ("analogOutTitle", "Analog Out (V)");
+    analogOutTitle = std::make_unique<Label> ("analogOutTitle", "Aout (V)");
     analogOutTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-    analogOutTitle->setBounds (xOffset + 155, 94, 80, 12);
+    analogOutTitle->setBounds (xOffset + 85, 94, 70, 12);
     addAndMakeVisible (analogOutTitle.get());
 
     analogOutLabel = std::make_unique<Label> ("analogOutLabel", "0.00");
@@ -158,10 +154,73 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     analogOutLabel->setEnabled (true);
     analogOutLabel->setColour (Label::backgroundColourId, Colours::black);
     analogOutLabel->setColour (Label::textColourId, Colours::white);
-    analogOutLabel->setBounds (xOffset + 155, 108, 65, 18);
+    analogOutLabel->setBounds (xOffset + 85, 106, 65, 18);
     analogOutLabel->addListener (this);
     analogOutLabel->setTooltip ("Set DAC output voltage (0.0 - 1.8 V)");
     addAndMakeVisible (analogOutLabel.get());
+
+    // ---- Column 3: Accel + Gyro + Sensor Hz  (x=164, w=88) ----
+    accelTitle = std::make_unique<Label> ("accelTitle", "Accel");
+    accelTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    accelTitle->setBounds (xOffset + 164, 22, 88, 12);
+    addAndMakeVisible (accelTitle.get());
+
+    accelCombo = std::make_unique<ComboBox> ("accelCombo");
+    accelCombo->addItem ("Preset 0 (\xc2\xb12g)",  1);
+    accelCombo->addItem ("Preset 1 (\xc2\xb14g)",  2);
+    accelCombo->addItem ("Preset 2 (\xc2\xb18g)",  3);
+    accelCombo->addItem ("Preset 3 (\xc2\xb116g)", 4);
+    accelCombo->setSelectedId (1, dontSendNotification);
+    accelCombo->setBounds (xOffset + 164, 35, 88, 18);
+    accelCombo->addListener (this);
+    accelCombo->setTooltip ("Accelerometer full-scale range");
+    addAndMakeVisible (accelCombo.get());
+
+    gyroTitle = std::make_unique<Label> ("gyroTitle", "Gyro");
+    gyroTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    gyroTitle->setBounds (xOffset + 164, 58, 88, 12);
+    addAndMakeVisible (gyroTitle.get());
+
+    gyroCombo = std::make_unique<ComboBox> ("gyroCombo");
+    gyroCombo->addItem ("Preset 0 (\xc2\xb1250\xc2\xb0/s)",  1);
+    gyroCombo->addItem ("Preset 1 (\xc2\xb1500\xc2\xb0/s)",  2);
+    gyroCombo->addItem ("Preset 2 (\xc2\xb11000\xc2\xb0/s)", 3);
+    gyroCombo->addItem ("Preset 3 (\xc2\xb12000\xc2\xb0/s)", 4);
+    gyroCombo->setSelectedId (1, dontSendNotification);
+    gyroCombo->setBounds (xOffset + 164, 71, 88, 18);
+    gyroCombo->addListener (this);
+    gyroCombo->setTooltip ("Gyroscope full-scale range");
+    addAndMakeVisible (gyroCombo.get());
+
+    sensorHzTitle = std::make_unique<Label> ("sensorHzTitle", "Sensor Hz");
+    sensorHzTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    sensorHzTitle->setBounds (xOffset + 164, 93, 88, 12);
+    addAndMakeVisible (sensorHzTitle.get());
+
+    sensorHzCombo = std::make_unique<ComboBox> ("sensorHzCombo");
+    sensorHzCombo->addItem ("Same as HW", 1);
+    sensorHzCombo->addItem ("100 Hz",     2);
+    sensorHzCombo->addItem ("200 Hz",     3);
+    sensorHzCombo->addItem ("500 Hz",     4);
+    sensorHzCombo->setSelectedId (1, dontSendNotification);
+    sensorHzCombo->setBounds (xOffset + 164, 106, 88, 18);
+    sensorHzCombo->addListener (this);
+    sensorHzCombo->setTooltip ("IMU polling rate (or match HW sample rate)");
+    addAndMakeVisible (sensorHzCombo.get());
+
+    // ---- Column 4: Sensor  (x=259, w=74) ----
+    sensorTitle = std::make_unique<Label> ("sensorTitle", "Sensor");
+    sensorTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+    sensorTitle->setBounds (xOffset + 259, 22, 74, 12);
+    addAndMakeVisible (sensorTitle.get());
+
+    sensorCombo = std::make_unique<ComboBox> ("sensorCombo");
+    sensorCombo->addItem ("[0] MPU6050", 1);
+    sensorCombo->setSelectedId (1, dontSendNotification);
+    sensorCombo->setBounds (xOffset + 259, 35, 74, 18);
+    sensorCombo->addListener (this);
+    sensorCombo->setTooltip ("Connected IMU sensor");
+    addAndMakeVisible (sensorCombo.get());
 
     // add rescan button
     /*
@@ -360,33 +419,24 @@ void DeviceEditor::updateSettings()
 
 void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
 {
-    /*
-    if (comboBox == ttlSettleCombo.get())
+    if (board == nullptr)
+        return;
+
+    if (comboBox == accelCombo.get())
     {
-        int selectedChannel = ttlSettleCombo->getSelectedId();
-        if (selectedChannel == 1)
-        {
-            board->setFastTTLSettle (false, 0);
-        }
-        else
-        {
-            board->setFastTTLSettle (true, selectedChannel - 2);
-        }
+        board->setAccelPreset (accelCombo->getSelectedId() - 1);
     }
-    else if (comboBox == dacHPFcombo.get())
+    else if (comboBox == gyroCombo.get())
     {
-        int selection = dacHPFcombo->getSelectedId();
-        if (selection == 1)
-        {
-            board->setDAChpf (100, false);
-        }
-        else
-        {
-            int HPFvalues[10] = { 50, 100, 200, 300, 400, 500, 600, 700, 800, 900 };
-            board->setDAChpf (HPFvalues[selection - 2], true);
-        }
+        board->setGyroPreset (gyroCombo->getSelectedId() - 1);
     }
-    */
+    else if (comboBox == sensorHzCombo.get())
+    {
+        const int id = sensorHzCombo->getSelectedId();
+        const int hzValues[] = { 0, 100, 200, 500 };
+        board->setSensorHz (hzValues[id - 1]);
+    }
+    // sensorCombo: no action yet — only one sensor supported
 }
 
 void DeviceEditor::channelStateChanged (Array<int> newChannels)
@@ -554,6 +604,15 @@ void DeviceEditor::startAcquisition()
     if (analogOutLabel != nullptr)
         analogOutLabel->setEnabled (true);
 
+    if (accelCombo != nullptr)
+        accelCombo->setEnabled (false);
+
+    if (gyroCombo != nullptr)
+        gyroCombo->setEnabled (false);
+
+    if (sensorHzCombo != nullptr)
+        sensorHzCombo->setEnabled (false);
+
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
         headstageOptions->setEnabled (false);
@@ -585,6 +644,15 @@ void DeviceEditor::stopAcquisition()
 
     if (analogOutLabel != nullptr)
         analogOutLabel->setEnabled (true);
+
+    if (accelCombo != nullptr)
+        accelCombo->setEnabled (true);
+
+    if (gyroCombo != nullptr)
+        gyroCombo->setEnabled (true);
+
+    if (sensorHzCombo != nullptr)
+        sensorHzCombo->setEnabled (true);
 
     for (auto headstageOptions : headstageOptionsInterfaces)
     {
