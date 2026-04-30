@@ -179,10 +179,10 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         sensorCfgAccelCombo = std::make_unique<ComboBox> ("sensorCfgAccel");
         sensorCfgAccelCombo->setBounds (midCol, 30, 120, 20);
         sensorCfgAccelCombo->addListener (this);
-        sensorCfgAccelCombo->addItem ("\xc2\xb12 g",  1);
-        sensorCfgAccelCombo->addItem ("\xc2\xb14 g",  2);
-        sensorCfgAccelCombo->addItem ("\xc2\xb18 g",  3);
-        sensorCfgAccelCombo->addItem ("\xc2\xb116 g", 4);
+        sensorCfgAccelCombo->addItem ("±2 g",  1);
+        sensorCfgAccelCombo->addItem ("±4 g",  2);
+        sensorCfgAccelCombo->addItem ("±8 g",  3);
+        sensorCfgAccelCombo->addItem ("±16 g", 4);
         sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorCfgAccelCombo.get());
 
@@ -194,10 +194,10 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         sensorCfgGyroCombo = std::make_unique<ComboBox> ("sensorCfgGyro");
         sensorCfgGyroCombo->setBounds (midCol, 66, 120, 20);
         sensorCfgGyroCombo->addListener (this);
-        sensorCfgGyroCombo->addItem ("\xc2\xb1250 \xc2\xb0/s",  1);
-        sensorCfgGyroCombo->addItem ("\xc2\xb1500 \xc2\xb0/s",  2);
-        sensorCfgGyroCombo->addItem ("\xc2\xb11000 \xc2\xb0/s", 3);
-        sensorCfgGyroCombo->addItem ("\xc2\xb12000 \xc2\xb0/s", 4);
+        sensorCfgGyroCombo->addItem ("±250 °/s",  1);
+        sensorCfgGyroCombo->addItem ("±500 °/s",  2);
+        sensorCfgGyroCombo->addItem ("±1000 °/s", 3);
+        sensorCfgGyroCombo->addItem ("±2000 °/s", 4);
         sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorCfgGyroCombo.get());
 
