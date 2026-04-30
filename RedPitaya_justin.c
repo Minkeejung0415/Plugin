@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <errno.h>
 
 #include <netinet/tcp.h>
 
@@ -739,7 +740,7 @@ static int process_stream_commands(
     int buffered_bytes_per_frame
 ) {
     char cmd[256];
-    int n = 0;
+    ssize_t n;
 
     while ((n = recv(client_fd, cmd, sizeof(cmd) - 1, MSG_DONTWAIT)) > 0) {
         cmd[n] = '\0';
@@ -825,6 +826,8 @@ static int process_stream_commands(
         }
     }
 
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return 0;
     if (n == 0) {
         if (*record && *bin_file != NULL && *buf_idx > 0) {
             fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * (*buf_idx), *bin_file);
@@ -1141,6 +1144,18 @@ static void drain_client_rx(int fd) {
     }
 }
 
+/** Trim leading/trailing whitespace and CR/LF in place. */
+static void trim_line_in_place(char *s) {
+    char *p = s;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (p != s)
+        memmove(s, p, strlen(p) + 1);
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\r' || s[n - 1] == '\n' || s[n - 1] == ' ' || s[n - 1] == '\t'))
+        s[--n] = '\0';
+}
+
 /** One line after STARTED: active sensors at stream start (indices 0..n-1). */
 static void write_sensors_snapshot_line(int client_fd, HardwareContext *ctx) {
     char line[512];
@@ -1206,6 +1221,11 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     init_sensor_decimation(ctx, hw_hz);
 
     while (1) {
+        hw_hz = g_stream_hw_hz;
+        if (hw_hz < 1) hw_hz = 1;
+        if (hw_hz > 2000) hw_hz = 2000;
+        ticks_per_sample = (uint32_t)(CTR_CLK_RATE / hw_hz);
+
         uint32_t now = *ctx->gpio_counter;
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
@@ -1272,6 +1292,121 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     if (bin_file != NULL) fclose(bin_file);
     if (csv_file != NULL) fclose(csv_file);
     free(packet); free(frame_buffer); free(sd_write_buffer);
+    return 0;
+}
+
+/**
+ * Idle-mode command dispatch (one logical line at a time).
+ * TCP may coalesce writes (e.g. "FREQ:500\\nSTART\\n" in one read); the old
+ * else-if chain only handled the first match and dropped START.
+ * Returns 0 to keep the connection, -1 to drop the client inner loop.
+ */
+static int dispatch_idle_command_line(char *line, int client_fd, HardwareContext *ctx, int base_channels) {
+    trim_line_in_place(line);
+    if (line[0] == '\0')
+        return 0;
+
+    if (strcmp(line, "START") == 0) {
+        system("rw");
+        mkdir("/root/Measurements", 0775);
+
+        time_t rawtime;
+        struct tm *timeinfo;
+        char time_str[20];
+        char bin_filename[128];
+        char csv_filename[128];
+        time(&rawtime);
+        timeinfo = localtime(&rawtime);
+        strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
+        sprintf(bin_filename, "/root/Measurements/recording_%s.bin", time_str);
+        sprintf(csv_filename, "/root/Measurements/recording_%s.csv", time_str);
+
+        FILE *bin_fp = fopen(bin_filename, "wb");
+        if (bin_fp == NULL) {
+            perror("Failed to open binary file");
+            write(client_fd, "ERROR_FILE\n", 11);
+            return 0;
+        }
+
+        FILE *csv_fp = fopen(csv_filename, "w");
+        if (csv_fp == NULL) {
+            perror("Failed to open csv file");
+            fclose(bin_fp);
+            write(client_fd, "ERROR_FILE\n", 11);
+            return 0;
+        }
+
+        write_csv_header(csv_fp, ctx, true);
+
+        for (int si = 0; si < ctx->active_sensor_count; si++) {
+            if (ctx->sensors[si].cfg_target_hz > g_stream_hw_hz)
+                ctx->sensors[si].cfg_target_hz = g_stream_hw_hz;
+        }
+
+        char started_msg[320];
+        snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
+        write(client_fd, started_msg, strlen(started_msg));
+        write_sensors_snapshot_line(client_fd, ctx);
+        if (run_stream(client_fd, ctx, bin_fp, csv_fp, base_channels) < 0) {
+            fclose(bin_fp);
+            fclose(csv_fp);
+            return -1;
+        }
+        drain_client_rx(client_fd);
+        system("sync");
+        write(client_fd, "STOPPED\n", 8);
+        return 0;
+    }
+
+    if (strcmp(line, "REDPITAYA") == 0) {
+        char msg[64];
+        sprintf(msg, "OK CHANNELS:%d\n", ctx->total_channels);
+        write(client_fd, msg, strlen(msg));
+        return 0;
+    }
+
+    if (strcmp(line, "FUSION ON") == 0 && !fusion_is_enabled()) {
+        fusion_set_enabled(true);
+        return 0;
+    }
+    if (strcmp(line, "FUSION OFF") == 0 && fusion_is_enabled()) {
+        fusion_set_enabled(false);
+        return 0;
+    }
+
+    if (strcmp(line, "FILTER ON") == 0) {
+        fusion_set_enabled(true);
+        printf("Filter enabled.\n");
+        return 0;
+    }
+    if (strcmp(line, "FILTER OFF") == 0) {
+        fusion_set_enabled(false);
+        printf("Filter disabled.\n");
+        return 0;
+    }
+
+    if (strncmp(line, "AIN_GAIN:", 9) == 0) {
+        float gain = strtof(line + 9, NULL);
+        printf("Analog input gain set to %.2f.\n", gain);
+        return 0;
+    }
+    if (strncmp(line, "AOUT:", 5) == 0) {
+        float voltage = strtof(line + 5, NULL);
+        printf("Analog output voltage set to %.2f V.\n", voltage);
+        return 0;
+    }
+
+    if (strncmp(line, "FREQ:", 5) == 0) {
+        int frequency_hz = atoi(line + 5);
+        if (frequency_hz < 1) frequency_hz = 1;
+        if (frequency_hz > 2000) frequency_hz = 2000;
+        g_stream_hw_hz = frequency_hz;
+        printf("Hardware stream tick rate set to %d Hz (idle; applied on next START or live in stream).\n",
+               g_stream_hw_hz);
+        return 0;
+    }
+
+    printf("Unknown idle command (ignored): %s\n", line);
     return 0;
 }
 
@@ -1361,93 +1496,41 @@ int main(void) {
             printf("Client connected! TCP_NODELAY enabled. Stream unblocked.\n");
         }
 
-        char buffer[64];
+        char idle_rx[512];
+        size_t idle_len = 0;
+
         while (1) {
-            memset(buffer, 0, sizeof(buffer));
-            int n = read(client_fd, buffer, sizeof(buffer) - 1);
-            if (n <= 0) break;
-            buffer[n] = '\0';
+            if (idle_len >= sizeof(idle_rx) - 1) {
+                fprintf(stderr, "Idle command buffer overflow; discarding partial line.\n");
+                idle_len = 0;
+            }
 
-            if (strstr(buffer, "FUSION ON") && !fusion_is_enabled()) {
-                fusion_set_enabled(true);
-            }
-            else if (strstr(buffer, "FUSION OFF") && fusion_is_enabled()) {
-                fusion_set_enabled(false);
-            }
-            else if (strstr(buffer, "REDPITAYA")) {
-                char msg[64];
-                sprintf(msg, "OK CHANNELS:%d\n", ctx.total_channels);
-                write(client_fd, msg, strlen(msg));
-            }
-            else if (strstr(buffer, "FILTER ON")) {
-                fusion_set_enabled(true);
-                printf("Filter enabled.\n");
-            }
-            else if (strstr(buffer, "FILTER OFF")) {
-                fusion_set_enabled(false);
-                printf("Filter disabled.\n");
-            }
-            else if (strstr(buffer, "AIN_GAIN:")) {
-                float gain = strtof(strstr(buffer, "AIN_GAIN:") + 9, NULL);
-                printf("Analog input gain set to %.2f.\n", gain);
-            }
-            else if (strstr(buffer, "AOUT:")) {
-                float voltage = strtof(strstr(buffer, "AOUT:") + 5, NULL);
-                printf("Analog output voltage set to %.2f V.\n", voltage);
-            }
-            else if (strstr(buffer, "FREQ:")) {
-                int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
-                if (frequency_hz < 1) frequency_hz = 1;
-                if (frequency_hz > 2000) frequency_hz = 2000;
-                g_stream_hw_hz = frequency_hz;
-                printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
-            }
-            else if (strstr(buffer, "START")) {
-                system("rw");
-                mkdir("/root/Measurements", 0775);
+            ssize_t r = read(client_fd, idle_rx + idle_len, sizeof(idle_rx) - 1 - idle_len);
+            if (r <= 0)
+                break;
 
-                time_t rawtime; struct tm *timeinfo;
-                char time_str[20]; char bin_filename[128]; char csv_filename[128];
-                time(&rawtime);
-                timeinfo = localtime(&rawtime);
-                strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S", timeinfo);
-                sprintf(bin_filename, "/root/Measurements/recording_%s.bin", time_str);
-                sprintf(csv_filename, "/root/Measurements/recording_%s.csv", time_str);
+            idle_len += (size_t) r;
+            idle_rx[idle_len] = '\0';
 
-                FILE *bin_fp = fopen(bin_filename, "wb");
-                if (bin_fp == NULL) {
-                    perror("Failed to open binary file");
-                    write(client_fd, "ERROR_FILE\n", 11);
-                    continue;
+            char *start = idle_rx;
+            char *nl;
+            while ((nl = (char *) memchr(start, '\n', idle_len - (size_t) (start - idle_rx))) != NULL) {
+                *nl = '\0';
+                if (start[0] != '\0') {
+                    if (dispatch_idle_command_line(start, client_fd, &ctx, base_channels) < 0)
+                        goto end_client_session;
                 }
+                start = nl + 1;
+            }
 
-                FILE *csv_fp = fopen(csv_filename, "w");
-                if (csv_fp == NULL) {
-                    perror("Failed to open CSV file");
-                    fclose(bin_fp);
-                    write(client_fd, "ERROR_FILE\n", 11);
-                    continue;
-                }
-
-                write_csv_header(csv_fp, &ctx, true);
-
-                for (int si = 0; si < ctx.active_sensor_count; si++) {
-                    if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
-                        ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
-                }
-
-                char started_msg[320];
-                snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
-                write(client_fd, started_msg, strlen(started_msg));
-                write_sensors_snapshot_line(client_fd, &ctx);
-                if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
-                    break;
-                }
-                drain_client_rx(client_fd);
-                system("sync");
-                write(client_fd, "STOPPED\n", 8);
+            {
+                size_t remain = idle_len - (size_t) (start - idle_rx);
+                if (start != idle_rx && remain > 0)
+                    memmove(idle_rx, start, remain);
+                idle_len = remain;
             }
         }
+end_client_session:
         close(client_fd);
     }
     fusion_shutdown();
