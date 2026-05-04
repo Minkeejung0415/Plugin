@@ -235,6 +235,11 @@ public:
     /** Populated after STARTED + SENSORS: snapshot from board. */
     Array<String> streamSensorNames;
 
+    /** Per-sensor range presets, updated when CFG commands are sent.
+     *  Index matches streamSensorNames. Used by run() to scale raw counts. */
+    int sensorAccPreset[6] = {};   /* 0=±2g, 1=±4g, 2=±8g,  3=±16g       */
+    int sensorGyrPreset[6] = {};   /* 0=±250°/s, 1=±500, 2=±1000, 3=±2000 */
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };
 
