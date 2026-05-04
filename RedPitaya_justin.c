@@ -755,6 +755,73 @@ static const uint8_t ICM_GYR_REG[4] = { 0x00, 0x02, 0x04, 0x06 }; /* Bank2 0x01 
 static const uint8_t BNO_ACC_REG[4] = { 0x0C, 0x0D, 0x0E, 0x0F }; /* 0x08 */
 static const uint8_t BNO_GYR_REG[4] = { 0x3B, 0x3A, 0x39, 0x38 }; /* 0x0A */
 
+/*
+ * Write the sensor chip's internal ODR (Output Data Rate) register so the
+ * hardware produces samples at target_hz instead of its power-on default.
+ *
+ * MPU6050 / MPU9250
+ *   CONFIG  (0x1A) = 0x01  — enable DLPF so gyro output rate = 1 kHz
+ *   SMPLRT_DIV (0x19)      — Sample Rate = 1000 / (1 + div)
+ *
+ * ICM20948 (Bank 2)
+ *   GYRO_SMPLRT_DIV  (0x00) — ODR = 1100 / (1 + div),  8-bit
+ *   ACCEL_SMPLRT_DIV (0x10/0x11) — ODR = 1125 / (1 + div), 12-bit
+ *
+ * BNO055
+ *   Fixed at 100 Hz in NDOF mode — no register write possible.
+ */
+static void apply_sensor_odr(SensorInstance *s, int target_hz)
+{
+    if (target_hz < 1) target_hz = 1;
+
+    if (strcmp(s->name, "MPU6050") == 0 || strcmp(s->name, "MPU9250") == 0) {
+        int div = (1000 / target_hz) - 1;
+        if (div < 0)   div = 0;
+        if (div > 255) div = 255;
+        uint8_t smplrt_div = (uint8_t)div;
+        int actual_hz = 1000 / (div + 1);
+
+        if (s->is_spi) {
+            axi_spi_write(s->axi_map, 0x1A, 0x01); /* DLPF on → 1 kHz gyro rate */
+            axi_spi_write(s->axi_map, 0x19, smplrt_div);
+        } else {
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1A, 0x01);
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x19, smplrt_div);
+        }
+        printf("  %s ODR: SMPLRT_DIV=%d -> ~%d Hz\n", s->name, div, actual_hz);
+
+    } else if (strcmp(s->name, "ICM20948") == 0) {
+        int gyro_div  = (1100  / target_hz) - 1;
+        int accel_div = (1125  / target_hz) - 1;
+        if (gyro_div  < 0)    gyro_div  = 0;
+        if (gyro_div  > 255)  gyro_div  = 255;
+        if (accel_div < 0)    accel_div = 0;
+        if (accel_div > 4095) accel_div = 4095;
+
+        int actual_gyro_hz  = 1100  / (gyro_div  + 1);
+        int actual_accel_hz = 1125  / (accel_div + 1);
+
+        if (s->is_spi) {
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_2);
+            axi_spi_write(s->axi_map, 0x00, (uint8_t)gyro_div);
+            axi_spi_write(s->axi_map, 0x10, (uint8_t)((accel_div >> 8) & 0x0F));
+            axi_spi_write(s->axi_map, 0x11, (uint8_t)(accel_div & 0xFF));
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_0);
+        } else {
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x7F, (uint8_t)(ICM20948_BANK_2 << 4));
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x00, (uint8_t)gyro_div);
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x10, (uint8_t)((accel_div >> 8) & 0x0F));
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x11, (uint8_t)(accel_div & 0xFF));
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x7F, (uint8_t)(ICM20948_BANK_0 << 4));
+        }
+        printf("  %s ODR: gyro ~%d Hz, accel ~%d Hz\n", s->name, actual_gyro_hz, actual_accel_hz);
+
+    } else if (strcmp(s->name, "BNO055") == 0) {
+        /* NDOF fusion engine owns the ODR (fixed ~100 Hz); no register to write. */
+        printf("  BNO055 ODR fixed at ~100 Hz in NDOF mode\n");
+    }
+}
+
 static void apply_sensor_cfg_acc(SensorInstance *s, int preset)
 {
     if (preset < 0 || preset > 3) return;
@@ -905,8 +972,9 @@ static int process_stream_commands(
                     ctx->sensors[si].cfg_target_hz = val;
                     if (ctx->sensors[si].cfg_target_hz > g_stream_hw_hz)
                         ctx->sensors[si].cfg_target_hz = g_stream_hw_hz;
-                    printf("CFG sensor %d SRATE target %d Hz (hold/decimate vs hw %d Hz)\n",
-                           si, ctx->sensors[si].cfg_target_hz, g_stream_hw_hz);
+                    apply_sensor_odr(&ctx->sensors[si], ctx->sensors[si].cfg_target_hz);
+                    printf("CFG sensor %d SRATE target %d Hz (ODR + decimation updated)\n",
+                           si, ctx->sensors[si].cfg_target_hz);
                     init_sensor_decimation(ctx, g_stream_hw_hz);
                 }
             }
@@ -1090,6 +1158,7 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
     s->cfg_acc_id = 0;
     s->cfg_gyr_id = 0;
     s->cfg_target_hz = DESIRED_SAMPLE_RATE_HZ;
+    apply_sensor_odr(s, DESIRED_SAMPLE_RATE_HZ);
     ctx->active_sensor_count++;
 }
 
@@ -1520,7 +1589,8 @@ int main(void) {
                         ctx.sensors[si].cfg_target_hz = val;
                         if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
                             ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
-                        printf("CFG sensor %d SRATE %d Hz (applied at next START)\n", si, val);
+                        apply_sensor_odr(&ctx.sensors[si], ctx.sensors[si].cfg_target_hz);
+                        printf("CFG sensor %d SRATE %d Hz (ODR applied)\n", si, val);
                     }
                 }
             }
