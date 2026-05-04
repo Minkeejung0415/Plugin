@@ -590,8 +590,16 @@ String AcqBoardRedPitaya::getStreamSensorName (int index) const
     return streamSensorNames.getReference (index);
 }
 
+/* LSB per physical unit for each preset index (matches server-side tables).
+ * ACC: LSB per g.   GYR: LSB per °/s. */
+static const float kAccSensitivity[4] = { 16384.0f, 8192.0f, 4096.0f, 2048.0f };
+static const float kGyrSensitivity[4] = { 131.072f,  65.536f, 32.768f, 16.384f };
+
 bool AcqBoardRedPitaya::sendSensorCfgAcc (int sensorIndex, int presetId)
 {
+    if (sensorIndex >= 0 && sensorIndex < 6)
+        sensorAccPreset[sensorIndex] = presetId;
+
     if (commandSocket == nullptr)
         return false;
 
@@ -602,6 +610,9 @@ bool AcqBoardRedPitaya::sendSensorCfgAcc (int sensorIndex, int presetId)
 
 bool AcqBoardRedPitaya::sendSensorCfgGyr (int sensorIndex, int presetId)
 {
+    if (sensorIndex >= 0 && sensorIndex < 6)
+        sensorGyrPreset[sensorIndex] = presetId;
+
     if (commandSocket == nullptr)
         return false;
 
@@ -806,6 +817,53 @@ void AcqBoardRedPitaya::run()
 
     while (! threadShouldExit())
     {
+        // Rebuild per-channel scale factors each buffer so mid-stream range
+        // changes (sendSensorCfgAcc/Gyr) take effect within one buffer.
+        float channelScale[MAX_CHANNELS];
+        for (int i = 0; i < MAX_CHANNELS; ++i)
+            channelScale[i] = 1.0f;
+
+        {
+            int chanOffset = 0;
+            const int numSensors = streamSensorNames.size();
+
+            for (int si = 0; si < numSensors && si < 6; ++si)
+            {
+                const String& sname = streamSensorNames.getReference (si);
+                const float accScale = 1.0f / kAccSensitivity[jlimit (0, 3, sensorAccPreset[si])];
+                const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[si])];
+                const bool is6axis   = (sname == "MPU6050");
+                const bool isBNO     = (sname == "BNO055");
+                const int  numRaw    = is6axis ? 6 : 9;
+
+                // acc axes are always the first three channels for all sensors
+                channelScale[chanOffset + 0] = accScale;
+                channelScale[chanOffset + 1] = accScale;
+                channelScale[chanOffset + 2] = accScale;
+
+                if (isBNO)
+                {
+                    // BNO055 layout: [0-2]=acc, [3-5]=mag, [6-8]=gyr
+                    channelScale[chanOffset + 6] = gyrScale;
+                    channelScale[chanOffset + 7] = gyrScale;
+                    channelScale[chanOffset + 8] = gyrScale;
+                    // mag [3-5] left at 1.0 — no user-settable range
+                }
+                else
+                {
+                    // MPU family: [0-2]=acc, [3-5]=gyr, [6-8]=mag (9-axis only)
+                    channelScale[chanOffset + 3] = gyrScale;
+                    channelScale[chanOffset + 4] = gyrScale;
+                    channelScale[chanOffset + 5] = gyrScale;
+                    // mag [6-8] left at 1.0 — no user-settable range
+                }
+                // quaternion channels [numRaw..numRaw+3] left at 1.0
+
+                chanOffset += numRaw + 4;
+            }
+            // analog waveform channels after sensors left at 1.0
+        }
+
         for (int sampleIndex = 0; sampleIndex < samplesPerBuffer; ++sampleIndex)
         {
             int32_t payloadBytes = 0;
@@ -818,8 +876,8 @@ void AcqBoardRedPitaya::run()
 
             for (int adc = 0; adc < numAdcChannelsLocal; ++adc)
             {
-                const float v = (adc < channelsInPacket) ? float (channels[adc]) : 0.0f;
-                samples[(adc * samplesPerBuffer) + sampleIndex] = v;
+                const float raw = (adc < channelsInPacket) ? float (channels[adc]) : 0.0f;
+                samples[(adc * samplesPerBuffer) + sampleIndex] = raw * channelScale[adc];
             }
 
             const double timeSeconds = double (sampleNumber) / double (settings.boardSampleRate);
