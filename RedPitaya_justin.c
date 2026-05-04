@@ -29,9 +29,10 @@
 #define DESIRED_SAMPLE_RATE_HZ 100
 #define CTR_CLK_RATE      125000000
 #define HEADER_SIZE       22
-#define ANALOG_WAVEFORM_CHANNELS 0
+#define ANALOG_WAVEFORM_CHANNELS 2
 #define GYRO_BIAS_CALIBRATION_SAMPLES 200
 #define ICM20948_BANK_0 0x00
+#define ICM20948_BANK_2 0x02
 #define ICM20948_BANK_3 0x03
 #define ICM20948_EXT_SENS_DATA_00 0x3B
 #define ICM20948_I2C_MST_CTRL 0x01
@@ -726,6 +727,104 @@ static void maybe_report_vqf_stats(
     }
 }
 
+/*
+ * Preset index -> full-scale range mapping (same for MPU6050, MPU9250):
+ *   0 = ±2g  / ±250 °/s   (ACCEL_CONFIG/GYRO_CONFIG bits [4:3] = 00)
+ *   1 = ±4g  / ±500 °/s   (bits = 01)
+ *   2 = ±8g  / ±1000 °/s  (bits = 10)
+ *   3 = ±16g / ±2000 °/s  (bits = 11)
+ */
+static const uint8_t MPU_ACC_REG[4] = { 0x00, 0x08, 0x10, 0x18 }; /* reg 0x1C */
+static const uint8_t MPU_GYR_REG[4] = { 0x00, 0x08, 0x10, 0x18 }; /* reg 0x1B */
+
+/*
+ * ICM20948 Bank-2 ACCEL_CONFIG (0x14) / GYRO_CONFIG_1 (0x01):
+ *   ACCEL_FS_SEL in bits [2:1], GYRO_FS_SEL in bits [2:1]
+ *   FCHOICE left 0 (bypass DLPF for max rate).
+ */
+static const uint8_t ICM_ACC_REG[4] = { 0x00, 0x02, 0x04, 0x06 }; /* Bank2 0x14 */
+static const uint8_t ICM_GYR_REG[4] = { 0x00, 0x02, 0x04, 0x06 }; /* Bank2 0x01 */
+
+/*
+ * BNO055 ACC_Config (0x08) in CONFIG mode:
+ *   bits [1:0] = range, bits [4:2] = bandwidth (62.5 Hz = 011).
+ * BNO055 GYR_Config_0 (0x0A) in CONFIG mode:
+ *   bits [2:0] = range (inverted order), bits [5:3] = bandwidth (32 Hz = 111).
+ *   Preset 0->±250 (reg 3), preset 3->±2000 (reg 0).
+ */
+static const uint8_t BNO_ACC_REG[4] = { 0x0C, 0x0D, 0x0E, 0x0F }; /* 0x08 */
+static const uint8_t BNO_GYR_REG[4] = { 0x3B, 0x3A, 0x39, 0x38 }; /* 0x0A */
+
+static void apply_sensor_cfg_acc(SensorInstance *s, int preset)
+{
+    if (preset < 0 || preset > 3) return;
+
+    if (strcmp(s->name, "MPU6050") == 0) {
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1C, MPU_ACC_REG[preset]);
+        printf("  %s ACC preset %d -> reg 0x1C = 0x%02X\n", s->name, preset, MPU_ACC_REG[preset]);
+    } else if (strcmp(s->name, "MPU9250") == 0) {
+        if (s->is_spi)
+            axi_spi_write(s->axi_map, 0x1C, MPU_ACC_REG[preset]);
+        else
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1C, MPU_ACC_REG[preset]);
+        printf("  %s ACC preset %d -> reg 0x1C = 0x%02X\n", s->name, preset, MPU_ACC_REG[preset]);
+    } else if (strcmp(s->name, "ICM20948") == 0) {
+        if (s->is_spi) {
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_2);
+            axi_spi_write(s->axi_map, 0x14, ICM_ACC_REG[preset]);
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_0);
+        } else {
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x7F, (uint8_t)(ICM20948_BANK_2 << 4));
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x14, ICM_ACC_REG[preset]);
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x7F, (uint8_t)(ICM20948_BANK_0 << 4));
+        }
+        printf("  %s ACC preset %d -> Bank2 reg 0x14 = 0x%02X\n", s->name, preset, ICM_ACC_REG[preset]);
+    } else if (strcmp(s->name, "BNO055") == 0) {
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x3D, 0x00); /* CONFIG mode */
+        usleep(25000);
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x08, BNO_ACC_REG[preset]);
+        usleep(10000);
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x3D, 0x0C); /* NDOF mode */
+        usleep(25000);
+        printf("  %s ACC preset %d -> reg 0x08 = 0x%02X\n", s->name, preset, BNO_ACC_REG[preset]);
+    }
+}
+
+static void apply_sensor_cfg_gyr(SensorInstance *s, int preset)
+{
+    if (preset < 0 || preset > 3) return;
+
+    if (strcmp(s->name, "MPU6050") == 0) {
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1B, MPU_GYR_REG[preset]);
+        printf("  %s GYR preset %d -> reg 0x1B = 0x%02X\n", s->name, preset, MPU_GYR_REG[preset]);
+    } else if (strcmp(s->name, "MPU9250") == 0) {
+        if (s->is_spi)
+            axi_spi_write(s->axi_map, 0x1B, MPU_GYR_REG[preset]);
+        else
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1B, MPU_GYR_REG[preset]);
+        printf("  %s GYR preset %d -> reg 0x1B = 0x%02X\n", s->name, preset, MPU_GYR_REG[preset]);
+    } else if (strcmp(s->name, "ICM20948") == 0) {
+        if (s->is_spi) {
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_2);
+            axi_spi_write(s->axi_map, 0x01, ICM_GYR_REG[preset]);
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_0);
+        } else {
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x7F, (uint8_t)(ICM20948_BANK_2 << 4));
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x01, ICM_GYR_REG[preset]);
+            axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x7F, (uint8_t)(ICM20948_BANK_0 << 4));
+        }
+        printf("  %s GYR preset %d -> Bank2 reg 0x01 = 0x%02X\n", s->name, preset, ICM_GYR_REG[preset]);
+    } else if (strcmp(s->name, "BNO055") == 0) {
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x3D, 0x00); /* CONFIG mode */
+        usleep(25000);
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x0A, BNO_GYR_REG[preset]);
+        usleep(10000);
+        axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x3D, 0x0C); /* NDOF mode */
+        usleep(25000);
+        printf("  %s GYR preset %d -> reg 0x0A = 0x%02X\n", s->name, preset, BNO_GYR_REG[preset]);
+    }
+}
+
 static int process_stream_commands(
     int client_fd,
     HardwareContext *ctx,
@@ -790,14 +889,16 @@ static int process_stream_commands(
         if (strstr(cmd, "CFG ")) {
             int si = -1, val = -1;
             if (sscanf(cmd, "CFG %d ACC %d", &si, &val) == 2) {
-                if (si >= 0 && si < ctx->active_sensor_count && val >= 0) {
+                if (si >= 0 && si < ctx->active_sensor_count && val >= 0 && val <= 3) {
                     ctx->sensors[si].cfg_acc_id = val;
-                    printf("CFG sensor %d ACC preset %d\n", si, val);
+                    apply_sensor_cfg_acc(&ctx->sensors[si], val);
+                    printf("CFG sensor %d ACC preset %d applied\n", si, val);
                 }
             } else if (sscanf(cmd, "CFG %d GYR %d", &si, &val) == 2) {
-                if (si >= 0 && si < ctx->active_sensor_count && val >= 0) {
+                if (si >= 0 && si < ctx->active_sensor_count && val >= 0 && val <= 3) {
                     ctx->sensors[si].cfg_gyr_id = val;
-                    printf("CFG sensor %d GYR preset %d\n", si, val);
+                    apply_sensor_cfg_gyr(&ctx->sensors[si], val);
+                    printf("CFG sensor %d GYR preset %d applied\n", si, val);
                 }
             } else if (sscanf(cmd, "CFG %d SRATE %d", &si, &val) == 2) {
                 if (si >= 0 && si < ctx->active_sensor_count && val >= 1) {
@@ -1314,7 +1415,7 @@ int main(void) {
     }
 
     calibrate_gyro_biases(&ctx);
-    // init_analog_waveform_inputs(); // Disabled: RP oscilloscope IP not in current bitstream
+    init_analog_waveform_inputs();
 
     // Plugin controls fusion state - default to OFF
     start_with_fusion = false;
@@ -1399,6 +1500,29 @@ int main(void) {
                 if (frequency_hz > 2000) frequency_hz = 2000;
                 g_stream_hw_hz = frequency_hz;
                 printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
+            }
+            else if (strncmp(buffer, "CFG ", 4) == 0) {
+                int si = -1, val = -1;
+                if (sscanf(buffer, "CFG %d ACC %d", &si, &val) == 2) {
+                    if (si >= 0 && si < ctx.active_sensor_count && val >= 0 && val <= 3) {
+                        ctx.sensors[si].cfg_acc_id = val;
+                        apply_sensor_cfg_acc(&ctx.sensors[si], val);
+                        printf("CFG sensor %d ACC preset %d applied\n", si, val);
+                    }
+                } else if (sscanf(buffer, "CFG %d GYR %d", &si, &val) == 2) {
+                    if (si >= 0 && si < ctx.active_sensor_count && val >= 0 && val <= 3) {
+                        ctx.sensors[si].cfg_gyr_id = val;
+                        apply_sensor_cfg_gyr(&ctx.sensors[si], val);
+                        printf("CFG sensor %d GYR preset %d applied\n", si, val);
+                    }
+                } else if (sscanf(buffer, "CFG %d SRATE %d", &si, &val) == 2) {
+                    if (si >= 0 && si < ctx.active_sensor_count && val >= 1) {
+                        ctx.sensors[si].cfg_target_hz = val;
+                        if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
+                            ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
+                        printf("CFG sensor %d SRATE %d Hz (applied at next START)\n", si, val);
+                    }
+                }
             }
             else if (strstr(buffer, "START")) {
                 system("rw");
