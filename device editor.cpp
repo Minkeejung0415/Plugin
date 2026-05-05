@@ -898,10 +898,12 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
         {
-            // Send the command to the Red Pitaya!
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
             board->updateSampleFrequency (newFreq);
         }
+
+        if (! acquisitionIsActive)
+            CoreServices::updateSignalChain (this);
 
         if (redPitayaSensorUiBuilt && acquisitionIsActive)
             repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);

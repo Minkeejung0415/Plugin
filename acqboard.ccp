@@ -756,7 +756,7 @@ void AcqBoardRedPitaya::run()
         return;
 
     int64 sampleNumber = 0;
-    const int64 samplesPerBuffer = int64 (settings.boardSampleRate / 1000.0);
+    const int64 samplesPerBuffer = 1;
     uint64 eventCode = 0;
 
     const int numAdcChannelsLocal = getNumDataOutputs (ContinuousChannel::ADC);
