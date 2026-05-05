@@ -303,6 +303,15 @@ bool AcqBoardRedPitaya::startAcquisition()
         return false;
     }
 
+    // Tell the server its hardware tick rate before starting the stream so
+    // timestamps and per-sensor decimation are computed from the same base rate.
+    {
+        char freqMsg[32];
+        int targetHz = jlimit (1, 2000, (int) settings.boardSampleRate);
+        snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
+        commandSocket->write (freqMsg, (int) strlen (freqMsg));
+    }
+
     const char* msg = "START\n";
     commandSocket->write (msg, (int) strlen (msg));
 
@@ -489,6 +498,10 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
 {
     if (! deviceFound)
         return;
+
+    // Keep plugin timestamp math in sync with whatever rate we send to the server.
+    if (newFreq >= 1 && newFreq <= 2000)
+        settings.boardSampleRate = static_cast<float> (newFreq);
 
     // 1. SELF-HEALING: Trash dead sockets
     if (commandSocket != nullptr && ! commandSocket->isConnected())
