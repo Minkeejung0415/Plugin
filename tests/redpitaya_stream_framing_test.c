@@ -4,9 +4,10 @@
  * in AcqBoardRedPitaya::run() (bytes-per-frame from header, not channel count).
  *
  * Build and run (from repo root):
- *   cc -std=c99 -Wall -Wextra -o /tmp/rp_framing_test tests/redpitaya_stream_framing_test.c && /tmp/rp_framing_test
+ *   cc -std=c99 -Wall -Wextra -lm -o /tmp/rp_framing_test tests/redpitaya_stream_framing_test.c && /tmp/rp_framing_test
  */
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -79,8 +80,10 @@ static int test_samples_per_buffer(void)
     int n = (int)(sizeof(cases) / sizeof(cases[0]));
 
     for (int i = 0; i < n; i++) {
-        int64_t old_val = (int64_t)(cases[i].rate / 1000.0);
-        int64_t new_val = old_val > 1 ? old_val : 1;
+        /* Mirrors AcqBoardRedPitaya::run(): jmax(1, lround(boardSampleRate / 1000)) */
+        int64_t new_val = (int64_t) lround((double) cases[i].rate / 1000.0);
+        if (new_val < 1)
+            new_val = 1;
 
         if (new_val < cases[i].expected_min) {
             fprintf(stderr, "FAIL: samplesPerBuffer for %.0f Hz = %lld, expected >= %lld\n",

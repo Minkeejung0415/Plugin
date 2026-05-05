@@ -462,6 +462,17 @@ int DeviceEditor::getSelectedStreamSensorIndex() const
     return jmax (0, id - 1);
 }
 
+void DeviceEditor::syncRedPitayaBoardSampleRateFromLabel()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya
+        || sampleRateLabel == nullptr)
+        return;
+
+    const int rawHz = sampleRateLabel->getText().getIntValue();
+    const int hz = jlimit (1, 2000, rawHz > 0 ? rawHz : 100);
+    board->setSampleRate (hz);
+}
+
 void DeviceEditor::repopulateSensorRateComboForHwHz (int hwHz)
 {
     if (sensorCfgRateCombo == nullptr)
@@ -854,7 +865,11 @@ void DeviceEditor::startAcquisition()
 
     acquisitionIsActive = true;
 
+    syncRedPitayaBoardSampleRateFromLabel();
     refreshRedPitayaSensorCombosFromBoard();
+
+    if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+        CoreServices::updateSignalChain (this);
 }
 
 void DeviceEditor::stopAcquisition()
@@ -898,13 +913,19 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
         {
+            const int clamped = jlimit (1, 2000, newFreq > 0 ? newFreq : 100);
+            board->setSampleRate (clamped);
+
             // Send the command to the Red Pitaya!
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
             board->updateSampleFrequency (newFreq);
         }
 
         if (redPitayaSensorUiBuilt && acquisitionIsActive)
+        {
             repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
+            CoreServices::updateSignalChain (this);
+        }
     }
     else if (labelThatHasChanged == analogInLabel.get())
     {
