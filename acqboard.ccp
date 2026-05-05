@@ -7,6 +7,7 @@
 */
 
 #include "Acqboardredpitaya.h"
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -754,7 +755,9 @@ void AcqBoardRedPitaya::run()
         return;
 
     int64 sampleNumber = 0;
-    const int64 samplesPerBuffer = jmax (int64 (1), int64 (settings.boardSampleRate / 1000.0));
+    const int64 samplesPerBuffer = jmax (
+        int64 (1),
+        int64 (std::lround (static_cast<double> (settings.boardSampleRate) / 1000.0)));
     uint64 eventCode = 0;
 
     const int numAdcChannelsLocal = getNumDataOutputs (ContinuousChannel::ADC);
