@@ -786,11 +786,14 @@ void DeviceEditor::buttonClicked (Button* button)
 
 void DeviceEditor::startAcquisition()
 {
-    // Ensure the DataStream is declared at the rate currently set in the board
-    // before any data flows.  Without this, the stream stays at whatever rate
-    // was active when the plugin was last loaded (default 1000 Hz), so data
-    // arriving at a different rate appears frozen or absent on the display.
-    CoreServices::updateSignalChain (this);
+    //rescanButton->setEnabledState (false);
+    //auxButton->setEnabledState (false);
+    //adcButton->setEnabledState (false);
+    //dspoffsetButton->setEnabledState (false);
+
+    // Allow filter to remain enabled during acquisition
+    // if (filterButton != nullptr)
+    //     filterButton->setEnabledState (false);
 
     if (filterButton != nullptr)
         filterButton->setEnabledState (true);
@@ -895,12 +898,10 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
         {
+            // Send the command to the Red Pitaya!
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
             board->updateSampleFrequency (newFreq);
         }
-
-        if (! acquisitionIsActive)
-            CoreServices::updateSignalChain (this);
 
         if (redPitayaSensorUiBuilt && acquisitionIsActive)
             repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
