@@ -197,12 +197,11 @@ Array<int> AcqBoardRedPitaya::getAvailableSampleRates()
 {
     Array<int> sampleRates;
 
-    // Populate with a simple set of options; these can be adapted
-    // to match the Red Pitaya configuration.
+    sampleRates.add (100);
+    sampleRates.add (250);
+    sampleRates.add (500);
     sampleRates.add (1000);
     sampleRates.add (2000);
-    sampleRates.add (5000);
-    sampleRates.add (10000);
 
     return sampleRates;
 }
@@ -756,7 +755,7 @@ void AcqBoardRedPitaya::run()
         return;
 
     int64 sampleNumber = 0;
-    const int64 samplesPerBuffer = 1;
+    const int64 samplesPerBuffer = jmax (int64 (1), int64 (settings.boardSampleRate / 1000.0));
     uint64 eventCode = 0;
 
     const int numAdcChannelsLocal = getNumDataOutputs (ContinuousChannel::ADC);
