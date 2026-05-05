@@ -197,11 +197,12 @@ Array<int> AcqBoardRedPitaya::getAvailableSampleRates()
 {
     Array<int> sampleRates;
 
-    sampleRates.add (100);
-    sampleRates.add (250);
-    sampleRates.add (500);
+    // Populate with a simple set of options; these can be adapted
+    // to match the Red Pitaya configuration.
     sampleRates.add (1000);
     sampleRates.add (2000);
+    sampleRates.add (5000);
+    sampleRates.add (10000);
 
     return sampleRates;
 }
@@ -300,15 +301,6 @@ bool AcqBoardRedPitaya::startAcquisition()
         delete commandSocket;
         commandSocket = nullptr;
         return false;
-    }
-
-    // Tell the server its hardware tick rate before starting the stream so
-    // timestamps and per-sensor decimation are computed from the same base rate.
-    {
-        char freqMsg[32];
-        int targetHz = jlimit (1, 2000, (int) settings.boardSampleRate);
-        snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
-        commandSocket->write (freqMsg, (int) strlen (freqMsg));
     }
 
     const char* msg = "START\n";
@@ -427,13 +419,7 @@ bool AcqBoardRedPitaya::stopAcquisition()
     if (isThreadRunning())
         signalThreadShouldExit();
 
-    // 2. Null the buffer so run() sees nullptr before addToBuffer on the next
-    //    iteration and exits cleanly. The framework's updateSettings() will
-    //    delete and recreate the DataBuffer after startAcquisition() returns;
-    //    if run() still holds the old pointer at that moment it would crash.
-    buffer = nullptr;
-
-    // 3. Close the TCP connection. The Red Pitaya server then sees EOF /
+    // 2. Close the TCP connection first. The Red Pitaya server then sees EOF /
     //    send failure and leaves run_stream; we must NOT write STOP (or anything)
     //    on this socket while run() is still consuming the same byte stream as
     //    binary packets — that corrupts framing and leaves stale bytes for the
@@ -441,7 +427,7 @@ bool AcqBoardRedPitaya::stopAcquisition()
     if (commandSocket != nullptr)
         commandSocket->close();
 
-    // 4. Wait for run() to finish before deleting the socket object.
+    // 3. Wait for run() to finish before deleting the socket object.
     stopThread (500);
 
     if (commandSocket != nullptr)
@@ -449,6 +435,9 @@ bool AcqBoardRedPitaya::stopAcquisition()
         delete commandSocket;
         commandSocket = nullptr;
     }
+
+    if (buffer != nullptr)
+        buffer->clear();
 
     streamSensorNames.clear();
 
@@ -500,10 +489,6 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
 {
     if (! deviceFound)
         return;
-
-    // Keep plugin timestamp math in sync with whatever rate we send to the server.
-    if (newFreq >= 1 && newFreq <= 2000)
-        settings.boardSampleRate = static_cast<float> (newFreq);
 
     // 1. SELF-HEALING: Trash dead sockets
     if (commandSocket != nullptr && ! commandSocket->isConnected())
@@ -758,7 +743,7 @@ void AcqBoardRedPitaya::run()
         return;
 
     int64 sampleNumber = 0;
-    const int64 samplesPerBuffer = jmax (int64 (1), int64 (settings.boardSampleRate / 1000.0));
+    const int64 samplesPerBuffer = int64 (settings.boardSampleRate / 1000.0);
     uint64 eventCode = 0;
 
     const int numAdcChannelsLocal = getNumDataOutputs (ContinuousChannel::ADC);
@@ -832,14 +817,6 @@ void AcqBoardRedPitaya::run()
 
     while (! threadShouldExit())
     {
-        DataBuffer* currentBuffer = buffer;
-
-        if (currentBuffer == nullptr)
-        {
-            Thread::sleep (1);
-            continue;
-        }
-
         // Rebuild per-channel scale factors each buffer so mid-stream range
         // changes (sendSensorCfgAcc/Gyr) take effect within one buffer.
         float channelScale[MAX_CHANNELS];
@@ -911,14 +888,10 @@ void AcqBoardRedPitaya::run()
             ++sampleNumber;
         }
 
-        currentBuffer = buffer;
-        if (currentBuffer == nullptr || threadShouldExit())
-            return;
-
-        currentBuffer->addToBuffer (samples,
-                                    sampleNumbers,
-                                    timestamps,
-                                    event_codes,
-                                    (int) samplesPerBuffer);
+        buffer->addToBuffer (samples,
+                             sampleNumbers,
+                             timestamps,
+                             event_codes,
+                             (int) samplesPerBuffer);
     }
 }

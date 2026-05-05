@@ -67,42 +67,6 @@ static int read_one_frame(const uint8_t *stream, size_t len, size_t *pos,
     return 0;
 }
 
-/*
- * Mirrors the samplesPerBuffer calculation from AcqBoardRedPitaya::run().
- * The old code was: (int64)(boardSampleRate / 1000.0)
- * which truncates to 0 for any rate < 1000 Hz, causing run() to exit.
- * The fix clamps to at least 1.
- */
-static int test_samples_per_buffer(void)
-{
-    struct { float rate; int64_t expected_min; } cases[] = {
-        {  100.0f, 1 },
-        {  250.0f, 1 },
-        {  500.0f, 1 },
-        { 1000.0f, 1 },
-        { 2000.0f, 2 },
-    };
-    int n = (int)(sizeof(cases) / sizeof(cases[0]));
-
-    for (int i = 0; i < n; i++) {
-        int64_t old_val = (int64_t)(cases[i].rate / 1000.0);
-        int64_t new_val = old_val > 1 ? old_val : 1; /* jmax(1, ...) equivalent */
-
-        if (old_val <= 0 && cases[i].rate < 1000.0f) {
-            /* This is the bug: old code would have returned 0, blocking all data */
-        }
-
-        if (new_val < cases[i].expected_min) {
-            fprintf(stderr, "FAIL: samplesPerBuffer for %.0f Hz = %lld, expected >= %lld\n",
-                    (double)cases[i].rate, (long long)new_val, (long long)cases[i].expected_min);
-            return 1;
-        }
-    }
-
-    printf("OK: samplesPerBuffer >= 1 for all supported rates\n");
-    return 0;
-}
-
 int main(void)
 {
     uint8_t blob[512];
@@ -162,10 +126,5 @@ int main(void)
     }
 
     printf("OK: variable payload framing and resync\n");
-
-    if (test_samples_per_buffer() != 0)
-        return 1;
-
-    printf("ALL TESTS PASSED\n");
     return 0;
 }

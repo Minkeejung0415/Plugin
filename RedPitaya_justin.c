@@ -1536,40 +1536,6 @@ int main(void) {
             if (n <= 0) break;
             buffer[n] = '\0';
 
-            /* FREQ and CFG are checked unconditionally so they are always
-               applied even when combined with START in the same TCP read. */
-            if (strstr(buffer, "FREQ:")) {
-                int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
-                if (frequency_hz < 1) frequency_hz = 1;
-                if (frequency_hz > 2000) frequency_hz = 2000;
-                g_stream_hw_hz = frequency_hz;
-                printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
-            }
-            if (strncmp(buffer, "CFG ", 4) == 0) {
-                int si = -1, val = -1;
-                if (sscanf(buffer, "CFG %d ACC %d", &si, &val) == 2) {
-                    if (si >= 0 && si < ctx.active_sensor_count && val >= 0 && val <= 3) {
-                        ctx.sensors[si].cfg_acc_id = val;
-                        apply_sensor_cfg_acc(&ctx.sensors[si], val);
-                        printf("CFG sensor %d ACC preset %d applied\n", si, val);
-                    }
-                } else if (sscanf(buffer, "CFG %d GYR %d", &si, &val) == 2) {
-                    if (si >= 0 && si < ctx.active_sensor_count && val >= 0 && val <= 3) {
-                        ctx.sensors[si].cfg_gyr_id = val;
-                        apply_sensor_cfg_gyr(&ctx.sensors[si], val);
-                        printf("CFG sensor %d GYR preset %d applied\n", si, val);
-                    }
-                } else if (sscanf(buffer, "CFG %d SRATE %d", &si, &val) == 2) {
-                    if (si >= 0 && si < ctx.active_sensor_count && val >= 1) {
-                        ctx.sensors[si].cfg_target_hz = val;
-                        if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
-                            ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
-                        apply_sensor_odr(&ctx.sensors[si], ctx.sensors[si].cfg_target_hz);
-                        printf("CFG sensor %d SRATE %d Hz (ODR applied)\n", si, val);
-                    }
-                }
-            }
-
             if (strstr(buffer, "FUSION ON") && !fusion_is_enabled()) {
                 fusion_set_enabled(true);
             }
@@ -1596,6 +1562,37 @@ int main(void) {
             else if (strstr(buffer, "AOUT:")) {
                 float voltage = strtof(strstr(buffer, "AOUT:") + 5, NULL);
                 printf("Analog output voltage set to %.2f V.\n", voltage);
+            }
+            else if (strstr(buffer, "FREQ:")) {
+                int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
+                if (frequency_hz < 1) frequency_hz = 1;
+                if (frequency_hz > 2000) frequency_hz = 2000;
+                g_stream_hw_hz = frequency_hz;
+                printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
+            }
+            else if (strncmp(buffer, "CFG ", 4) == 0) {
+                int si = -1, val = -1;
+                if (sscanf(buffer, "CFG %d ACC %d", &si, &val) == 2) {
+                    if (si >= 0 && si < ctx.active_sensor_count && val >= 0 && val <= 3) {
+                        ctx.sensors[si].cfg_acc_id = val;
+                        apply_sensor_cfg_acc(&ctx.sensors[si], val);
+                        printf("CFG sensor %d ACC preset %d applied\n", si, val);
+                    }
+                } else if (sscanf(buffer, "CFG %d GYR %d", &si, &val) == 2) {
+                    if (si >= 0 && si < ctx.active_sensor_count && val >= 0 && val <= 3) {
+                        ctx.sensors[si].cfg_gyr_id = val;
+                        apply_sensor_cfg_gyr(&ctx.sensors[si], val);
+                        printf("CFG sensor %d GYR preset %d applied\n", si, val);
+                    }
+                } else if (sscanf(buffer, "CFG %d SRATE %d", &si, &val) == 2) {
+                    if (si >= 0 && si < ctx.active_sensor_count && val >= 1) {
+                        ctx.sensors[si].cfg_target_hz = val;
+                        if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
+                            ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
+                        apply_sensor_odr(&ctx.sensors[si], ctx.sensors[si].cfg_target_hz);
+                        printf("CFG sensor %d SRATE %d Hz (ODR applied)\n", si, val);
+                    }
+                }
             }
             else if (strstr(buffer, "START")) {
                 system("rw");
