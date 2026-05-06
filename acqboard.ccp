@@ -11,14 +11,8 @@
 #include <cstdint>
 #include <cstring>
 
-// Full type for juce::DatagramSocket: prefer module umbrella (Additional Include = JUCE modules dir).
-#if __has_include(<juce_core/juce_core.h>)
+/* DatagramSocket: ensure JUCE "modules" directory is on the compiler include path. */
 #include <juce_core/juce_core.h>
-#elif __has_include(<JuceHeader.h>)
-#include <JuceHeader.h>
-#elif __has_include(<networking/juce_DatagramSocket.h>)
-#include <networking/juce_DatagramSocket.h>
-#endif
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
     : AcquisitionBoard()
