@@ -25,6 +25,8 @@
 
 // --- Hardware Constants ---
 #define AXI_GPIO_ADDRESS  0x41200000
+/* Custom FPGA oscilloscope / analog channel IP (AXI-lite base); verify against Vivado address map. */
+#define AXI_OSCILLOSCOPE_ADDRESS 0x42000000
 #define RANGE             64000
 #define IIC_RANGE         64000
 #define PORT              5000
@@ -103,6 +105,7 @@ typedef struct {
 static sigjmp_buf watchdog_bucket;
 static volatile sig_atomic_t stop_requested = 0;
 static bool analog_inputs_ready = false;
+static void *axi_oscilloscope_map = NULL;
 
 static long long timespec_diff_ns(const struct timespec *start, const struct timespec *end) {
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
@@ -284,13 +287,33 @@ static void build_measurement_path(char *buffer, size_t buffer_size, const char 
 
 static void init_analog_waveform_inputs(void) {
     signal(SIGBUS, watchdog_handler);
+    axi_oscilloscope_map = NULL;
 
     if (sigsetjmp(watchdog_bucket, 1) != 0) {
-        fprintf(stderr, "SIGBUS caught during RP analog init: acquisition hardware not present in current FPGA bitstream.\n");
-        fprintf(stderr, "Analog waveform channels will be zero until a bitstream with the oscilloscope IP is loaded.\n");
+        fprintf(stderr, "SIGBUS caught during oscilloscope AXI mmap/init.\n");
+        fprintf(stderr, "Analog waveform channels will be zero until the oscilloscope IP is reachable at 0x%08X.\n",
+                AXI_OSCILLOSCOPE_ADDRESS);
         analog_inputs_ready = false;
+        axi_oscilloscope_map = NULL;
         signal(SIGBUS, SIG_DFL);
         return;
+    }
+
+    int fd_mem = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd_mem >= 0) {
+        void *m = mmap(NULL, RANGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd_mem, AXI_OSCILLOSCOPE_ADDRESS);
+        close(fd_mem);
+        if (m != MAP_FAILED) {
+            axi_oscilloscope_map = m;
+            analog_inputs_ready = true;
+            signal(SIGBUS, SIG_DFL);
+            printf("Analog waveform: mapped oscilloscope AXI at 0x%08X (%d channels, register layout may need tuning).\n",
+                   AXI_OSCILLOSCOPE_ADDRESS, ANALOG_WAVEFORM_CHANNELS);
+            return;
+        }
+        perror("mmap AXI oscilloscope");
+    } else {
+        perror("open /dev/mem for oscilloscope");
     }
 
     if (rp_Init() != RP_OK) {
@@ -305,7 +328,7 @@ static void init_analog_waveform_inputs(void) {
     rp_AcqStart();
     analog_inputs_ready = true;
     signal(SIGBUS, SIG_DFL);
-    printf("Red Pitaya analog waveform inputs enabled (%d channels).\n", ANALOG_WAVEFORM_CHANNELS);
+    printf("Red Pitaya analog waveform inputs enabled via rp API (%d channels).\n", ANALOG_WAVEFORM_CHANNELS);
 }
 
 static void read_analog_waveform_channels(int16_t *channel_out) {
@@ -314,6 +337,14 @@ static void read_analog_waveform_channels(int16_t *channel_out) {
     }
 
     if (!analog_inputs_ready) {
+        return;
+    }
+
+    if (axi_oscilloscope_map != NULL) {
+        /* FPGA-specific: adjust indices / masks to match your oscilloscope core registers. */
+        volatile uint32_t *regs = (volatile uint32_t *)axi_oscilloscope_map;
+        channel_out[0] = (int16_t)(regs[0] & 0xFFFFu);
+        channel_out[1] = (int16_t)(regs[1] & 0xFFFFu);
         return;
     }
 
