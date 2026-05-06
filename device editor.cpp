@@ -867,9 +867,6 @@ void DeviceEditor::startAcquisition()
 
     syncRedPitayaBoardSampleRateFromLabel();
     refreshRedPitayaSensorCombosFromBoard();
-
-    if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
-        CoreServices::updateSignalChain (this);
 }
 
 void DeviceEditor::stopAcquisition()
@@ -922,7 +919,12 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
             if (redPitayaSensorUiBuilt)
                 repopulateSensorRateComboForHwHz (clamped);
 
-            CoreServices::updateSignalChain (this);
+            // Only update the signal chain when not acquiring; during acquisition
+            // the board already received the FREQ command via updateSampleFrequency(),
+            // and calling updateSignalChain() while run() is live frees the DataBuffer
+            // it is actively using (use-after-free / crash in addToBuffer).
+            if (! acquisitionIsActive)
+                CoreServices::updateSignalChain (this);
         }
     }
     else if (labelThatHasChanged == analogInLabel.get())
