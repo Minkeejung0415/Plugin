@@ -521,6 +521,8 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
             std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
             delete commandSocket;
             commandSocket = nullptr;
+            if (editor != nullptr)
+                editor->notifyStreamSampleRateChanged();
             return;
         }
     }
@@ -540,6 +542,9 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
         std::cout << "Red Pitaya Backend ERROR: Socket write failed." << std::endl;
         commandSocket->close();
     }
+
+    if (editor != nullptr)
+        editor->notifyStreamSampleRateChanged();
 }
 
 void AcqBoardRedPitaya::setFilterEnabled (bool enabled)

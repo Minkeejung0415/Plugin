@@ -473,6 +473,14 @@ void DeviceEditor::syncRedPitayaBoardSampleRateFromLabel()
     board->setSampleRate (hz);
 }
 
+void DeviceEditor::notifyStreamSampleRateChanged()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    CoreServices::updateSignalChain (this);
+}
+
 void DeviceEditor::repopulateSensorRateComboForHwHz (int hwHz)
 {
     if (sensorCfgRateCombo == nullptr)
@@ -922,10 +930,7 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
         }
 
         if (redPitayaSensorUiBuilt && acquisitionIsActive)
-        {
             repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
-            CoreServices::updateSignalChain (this);
-        }
     }
     else if (labelThatHasChanged == analogInLabel.get())
     {

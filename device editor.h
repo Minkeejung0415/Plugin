@@ -111,6 +111,9 @@ public:
         hardware Hz label so Open Ephys stream metadata and buffer sizing match the TCP stream. */
     void syncRedPitayaBoardSampleRateFromLabel();
 
+    /** Rebuilds the signal chain so DataStream sample rate metadata matches the board (Red Pitaya). */
+    void notifyStreamSampleRateChanged();
+
 private:
     /** Pointer to acquisition board device */
     class AcquisitionBoard* board;
