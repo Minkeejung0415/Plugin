@@ -321,15 +321,21 @@ bool AcqBoardRedPitaya::startAcquisition()
 
     streamDatagramSocket = new juce::DatagramSocket();
 
-    if (! streamDatagramSocket->bindToPort (0))
+    // Bind to IPv4 any (0.0.0.0) so we match the board's AF_INET sendto. A plain
+    // bindToPort(0) can differ on some Windows dual-stack / interface setups and
+    // then no datagrams arrive even though TCP still works.
+    if (! streamDatagramSocket->bindToPort (0, "0.0.0.0"))
     {
-        std::cout << "Red Pitaya ERROR: Could not bind UDP receive socket." << std::endl;
-        delete streamDatagramSocket;
-        streamDatagramSocket = nullptr;
-        commandSocket->close();
-        delete commandSocket;
-        commandSocket = nullptr;
-        return false;
+        if (! streamDatagramSocket->bindToPort (0))
+        {
+            std::cout << "Red Pitaya ERROR: Could not bind UDP receive socket." << std::endl;
+            delete streamDatagramSocket;
+            streamDatagramSocket = nullptr;
+            commandSocket->close();
+            delete commandSocket;
+            commandSocket = nullptr;
+            return false;
+        }
     }
 
     {

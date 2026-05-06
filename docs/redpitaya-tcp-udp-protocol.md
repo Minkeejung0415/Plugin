@@ -87,4 +87,23 @@ This document is the **normative handshake** between `RedPitaya_justin.c` (firmw
 
 ---
 
+## 9. Why TCP “just worked” and UDP often does not
+
+Commit **`ac19596`** only adds **monotonic timing instrumentation** in **`RedPitaya_justin.c`**; it does **not** implement or change the transport. The stable **all-TCP** setup was **main before the UDP split**: binary samples used the **same TCP socket** as text commands, so there was **no second socket**, **no inbound UDP firewall rule**, and **no `STREAM_UDP` handshake**.
+
+| TCP-only (legacy) | TCP + UDP (current) |
+|-------------------|---------------------|
+| Single connection; ordered byte stream | Separate **UDP receive** socket on the PC |
+| Firewall usually allows **outbound** TCP you initiated | **Inbound UDP** from the Red Pitaya IP may be **blocked** even when TCP works |
+| Back-pressure could stall the GUI thread | **`STREAM_UDP`** must precede **`START`**; **firmware + plugin must match** |
+
+### If live traces stay flat / streaming appears dead
+
+1. Confirm **Windows Firewall** allows **inbound UDP** to the ephemeral port (test with firewall off briefly).
+2. Confirm **`REDPITAYA`** returns **`UDP:1`** and both sides are rebuilt from the same branch.
+3. Plugin binds **`bindToPort(0, "0.0.0.0")`** (IPv4 any) so **`AF_INET`** datagrams from the board are accepted.
+4. Console **`ERROR_STREAM_UDP`** means the device never accepted the handshake (wrong/old firmware or **`STREAM_UDP`** not sent).
+
+---
+
 *Last updated: aligned with TCP+UDP split in `RedPitaya_justin.c` and `acqboard.ccp`.*
