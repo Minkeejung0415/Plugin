@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include <juce_core/networking/juce_DatagramSocket.h>
+
 AcqBoardRedPitaya::AcqBoardRedPitaya()
     : AcquisitionBoard()
 {
@@ -310,6 +312,31 @@ bool AcqBoardRedPitaya::startAcquisition()
         commandSocket->write (freqMsg, (int) strlen (freqMsg));
     }
 
+    if (streamDatagramSocket != nullptr)
+    {
+        delete streamDatagramSocket;
+        streamDatagramSocket = nullptr;
+    }
+
+    streamDatagramSocket = new DatagramSocket();
+
+    if (! streamDatagramSocket->bindToPort (0))
+    {
+        std::cout << "Red Pitaya ERROR: Could not bind UDP receive socket." << std::endl;
+        delete streamDatagramSocket;
+        streamDatagramSocket = nullptr;
+        commandSocket->close();
+        delete commandSocket;
+        commandSocket = nullptr;
+        return false;
+    }
+
+    {
+        char udpMsg[48];
+        snprintf (udpMsg, sizeof (udpMsg), "STREAM_UDP %d\n", streamDatagramSocket->getBoundPort());
+        commandSocket->write (udpMsg, (int) strlen (udpMsg));
+    }
+
     const char* msg = "START\n";
     commandSocket->write (msg, (int) strlen (msg));
 
@@ -329,6 +356,13 @@ bool AcqBoardRedPitaya::startAcquisition()
 
     auto failStartAndResetSocket = [this]()
     {
+        if (streamDatagramSocket != nullptr)
+        {
+            streamDatagramSocket->close();
+            delete streamDatagramSocket;
+            streamDatagramSocket = nullptr;
+        }
+
         if (commandSocket != nullptr)
         {
             commandSocket->close();
@@ -336,6 +370,13 @@ bool AcqBoardRedPitaya::startAcquisition()
             commandSocket = nullptr;
         }
     };
+
+    if (responseText.startsWith ("ERROR_STREAM_UDP"))
+    {
+        std::cout << "Red Pitaya ERROR: Firmware refused START (STREAM_UDP handshake missing or invalid)." << std::endl;
+        failStartAndResetSocket();
+        return false;
+    }
 
     if (responseText.startsWith ("ERROR_FILE"))
     {
@@ -432,16 +473,22 @@ bool AcqBoardRedPitaya::stopAcquisition()
     //    old pointer at that moment it would crash (use-after-free).
     buffer = nullptr;
 
-    // 3. Close the TCP connection. The Red Pitaya server then sees EOF /
-    //    send failure and leaves run_stream; we must NOT write STOP (or anything)
-    //    on this socket while run() is still consuming the same byte stream as
-    //    binary packets — that corrupts framing and leaves stale bytes for the
-    //    next START (classic "second start works" failure).
+    // 3. Close UDP first so run() unblocks (samples are datagrams). Then close TCP;
+    //    the server sees EOF / send failure and leaves run_stream.
+    if (streamDatagramSocket != nullptr)
+        streamDatagramSocket->close();
+
     if (commandSocket != nullptr)
         commandSocket->close();
 
     // 4. Wait for run() to finish before deleting the socket object.
     stopThread (500);
+
+    if (streamDatagramSocket != nullptr)
+    {
+        delete streamDatagramSocket;
+        streamDatagramSocket = nullptr;
+    }
 
     if (commandSocket != nullptr)
     {
@@ -751,7 +798,7 @@ void AcqBoardRedPitaya::setNumHeadstageChannels (int /*headstageIndex*/, int /*c
 
 void AcqBoardRedPitaya::run()
 {
-    if (commandSocket == nullptr)
+    if (streamDatagramSocket == nullptr)
         return;
 
     int64 sampleNumber = 0;
@@ -767,32 +814,10 @@ void AcqBoardRedPitaya::run()
         return;
 
     constexpr int headerSize = 22;
-    constexpr int maxPacketSize = 1024;
+    constexpr int maxPacketSize = 4096;
 
     uint8_t packet[maxPacketSize];
 
-    // Non-blocking read helper: polls in 100ms slices so threadShouldExit() is
-    // checked regularly and stopAcquisition()'s close() is noticed promptly.
-    auto socketReadFully = [&] (void* buf, int size) -> bool
-    {
-        int done = 0;
-        char* ptr = static_cast<char*> (buf);
-        while (done < size && ! threadShouldExit())
-        {
-            int ready = commandSocket->waitUntilReady (true, 100);
-            if (ready < 0)
-                return false; // socket closed / error
-            if (ready == 0)
-                continue; // 100ms timeout — recheck threadShouldExit
-            int n = commandSocket->read (ptr + done, size - done, false);
-            if (n <= 0)
-                return false;
-            done += n;
-        }
-        return ! threadShouldExit();
-    };
-
-    // MSVC: nested lambda must capture constexpr locals explicitly (no implicit capture in []).
     auto parseHeaderBytesPerFrame = [=] (const uint8_t* hdr, int32_t& outBytes) -> bool
     {
         if (hdr[8] != 0x03 || hdr[9] != 0x00)
@@ -807,24 +832,29 @@ void AcqBoardRedPitaya::run()
         return true;
     };
 
-    // Read one 22-byte header + variable payload. If the header is not valid,
-    // slide one byte and retry (same framing idea as the original sync loop).
+    /** One UDP datagram = one frame (see docs/redpitaya-tcp-udp-protocol.md). */
     auto readOneFrame = [&] (int32_t& outPayloadBytes) -> bool
     {
-        if (! socketReadFully (packet, headerSize))
-            return false;
-
-        constexpr int maxResync = 65536;
-
-        for (int guard = 0; guard < maxResync && ! threadShouldExit(); ++guard)
+        while (! threadShouldExit())
         {
-            if (parseHeaderBytesPerFrame (packet, outPayloadBytes))
-                return socketReadFully (packet + headerSize, (int) outPayloadBytes);
-
-            memmove (packet, packet + 1, (size_t) headerSize - 1);
-
-            if (! socketReadFully (packet + headerSize - 1, 1))
+            int ready = streamDatagramSocket->waitUntilReady (true, 100);
+            if (ready < 0)
                 return false;
+            if (ready == 0)
+                continue;
+
+            const int n = streamDatagramSocket->read (packet, maxPacketSize, false);
+            if (n <= 0)
+                return false;
+            if (n < headerSize)
+                continue;
+
+            if (parseHeaderBytesPerFrame (packet, outPayloadBytes))
+            {
+                const int expected = headerSize + outPayloadBytes;
+                if (n >= expected)
+                    return true;
+            }
         }
 
         return false;

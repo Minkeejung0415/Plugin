@@ -97,7 +97,12 @@ typedef struct {
     SensorInstance sensors[6]; // UPDATED: 4 I2C slots + 2 SPI slots
     int active_sensor_count;
     int total_channels;
+    struct sockaddr_in stream_udp_peer;
+    bool stream_udp_ready;
 } HardwareContext;
+
+/** UDP socket used only for sample datagrams (TCP remains for commands). */
+static int g_udp_tx_sock = -1;
 
 // Global jump buffer for the watchdog
 static sigjmp_buf watchdog_bucket;
@@ -1362,7 +1367,7 @@ static int init_hardware(HardwareContext *ctx) {
 
 // --- Streaming Logic ---
 /** Discard any bytes left in the TCP RX queue after a stream ends so the next
- *  read() in the command loop does not see tail bytes from binary packets. */
+ *  read() in the command loop does not see stray bytes (binary payloads use UDP). */
 static void drain_client_rx(int fd) {
     char buf[512];
     ssize_t n;
@@ -1398,6 +1403,14 @@ static void write_sensors_snapshot_line(int client_fd, HardwareContext *ctx) {
 }
 
 static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
+    if (!ctx->stream_udp_ready || g_udp_tx_sock < 0) {
+        fclose(bin_file);
+        fclose(csv_file);
+        const char *err = "ERROR_STREAM_UDP\n";
+        write(client_fd, err, strlen(err));
+        return -1;
+    }
+
     int hw_hz = current_stream_hw_hz();
     uint32_t ticks_per_sample = ticks_for_stream_hz(hw_hz);
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
@@ -1507,7 +1520,11 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         
         write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
 
-        if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
+        if (g_udp_tx_sock >= 0 && ctx->stream_udp_ready) {
+            /* Fire-and-forget: SD/CSV recording does not depend on delivery. */
+            (void)sendto(g_udp_tx_sock, packet, (size_t)(HEADER_SIZE + bytes_per_frame), 0,
+                         (struct sockaddr *)&ctx->stream_udp_peer, sizeof(ctx->stream_udp_peer));
+        }
         elapsed_seconds += 1.0 / (double)hw_hz;
     }
 
@@ -1571,8 +1588,7 @@ int main(void) {
     ctx.total_channels = base_channels + ctx.active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     printf("Sensor fusion disabled (controlled by plugin). Total channels: %d\n", ctx.total_channels);
 
-    // Always use TCP streaming - plugin controls all operations, no prompts
-    printf("TCP streaming enabled (plugin controlled). No user prompts.\n");
+    printf("TCP control + UDP sample streaming (see docs/redpitaya-tcp-udp-protocol.md).\n");
 
     int server_fd, client_fd, opt = 1;
     struct sockaddr_in servaddr = {0};
@@ -1592,7 +1608,15 @@ int main(void) {
     }
 
     listen(server_fd, 1);
-    printf("Server is listening on Port %d. Waiting for client...\n", PORT);
+
+    g_udp_tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_udp_tx_sock < 0) {
+        perror("UDP transmit socket");
+        close(server_fd);
+        return 1;
+    }
+
+    printf("Server listening on TCP port %d (UDP samples require STREAM_UDP handshake).\n", PORT);
 
     while (1) {
         client_fd = accept(server_fd, NULL, NULL);
@@ -1601,6 +1625,8 @@ int main(void) {
             perror("Accept failed");
             continue; // Go back to waiting if the connection drops
         }
+        ctx.stream_udp_ready = false;
+
         int flag = 1;
         if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int)) < 0) {
             perror("Could not set TCP_NODELAY");
@@ -1626,6 +1652,24 @@ int main(void) {
                 }
                 reinit_fusion_for_hz(&ctx, (float)g_stream_hw_hz);
                 printf("Hardware stream tick rate set to %d Hz (idle).\n", g_stream_hw_hz);
+            }
+            {
+                char *su = strstr(buffer, "STREAM_UDP");
+                if (su != NULL) {
+                    int udp_port = 0;
+                    if (sscanf(su, "STREAM_UDP %d", &udp_port) == 1 && udp_port > 0 && udp_port <= 65535) {
+                        struct sockaddr_in tcp_peer;
+                        socklen_t plen = sizeof(tcp_peer);
+                        if (getpeername(client_fd, (struct sockaddr *)&tcp_peer, &plen) == 0) {
+                            memset(&ctx.stream_udp_peer, 0, sizeof(ctx.stream_udp_peer));
+                            ctx.stream_udp_peer.sin_family = AF_INET;
+                            ctx.stream_udp_peer.sin_addr = tcp_peer.sin_addr;
+                            ctx.stream_udp_peer.sin_port = htons((uint16_t)udp_port);
+                            ctx.stream_udp_ready = true;
+                            printf("UDP stream peer %s:%d\n", inet_ntoa(ctx.stream_udp_peer.sin_addr), udp_port);
+                        }
+                    }
+                }
             }
             if (strncmp(buffer, "CFG ", 4) == 0) {
                 int si = -1, val = -1;
@@ -1660,7 +1704,7 @@ int main(void) {
             }
             else if (strstr(buffer, "REDPITAYA")) {
                 char msg[64];
-                sprintf(msg, "OK CHANNELS:%d\n", ctx.total_channels);
+                snprintf(msg, sizeof(msg), "OK CHANNELS:%d UDP:1\n", ctx.total_channels);
                 write(client_fd, msg, strlen(msg));
             }
             else if (strstr(buffer, "FILTER ON")) {

@@ -15,13 +15,13 @@
     Interface for a network-based Red Pitaya device acting as an
     Open Ephys Acquisition Board compatible source.
 
-    This implementation currently provides a basic skeleton:
-    - It exposes only ADC channels (no headstages).
-    - Streaming logic is implemented in run(), which can be adapted
-      to receive samples over UDP or another transport.
+    - Commands and text: TCP port 5000.
+    - Sample frames: UDP (one datagram per frame); see docs/redpitaya-tcp-udp-protocol.md.
 
     @see DataThread, SourceNode
 */
+
+class DatagramSocket;
 
 class AcqBoardRedPitaya : public AcquisitionBoard
 {
@@ -228,6 +228,8 @@ public:
     float analogOutVoltage = 0.0f;
 
     StreamingSocket* commandSocket = nullptr;
+
+    DatagramSocket* streamDatagramSocket = nullptr;
 
     String lastRecordingPath;
     String lastRecordingCsvPath;

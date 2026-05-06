@@ -108,7 +108,7 @@ public:
     int getSelectedStreamSensorIndex() const;
 
     /** Keeps AcquisitionBoard::settings.boardSampleRate in sync with the Red Pitaya
-        hardware Hz label so Open Ephys stream metadata and buffer sizing match the TCP stream. */
+        hardware Hz label so Open Ephys stream metadata and buffer sizing match the stream. */
     void syncRedPitayaBoardSampleRateFromLabel();
 
 private:
