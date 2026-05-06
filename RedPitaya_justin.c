@@ -1422,6 +1422,11 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     while (1) {
         int current_hw_hz = current_stream_hw_hz();
         if (current_hw_hz != hw_hz) {
+            /* Adjust elapsed_seconds for the transition: undo the old-rate increment
+             * that was applied at the end of the previous iteration and apply the new
+             * rate's period instead, so the first post-change sample shows the new
+             * inter-sample spacing rather than the old one. */
+            elapsed_seconds += (1.0 / (double)current_hw_hz) - (1.0 / (double)hw_hz);
             hw_hz = current_hw_hz;
             ticks_per_sample = ticks_for_stream_hz(hw_hz);
             init_sensor_decimation(ctx, hw_hz);
