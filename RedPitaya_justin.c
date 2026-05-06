@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -727,6 +729,15 @@ static void acquire_sensor_samples_decimated(
     read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
 }
 
+static void warn_if_sample_loop_slow_us(const struct timespec *t_start, const struct timespec *t_end)
+{
+    long elapsed_us = (long)((t_end->tv_sec - t_start->tv_sec) * 1000000L +
+                             (t_end->tv_nsec - t_start->tv_nsec) / 1000L);
+    if (elapsed_us > 900) { /* approaching 1 ms limit */
+        printf("WARNING: loop took %ld us\n", elapsed_us);
+    }
+}
+
 static void maybe_report_vqf_stats(
     bool with_fusion,
     int sample_number,
@@ -1110,9 +1121,13 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
             break;
         }
 
+        struct timespec t_start, t_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
         update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
         acquire_sensor_samples(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        warn_if_sample_loop_slow_us(&t_start, &t_end);
         write_csv_row(csv_file, ctx, with_fusion, sample_index, elapsed_seconds, frame_buffer);
         maybe_report_vqf_stats(with_fusion, sample_index + 1, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
         elapsed_seconds += 1.0 / (double)capture_hz;
@@ -1452,6 +1467,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
             }
         }
 
+        struct timespec t_start, t_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
         {
             bool old_with_fusion = with_fusion;
             update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
@@ -1463,6 +1480,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         ns++;
         acquire_sensor_samples_decimated(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        warn_if_sample_loop_slow_us(&t_start, &t_end);
         maybe_report_vqf_stats(with_fusion, ns, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
 
         // --- File Logging (The Unblocked Double-Buffer) ---
