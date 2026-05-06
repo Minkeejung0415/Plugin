@@ -500,7 +500,7 @@ static void write_sensor_csv_labels(FILE *fp, const SensorInstance *s, int senso
 
 static void write_csv_header(FILE *fp, HardwareContext *ctx, bool with_fusion) {
     fprintf(fp, "# hardware_stream_hz=%d\n", current_stream_hw_hz());
-    fprintf(fp, "# elapsed_seconds = monotonic wall-clock seconds since first sample\n");
+    fprintf(fp, "# elapsed_seconds = nominal time (sum of 1/hz per sample; matches Open Ephys plugin)\n");
     fprintf(fp, "sample_index,elapsed_seconds");
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         write_sensor_csv_labels(fp, &ctx->sensors[i], i, with_fusion);
@@ -1078,8 +1078,7 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
     unsigned long long vqf_call_count = 0;
-    struct timespec csv_epoch;
-    bool csv_epoch_valid = false;
+    double csv_elapsed = 0.0;
     FILE *csv_file = NULL;
 
     if (frame_buffer == NULL) {
@@ -1132,19 +1131,8 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
         clock_gettime(CLOCK_MONOTONIC, &t_end);
         warn_if_sample_loop_slow_us(&t_start, &t_end);
 
-        struct timespec csv_now;
-        clock_gettime(CLOCK_MONOTONIC, &csv_now);
-        double elapsed_seconds;
-        if (!csv_epoch_valid) {
-            csv_epoch = csv_now;
-            csv_epoch_valid = true;
-            elapsed_seconds = 0.0;
-        } else {
-            elapsed_seconds = (double)(csv_now.tv_sec - csv_epoch.tv_sec)
-                + (double)(csv_now.tv_nsec - csv_epoch.tv_nsec) / 1e9;
-        }
-
-        write_csv_row(csv_file, ctx, with_fusion, sample_index, elapsed_seconds, frame_buffer);
+        write_csv_row(csv_file, ctx, with_fusion, sample_index, csv_elapsed, frame_buffer);
+        csv_elapsed += 1.0 / (double)current_stream_hw_hz();
         maybe_report_vqf_stats(with_fusion, sample_index + 1, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
 
         if (((sample_index + 1) % capture_hz) == 0) {
@@ -1432,8 +1420,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
     unsigned long long vqf_call_count = 0;
-    struct timespec csv_epoch;
-    bool csv_epoch_valid = false;
+    double csv_elapsed = 0.0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL) {
         free(packet);
@@ -1510,18 +1497,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         }
 
         if (record && csv_file != NULL) {
-            struct timespec csv_now;
-            clock_gettime(CLOCK_MONOTONIC, &csv_now);
-            double elapsed_seconds;
-            if (!csv_epoch_valid) {
-                csv_epoch = csv_now;
-                csv_epoch_valid = true;
-                elapsed_seconds = 0.0;
-            } else {
-                elapsed_seconds = (double)(csv_now.tv_sec - csv_epoch.tv_sec)
-                    + (double)(csv_now.tv_nsec - csv_epoch.tv_nsec) / 1e9;
-            }
-            write_csv_row(csv_file, ctx, with_fusion, ns, elapsed_seconds, frame_buffer);
+            write_csv_row(csv_file, ctx, with_fusion, ns, csv_elapsed, frame_buffer);
+            csv_elapsed += 1.0 / (double)current_stream_hw_hz();
         }
 
         // --- Network Send (Still fires instantly to keep GUI real-time) ---
