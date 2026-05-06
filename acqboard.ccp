@@ -11,7 +11,16 @@
 #include <cstdint>
 #include <cstring>
 
+// Full type for juce::DatagramSocket. Include paths differ by exporter (modules root vs juce_core module dir).
+#if __has_include(<networking/juce_DatagramSocket.h>)
+#include <networking/juce_DatagramSocket.h>
+#elif __has_include(<juce_core/networking/juce_DatagramSocket.h>)
 #include <juce_core/networking/juce_DatagramSocket.h>
+#elif __has_include(<juce_core/juce_core.h>)
+#include <juce_core/juce_core.h>
+#elif __has_include(<JuceHeader.h>)
+#include <JuceHeader.h>
+#endif
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
     : AcquisitionBoard()
@@ -318,7 +327,7 @@ bool AcqBoardRedPitaya::startAcquisition()
         streamDatagramSocket = nullptr;
     }
 
-    streamDatagramSocket = new DatagramSocket();
+    streamDatagramSocket = new juce::DatagramSocket();
 
     if (! streamDatagramSocket->bindToPort (0))
     {

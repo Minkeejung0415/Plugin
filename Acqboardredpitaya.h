@@ -21,7 +21,7 @@
     @see DataThread, SourceNode
 */
 
-class DatagramSocket;
+namespace juce { class DatagramSocket; }
 
 class AcqBoardRedPitaya : public AcquisitionBoard
 {
@@ -229,7 +229,7 @@ public:
 
     StreamingSocket* commandSocket = nullptr;
 
-    DatagramSocket* streamDatagramSocket = nullptr;
+    juce::DatagramSocket* streamDatagramSocket = nullptr;
 
     String lastRecordingPath;
     String lastRecordingCsvPath;
