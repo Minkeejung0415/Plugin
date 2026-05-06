@@ -51,6 +51,24 @@
 /* Hardware tick rate for streaming (Hz); FREQ: command updates this before START. */
 static volatile int g_stream_hw_hz = DESIRED_SAMPLE_RATE_HZ;
 
+static int clamp_stream_hw_hz(int hz)
+{
+    if (hz < 1) return 1;
+    if (hz > 2000) return 2000;
+    return hz;
+}
+
+static int current_stream_hw_hz(void)
+{
+    return clamp_stream_hw_hz(g_stream_hw_hz);
+}
+
+static uint32_t ticks_for_stream_hz(int hz)
+{
+    uint32_t ticks = (uint32_t)(CTR_CLK_RATE / clamp_stream_hw_hz(hz));
+    return ticks > 0 ? ticks : 1;
+}
+
 // --- Discovery Logic Structures ---
 typedef struct {
     char name[16];
@@ -489,11 +507,11 @@ static void write_csv_header(FILE *fp, HardwareContext *ctx, bool with_fusion) {
     fprintf(fp, "\n");
 }
 
-static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int sample_index, const int16_t *frame_buffer) {
+static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int sample_index, double elapsed_seconds, const int16_t *frame_buffer) {
     int channel_offset = 0;
     (void)with_fusion;
 
-    fprintf(fp, "%d,%.6f", sample_index, (double)sample_index / (double)DESIRED_SAMPLE_RATE_HZ);
+    fprintf(fp, "%d,%.6f", sample_index, elapsed_seconds);
 
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         const SensorInstance *s = &ctx->sensors[i];
@@ -716,7 +734,8 @@ static void maybe_report_vqf_stats(
     long long *vqf_max_ns,
     unsigned long long *vqf_call_count
 ) {
-    if (with_fusion && *vqf_call_count > 0 && (sample_number % DESIRED_SAMPLE_RATE_HZ) == 0) {
+    int report_interval = current_stream_hw_hz();
+    if (with_fusion && *vqf_call_count > 0 && report_interval > 0 && (sample_number % report_interval) == 0) {
         double avg_us = (double)(*vqf_total_ns) / (double)(*vqf_call_count) / 1000.0;
         double max_us = (double)(*vqf_max_ns) / 1000.0;
         printf("VQF filter time over last %llu calls: avg %.2f us, max %.2f us\n",
@@ -947,9 +966,13 @@ static int process_stream_commands(
 
         if (strstr(cmd, "FREQ:")) {
             int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
-            if (frequency_hz < 1) frequency_hz = 1;
-            if (frequency_hz > 2000) frequency_hz = 2000;
-            g_stream_hw_hz = frequency_hz;
+            g_stream_hw_hz = clamp_stream_hw_hz(frequency_hz);
+            for (int si = 0; si < ctx->active_sensor_count; si++) {
+                if (ctx->sensors[si].cfg_target_hz > g_stream_hw_hz)
+                    ctx->sensors[si].cfg_target_hz = g_stream_hw_hz;
+                apply_sensor_odr(&ctx->sensors[si], ctx->sensors[si].cfg_target_hz);
+            }
+            init_sensor_decimation(ctx, g_stream_hw_hz);
             printf("Hardware stream tick rate set to %d Hz (per-sensor SRATE decimates from this).\n", g_stream_hw_hz);
         }
 
@@ -1009,10 +1032,11 @@ static int process_stream_commands(
 }
 
 static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int duration_seconds, const char *csv_path) {
-    uint32_t ticks_per_sample = CTR_CLK_RATE / DESIRED_SAMPLE_RATE_HZ;
+    int capture_hz = current_stream_hw_hz();
+    uint32_t ticks_per_sample = ticks_for_stream_hz(capture_hz);
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     const int max_bytes_per_frame = max_total_channels * 2;
-    const int total_samples = duration_seconds * DESIRED_SAMPLE_RATE_HZ;
+    const int total_samples = duration_seconds * capture_hz;
     int16_t *frame_buffer = (int16_t *)malloc(max_bytes_per_frame);
     bool with_fusion = fusion_is_enabled();
     int current_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
@@ -1020,6 +1044,7 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
     unsigned long long vqf_call_count = 0;
+    double elapsed_seconds = 0.0;
     FILE *csv_file = NULL;
 
     if (frame_buffer == NULL) {
@@ -1067,14 +1092,15 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
         update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
         acquire_sensor_samples(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
-        write_csv_row(csv_file, ctx, with_fusion, sample_index, frame_buffer);
+        write_csv_row(csv_file, ctx, with_fusion, sample_index, elapsed_seconds, frame_buffer);
         maybe_report_vqf_stats(with_fusion, sample_index + 1, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
+        elapsed_seconds += 1.0 / (double)capture_hz;
 
-        if (((sample_index + 1) % DESIRED_SAMPLE_RATE_HZ) == 0) {
-            int elapsed_seconds = (sample_index + 1) / DESIRED_SAMPLE_RATE_HZ;
-            int remaining_seconds = duration_seconds - elapsed_seconds;
+        if (((sample_index + 1) % capture_hz) == 0) {
+            int elapsed_whole_seconds = (sample_index + 1) / capture_hz;
+            int remaining_seconds = duration_seconds - elapsed_whole_seconds;
             if (remaining_seconds < 0) remaining_seconds = 0;
-            printf("Capture progress: %d/%d seconds complete.\n", elapsed_seconds, duration_seconds);
+            printf("Capture progress: %d/%d seconds complete.\n", elapsed_whole_seconds, duration_seconds);
         }
     }
 
@@ -1336,10 +1362,8 @@ static void write_sensors_snapshot_line(int client_fd, HardwareContext *ctx) {
 }
 
 static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
-    int hw_hz = g_stream_hw_hz;
-    if (hw_hz < 1) hw_hz = 1;
-    if (hw_hz > 2000) hw_hz = 2000;
-    uint32_t ticks_per_sample = (uint32_t)(CTR_CLK_RATE / hw_hz);
+    int hw_hz = current_stream_hw_hz();
+    uint32_t ticks_per_sample = ticks_for_stream_hz(hw_hz);
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     const int max_bytes_per_frame = max_total_channels * 2;
 
@@ -1357,6 +1381,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
     unsigned long long vqf_call_count = 0;
+    double elapsed_seconds = 0.0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL) {
         free(packet);
@@ -1374,6 +1399,14 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     init_sensor_decimation(ctx, hw_hz);
 
     while (1) {
+        int current_hw_hz = current_stream_hw_hz();
+        if (current_hw_hz != hw_hz) {
+            hw_hz = current_hw_hz;
+            ticks_per_sample = ticks_for_stream_hz(hw_hz);
+            init_sensor_decimation(ctx, hw_hz);
+            last_counter = *ctx->gpio_counter;
+        }
+
         uint32_t now = *ctx->gpio_counter;
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
@@ -1421,7 +1454,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         }
 
         if (record && csv_file != NULL) {
-            write_csv_row(csv_file, ctx, with_fusion, ns, frame_buffer);
+            write_csv_row(csv_file, ctx, with_fusion, ns, elapsed_seconds, frame_buffer);
         }
 
         // --- Network Send (Still fires instantly to keep GUI real-time) ---
@@ -1430,6 +1463,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
 
         if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
+        elapsed_seconds += 1.0 / (double)hw_hz;
     }
 
     // Standard exit cleanup
@@ -1540,9 +1574,7 @@ int main(void) {
                applied even when combined with START in the same TCP read. */
             if (strstr(buffer, "FREQ:")) {
                 int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
-                if (frequency_hz < 1) frequency_hz = 1;
-                if (frequency_hz > 2000) frequency_hz = 2000;
-                g_stream_hw_hz = frequency_hz;
+                g_stream_hw_hz = clamp_stream_hw_hz(frequency_hz);
                 printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
             }
             if (strncmp(buffer, "CFG ", 4) == 0) {

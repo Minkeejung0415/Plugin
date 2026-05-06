@@ -755,6 +755,7 @@ void AcqBoardRedPitaya::run()
         return;
 
     int64 sampleNumber = 0;
+    double elapsedSeconds = 0.0;
     const int64 samplesPerBuffer = jmax (
         int64 (1),
         int64 (std::lround (static_cast<double> (settings.boardSampleRate) / 1000.0)));
@@ -902,12 +903,13 @@ void AcqBoardRedPitaya::run()
                 samples[(adc * samplesPerBuffer) + sampleIndex] = raw * channelScale[adc];
             }
 
-            const double timeSeconds = double (sampleNumber) / double (settings.boardSampleRate);
+            const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
             sampleNumbers[sampleIndex] = sampleNumber;
-            timestamps[sampleIndex] = timeSeconds;
+            timestamps[sampleIndex] = elapsedSeconds;
             event_codes[sampleIndex] = eventCode;
 
             ++sampleNumber;
+            elapsedSeconds += 1.0 / currentSampleRate;
         }
 
         currentBuffer = buffer;

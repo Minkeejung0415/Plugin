@@ -916,14 +916,12 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
             const int clamped = jlimit (1, 2000, newFreq > 0 ? newFreq : 100);
             board->setSampleRate (clamped);
 
-            // Send the command to the Red Pitaya!
+            // Red Pitaya overrides this to send FREQ; other boards keep the default no-op.
             std::cout << "DeviceEditor: Board found. Dispatching updateSampleFrequency..." << std::endl;
-            board->updateSampleFrequency (newFreq);
-        }
+            board->updateSampleFrequency (clamped);
+            if (redPitayaSensorUiBuilt)
+                repopulateSensorRateComboForHwHz (clamped);
 
-        if (redPitayaSensorUiBuilt && acquisitionIsActive)
-        {
-            repopulateSensorRateComboForHwHz (newFreq > 0 ? newFreq : 100);
             CoreServices::updateSignalChain (this);
         }
     }
