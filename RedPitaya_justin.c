@@ -911,6 +911,27 @@ static void apply_sensor_cfg_gyr(SensorInstance *s, int preset)
     }
 }
 
+static void reinit_fusion_for_hz(HardwareContext *ctx, float hz)
+{
+    fusion_shutdown();
+    fusion_init(ctx->active_sensor_count, hz);
+    for (int i = 0; i < ctx->active_sensor_count; i++) {
+        SensorInstance *s = &ctx->sensors[i];
+        FusionSensorType ftype;
+        if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
+        else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
+        else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
+        else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
+        else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
+        bool has_mag = (strcmp(s->name, "MPU9250")  == 0 && !s->is_spi) ||
+                       (strcmp(s->name, "ICM20948") == 0) ||
+                       (strcmp(s->name, "BNO055")   == 0);
+        FusionSensorConfig cfg;
+        fusion_get_default_sensor_config(ftype, has_mag, &cfg);
+        fusion_register_sensor_ex(i, &cfg);
+    }
+}
+
 static int process_stream_commands(
     int client_fd,
     HardwareContext *ctx,
@@ -968,12 +989,12 @@ static int process_stream_commands(
             int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
             g_stream_hw_hz = clamp_stream_hw_hz(frequency_hz);
             for (int si = 0; si < ctx->active_sensor_count; si++) {
-                if (ctx->sensors[si].cfg_target_hz > g_stream_hw_hz)
-                    ctx->sensors[si].cfg_target_hz = g_stream_hw_hz;
-                apply_sensor_odr(&ctx->sensors[si], ctx->sensors[si].cfg_target_hz);
+                ctx->sensors[si].cfg_target_hz = g_stream_hw_hz;
+                apply_sensor_odr(&ctx->sensors[si], g_stream_hw_hz);
             }
             init_sensor_decimation(ctx, g_stream_hw_hz);
-            printf("Hardware stream tick rate set to %d Hz (per-sensor SRATE decimates from this).\n", g_stream_hw_hz);
+            reinit_fusion_for_hz(ctx, (float)g_stream_hw_hz);
+            printf("Hardware stream tick rate set to %d Hz.\n", g_stream_hw_hz);
         }
 
         if (strstr(cmd, "CFG ")) {
@@ -1481,7 +1502,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
 int main(void) {
     HardwareContext ctx = {0};
     printf(" Starting Server \n");
-    signal(SIGINT, stop_handler);
+    /* SIGINT left at OS default so Ctrl+C terminates immediately. */
     if (init_hardware(&ctx) < 0) {
         fprintf(stderr, "Error: Hardware initialization failed!\n");
         return 1;
@@ -1575,7 +1596,12 @@ int main(void) {
             if (strstr(buffer, "FREQ:")) {
                 int frequency_hz = atoi(strstr(buffer, "FREQ:") + 5);
                 g_stream_hw_hz = clamp_stream_hw_hz(frequency_hz);
-                printf("Hardware stream tick rate set to %d Hz (idle; applied on next START).\n", g_stream_hw_hz);
+                for (int si = 0; si < ctx.active_sensor_count; si++) {
+                    ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
+                    apply_sensor_odr(&ctx.sensors[si], g_stream_hw_hz);
+                }
+                reinit_fusion_for_hz(&ctx, (float)g_stream_hw_hz);
+                printf("Hardware stream tick rate set to %d Hz (idle).\n", g_stream_hw_hz);
             }
             if (strncmp(buffer, "CFG ", 4) == 0) {
                 int si = -1, val = -1;
