@@ -489,11 +489,15 @@ static void write_csv_header(FILE *fp, HardwareContext *ctx, bool with_fusion) {
     fprintf(fp, "\n");
 }
 
-static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int sample_index, const int16_t *frame_buffer) {
+static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int sample_index,
+                          int stream_hz, const int16_t *frame_buffer) {
     int channel_offset = 0;
     (void)with_fusion;
 
-    fprintf(fp, "%d,%.6f", sample_index, (double)sample_index / (double)DESIRED_SAMPLE_RATE_HZ);
+    if (stream_hz < 1)
+        stream_hz = 1;
+
+    fprintf(fp, "%d,%.6f", sample_index, (double)sample_index / (double)stream_hz);
 
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         const SensorInstance *s = &ctx->sensors[i];
@@ -1067,7 +1071,7 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
         update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
         acquire_sensor_samples(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
-        write_csv_row(csv_file, ctx, with_fusion, sample_index, frame_buffer);
+        write_csv_row(csv_file, ctx, with_fusion, sample_index, DESIRED_SAMPLE_RATE_HZ, frame_buffer);
         maybe_report_vqf_stats(with_fusion, sample_index + 1, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
 
         if (((sample_index + 1) % DESIRED_SAMPLE_RATE_HZ) == 0) {
@@ -1335,10 +1339,57 @@ static void write_sensors_snapshot_line(int client_fd, HardwareContext *ctx) {
     write(client_fd, line, strlen(line));
 }
 
+static void fusion_register_all_sensors(HardwareContext *ctx)
+{
+    for (int i = 0; i < ctx->active_sensor_count; i++) {
+        SensorInstance *s = &ctx->sensors[i];
+        FusionSensorType ftype;
+        if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
+        else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
+        else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
+        else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
+        else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
+        FusionSensorConfig cfg;
+        {
+            bool has_mag = false;
+
+            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+                has_mag = true;
+            } else if (strcmp(s->name, "ICM20948") == 0) {
+                has_mag = true;
+            } else if (strcmp(s->name, "BNO055") == 0) {
+                has_mag = true;
+            }
+
+            fusion_get_default_sensor_config(ftype, has_mag, &cfg);
+        }
+        fusion_register_sensor_ex(i, &cfg);
+    }
+}
+
+/** VQF time step must match the rate fusion_update_sensor() is called (hardware stream tick). */
+static void fusion_reinit_for_stream_hz(HardwareContext *ctx, int stream_hz)
+{
+    if (stream_hz < 1)
+        stream_hz = 1;
+    if (stream_hz > 2000)
+        stream_hz = 2000;
+
+    bool was_enabled = fusion_is_enabled();
+    fusion_shutdown();
+    fusion_init(ctx->active_sensor_count, (float)stream_hz);
+    fusion_register_all_sensors(ctx);
+    fusion_set_enabled(was_enabled);
+    printf("VQF fusion re-initialized for %d Hz hardware stream tick.\n", stream_hz);
+}
+
 static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
     int hw_hz = g_stream_hw_hz;
     if (hw_hz < 1) hw_hz = 1;
     if (hw_hz > 2000) hw_hz = 2000;
+
+    fusion_reinit_for_stream_hz(ctx, hw_hz);
+
     uint32_t ticks_per_sample = (uint32_t)(CTR_CLK_RATE / hw_hz);
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
     const int max_bytes_per_frame = max_total_channels * 2;
@@ -1421,7 +1472,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         }
 
         if (record && csv_file != NULL) {
-            write_csv_row(csv_file, ctx, with_fusion, ns, frame_buffer);
+            write_csv_row(csv_file, ctx, with_fusion, ns, hw_hz, frame_buffer);
         }
 
         // --- Network Send (Still fires instantly to keep GUI real-time) ---
@@ -1458,30 +1509,7 @@ int main(void) {
     bool start_with_fusion = false;
 
     fusion_init(ctx.active_sensor_count, (float)DESIRED_SAMPLE_RATE_HZ);
-    for (int i = 0; i < ctx.active_sensor_count; i++) {
-        SensorInstance *s = &ctx.sensors[i];
-        FusionSensorType ftype;
-        if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
-        else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
-        else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
-        else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
-        else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
-        FusionSensorConfig cfg;
-        {
-            bool has_mag = false;
-
-            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                has_mag = true;
-            } else if (strcmp(s->name, "ICM20948") == 0) {
-                has_mag = true;
-            } else if (strcmp(s->name, "BNO055") == 0) {
-                has_mag = true;
-            }
-
-            fusion_get_default_sensor_config(ftype, has_mag, &cfg);
-        }
-        fusion_register_sensor_ex(i, &cfg);
-    }
+    fusion_register_all_sensors(&ctx);
 
     calibrate_gyro_biases(&ctx);
     init_analog_waveform_inputs();
