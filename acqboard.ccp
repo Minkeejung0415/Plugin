@@ -11,15 +11,13 @@
 #include <cstdint>
 #include <cstring>
 
-// Full type for juce::DatagramSocket. Include paths differ by exporter (modules root vs juce_core module dir).
-#if __has_include(<networking/juce_DatagramSocket.h>)
-#include <networking/juce_DatagramSocket.h>
-#elif __has_include(<juce_core/networking/juce_DatagramSocket.h>)
-#include <juce_core/networking/juce_DatagramSocket.h>
-#elif __has_include(<juce_core/juce_core.h>)
+// Full type for juce::DatagramSocket: prefer module umbrella (Additional Include = JUCE modules dir).
+#if __has_include(<juce_core/juce_core.h>)
 #include <juce_core/juce_core.h>
 #elif __has_include(<JuceHeader.h>)
 #include <JuceHeader.h>
+#elif __has_include(<networking/juce_DatagramSocket.h>)
+#include <networking/juce_DatagramSocket.h>
 #endif
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
@@ -367,7 +365,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     {
         if (streamDatagramSocket != nullptr)
         {
-            streamDatagramSocket->close();
+            streamDatagramSocket->shutdown();
             delete streamDatagramSocket;
             streamDatagramSocket = nullptr;
         }
@@ -485,7 +483,7 @@ bool AcqBoardRedPitaya::stopAcquisition()
     // 3. Close UDP first so run() unblocks (samples are datagrams). Then close TCP;
     //    the server sees EOF / send failure and leaves run_stream.
     if (streamDatagramSocket != nullptr)
-        streamDatagramSocket->close();
+        streamDatagramSocket->shutdown();
 
     if (commandSocket != nullptr)
         commandSocket->close();

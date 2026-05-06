@@ -79,4 +79,11 @@ This document is the **normative handshake** between `RedPitaya_justin.c` (firmw
 
 ---
 
+## 8. MSVC / JUCE build notes
+
+- Prefer **`#include <juce_core/juce_core.h>`** with **Additional Include Directories** pointing at JUCE’s **`modules`** folder (parent of `juce_core`).
+- **`juce::DatagramSocket`** exposes **`shutdown()`**, not **`close()`**, before destroying the socket (unblocks `run()` on stop).
+
+---
+
 *Last updated: aligned with TCP+UDP split in `RedPitaya_justin.c` and `acqboard.ccp`.*
