@@ -743,7 +743,7 @@ static void warn_if_sample_loop_slow_us(const struct timespec *t_start, const st
 {
     long elapsed_us = (long)((t_end->tv_sec - t_start->tv_sec) * 1000000L +
                              (t_end->tv_nsec - t_start->tv_nsec) / 1000L);
-    if (elapsed_us > 900) { /* approaching 1 ms limit */
+    if (elapsed_us > 1000) {
         printf("WARNING: loop took %ld us\n", elapsed_us);
     }
 }
