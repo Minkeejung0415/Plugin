@@ -1463,13 +1463,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     uint32_t last_counter = *ctx->gpio_counter;
     init_sensor_decimation(ctx, hw_hz);
 
-    // Elevate to real-time priority to prevent Linux scheduler preemption mid-sample
-    {
-        struct sched_param sp = { .sched_priority = 80 };
-        if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0)
-            perror("sched_setscheduler (non-fatal, continuing without RT priority)");
-    }
-
     while (1) {
         int current_hw_hz = current_stream_hw_hz();
         if (current_hw_hz != hw_hz) {
@@ -1483,8 +1476,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
-                struct sched_param sp = { .sched_priority = 0 };
-                sched_setscheduler(0, SCHED_OTHER, &sp);
                 free(packet); free(frame_buffer); free(sd_write_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1495,8 +1486,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
-                struct sched_param sp = { .sched_priority = 0 };
-                sched_setscheduler(0, SCHED_OTHER, &sp);
                 free(packet); free(frame_buffer); free(sd_write_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1544,11 +1533,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
     }
 
-    // Drop back to normal scheduling so the idle server doesn't starve other processes
-    {
-        struct sched_param sp = { .sched_priority = 0 };
-        sched_setscheduler(0, SCHED_OTHER, &sp);
-    }
 
     // Standard exit cleanup
     if (record && bin_file != NULL && buf_idx > 0) {
