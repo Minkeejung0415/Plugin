@@ -703,7 +703,12 @@ static void acquire_sensor_samples_decimated(
                     raw_gyr[1] -= s->gyro_bias[1];
                     raw_gyr[2] -= s->gyro_bias[2];
 
+                    struct timespec _f0, _f1;
+                    clock_gettime(CLOCK_MONOTONIC, &_f0);
                     fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
+                    clock_gettime(CLOCK_MONOTONIC, &_f1);
+                    long _fus = (long)((_f1.tv_sec-_f0.tv_sec)*1000000L+(_f1.tv_nsec-_f0.tv_nsec)/1000L);
+                    if (_fus > 5000) printf("SLOW fusion sensor %d: %ld us\n", i, _fus);
                 }
                 if (slot_ints <= HOLD_INT16)
                     memcpy(g_sensor_hold[i], channel_out, (size_t) slot_bytes);
