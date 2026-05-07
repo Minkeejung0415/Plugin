@@ -108,7 +108,7 @@ bool AcqBoardRedPitaya::detectBoard()
     if (commandSocket == nullptr)
         commandSocket = new StreamingSocket();
 
-    if (! commandSocket->connect (boardHostname, 5000, 1000))
+    if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
     {
         std::cout << "connect failed" << std::endl;
         delete commandSocket;
@@ -295,7 +295,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     }
 
     commandSocket = new StreamingSocket();
-    if (! commandSocket->connect (boardHostname, 5000, 1000))
+    if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
     {
         std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
         delete commandSocket;
@@ -516,7 +516,7 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
     {
         commandSocket = new StreamingSocket();
 
-        if (! commandSocket->connect (boardHostname, 5000, 1000))
+        if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
         {
             std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
             delete commandSocket;
