@@ -156,6 +156,9 @@ private:
     std::unique_ptr<Label> analogOutTitle;
     std::unique_ptr<Label> analogOutLabel;
 
+    std::unique_ptr<Label> hostnameTitle;
+    std::unique_ptr<Label> hostnameLabel;
+
     bool redPitayaSensorUiBuilt = false;
     std::unique_ptr<Label> sensorCfgAccelTitle;
     std::unique_ptr<ComboBox> sensorCfgAccelCombo;
