@@ -72,6 +72,16 @@ static uint32_t ticks_for_stream_hz(int hz)
 }
 
 // --- Discovery Logic Structures ---
+typedef enum {
+    SENSOR_MPU9250_SPI,
+    SENSOR_MPU9250_I2C,
+    SENSOR_ICM20948_SPI,
+    SENSOR_BNO055,
+    SENSOR_SPLIT_I2C,
+    SENSOR_GENERIC_SPI,
+    SENSOR_GENERIC_I2C
+} SensorType;
+
 typedef struct {
     char name[16];
     void *axi_map;
@@ -80,7 +90,9 @@ typedef struct {
     uint8_t data_reg_start;
     bool active;
     bool split_read;
-    bool is_spi; // NEW: Flag to tell run_stream which protocol to use
+    bool is_spi;
+    SensorType sensor_type;
+    uint8_t current_bank;
     int16_t gyro_bias[3];
     bool mag_is_fresh;
     /* Per-sensor UI config (CFG lines from Open Ephys); applied during stream */
@@ -331,87 +343,87 @@ static void read_analog_waveform_channels(int16_t *channel_out) {
 static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
     s->mag_is_fresh = false;
 
-    if (strcmp(s->name, "MPU9250") == 0) {
-        if (s->is_spi) {
-            uint8_t raw[12];
-            axi_spi_read(s->axi_map, 0x3B, raw, 12);
-            for (int j = 0; j < 6; j++) {
-                channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
-            }
-            channel_out[6] = 0;
-            channel_out[7] = 0;
-            channel_out[8] = 0;
-        } else {
-            uint8_t raw[12];
-            uint8_t mag_raw[7];
-            axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 12);
-            axi_iic_read_n_bytes(s->axi_map, 0x0C, 0x03, mag_raw, 7);
-
-            for (int j = 0; j < 6; j++) {
-                channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
-            }
-
-            for (int j = 0; j < 3; j++) {
-                int16_t val = (int16_t)(mag_raw[j * 2] | (mag_raw[j * 2 + 1] << 8));
-                int32_t amplified = (int32_t)val * 16;
-                if (amplified > 32767) amplified = 32767;
-                if (amplified < -32768) amplified = -32768;
-                channel_out[j + 6] = (int16_t)amplified;
-            }
-            s->mag_is_fresh = true;
+    switch (s->sensor_type) {
+    case SENSOR_MPU9250_SPI: {
+        uint8_t raw[12];
+        axi_spi_read(s->axi_map, 0x3B, raw, 12);
+        for (int j = 0; j < 6; j++)
+            channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
+        channel_out[6] = 0; channel_out[7] = 0; channel_out[8] = 0;
+        break;
+    }
+    case SENSOR_MPU9250_I2C: {
+        uint8_t raw[12];
+        uint8_t mag_raw[7];
+        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 12);
+        axi_iic_read_n_bytes(s->axi_map, 0x0C, 0x03, mag_raw, 7);
+        for (int j = 0; j < 6; j++)
+            channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
+        for (int j = 0; j < 3; j++) {
+            int16_t val = (int16_t)(mag_raw[j * 2] | (mag_raw[j * 2 + 1] << 8));
+            int32_t amplified = (int32_t)val * 16;
+            if (amplified > 32767) amplified = 32767;
+            if (amplified < -32768) amplified = -32768;
+            channel_out[j + 6] = (int16_t)amplified;
         }
-    } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+        s->mag_is_fresh = true;
+        break;
+    }
+    case SENSOR_ICM20948_SPI: {
         uint8_t raw[12];
         uint8_t mag_raw[8];
-
-        icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_0);
+        if (s->current_bank != ICM20948_BANK_0) {
+            icm20948_spi_select_bank(s->axi_map, ICM20948_BANK_0);
+            s->current_bank = ICM20948_BANK_0;
+        }
         axi_spi_read(s->axi_map, s->data_reg_start, raw, 12);
         axi_spi_read(s->axi_map, ICM20948_EXT_SENS_DATA_00, mag_raw, 8);
-
-        for (int j = 0; j < 6; j++) {
+        for (int j = 0; j < 6; j++)
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
-        }
-
         if (mag_raw[0] & 0x01) {
             channel_out[6] = (int16_t)((mag_raw[2] << 8) | mag_raw[1]);
             channel_out[7] = (int16_t)((mag_raw[4] << 8) | mag_raw[3]);
             channel_out[8] = (int16_t)((mag_raw[6] << 8) | mag_raw[5]);
             s->mag_is_fresh = true;
         } else {
-            channel_out[6] = 0;
-            channel_out[7] = 0;
-            channel_out[8] = 0;
+            channel_out[6] = 0; channel_out[7] = 0; channel_out[8] = 0;
         }
-    } else if (strcmp(s->name, "BNO055") == 0) {
+        break;
+    }
+    case SENSOR_BNO055: {
         uint8_t raw[18];
         axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, s->data_reg_start, raw, 18);
-        for (int j = 0; j < s->num_channels; j++) {
+        for (int j = 0; j < s->num_channels; j++)
             channel_out[j] = (int16_t)(raw[j * 2] | (raw[j * 2 + 1] << 8));
-        }
-    } else if (s->is_spi) {
+        break;
+    }
+    case SENSOR_GENERIC_SPI: {
         uint8_t raw[32];
         axi_spi_read(s->axi_map, s->data_reg_start, raw, s->num_channels * 2);
-        for (int j = 0; j < s->num_channels; j++) {
+        for (int j = 0; j < s->num_channels; j++)
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
-        }
-    } else if (s->split_read) {
+        break;
+    }
+    case SENSOR_SPLIT_I2C: {
         uint8_t raw[12];
         axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 6);
         axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x43, raw + 6, 6);
-        for (int j = 0; j < s->num_channels; j++) {
+        for (int j = 0; j < s->num_channels; j++)
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
-        }
-    } else {
+        break;
+    }
+    default: {
         uint8_t raw[32];
         axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, s->data_reg_start, raw, s->num_channels * 2);
-        for (int j = 0; j < s->num_channels; j++) {
+        for (int j = 0; j < s->num_channels; j++)
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
-        }
+        break;
+    }
     }
 }
 
 static void get_sensor_gyro_from_channels(const SensorInstance *s, const int16_t *channel_out, int16_t raw_gyr[3]) {
-    if (strcmp(s->name, "BNO055") == 0) {
+    if (s->sensor_type == SENSOR_BNO055) {
         raw_gyr[0] = channel_out[6];
         raw_gyr[1] = channel_out[7];
         raw_gyr[2] = channel_out[8];
@@ -639,10 +651,7 @@ static void acquire_sensor_samples_decimated(
     HardwareContext *ctx,
     bool with_fusion,
     int bytes_per_frame,
-    int16_t *frame_buffer,
-    long long *vqf_total_ns,
-    long long *vqf_max_ns,
-    unsigned long long *vqf_call_count
+    int16_t *frame_buffer
 ) {
     memset(frame_buffer, 0, bytes_per_frame);
     int current_byte_offset = 0;
@@ -665,37 +674,23 @@ static void acquire_sensor_samples_decimated(
                     const int16_t *raw_mag = NULL;
                     bool mag_is_fresh = false;
 
-                    if (strcmp(s->name, "BNO055") == 0) {
-                        get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                    if (s->sensor_type == SENSOR_BNO055) {
                         raw_mag = &channel_out[3];
                         mag_is_fresh = true;
-                    } else {
-                        get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                        if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                            raw_mag = &channel_out[6];
-                            mag_is_fresh = true;
-                        } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-                            raw_mag = &channel_out[6];
-                            mag_is_fresh = s->mag_is_fresh;
-                        }
+                    } else if (s->sensor_type == SENSOR_MPU9250_I2C) {
+                        raw_mag = &channel_out[6];
+                        mag_is_fresh = true;
+                    } else if (s->sensor_type == SENSOR_ICM20948_SPI) {
+                        raw_mag = &channel_out[6];
+                        mag_is_fresh = s->mag_is_fresh;
                     }
 
                     raw_gyr[0] -= s->gyro_bias[0];
                     raw_gyr[1] -= s->gyro_bias[1];
                     raw_gyr[2] -= s->gyro_bias[2];
 
-                    struct timespec vqf_start;
-                    struct timespec vqf_end;
-                    clock_gettime(CLOCK_MONOTONIC, &vqf_start);
                     fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
-                    clock_gettime(CLOCK_MONOTONIC, &vqf_end);
-
-                    long long vqf_elapsed_ns = timespec_diff_ns(&vqf_start, &vqf_end);
-                    *vqf_total_ns += vqf_elapsed_ns;
-                    (*vqf_call_count)++;
-                    if (vqf_elapsed_ns > *vqf_max_ns) {
-                        *vqf_max_ns = vqf_elapsed_ns;
-                    }
                 }
                 if (slot_ints <= HOLD_INT16)
                     memcpy(g_sensor_hold[i], channel_out, (size_t) slot_bytes);
@@ -711,10 +706,10 @@ static void acquire_sensor_samples_decimated(
                 const int16_t *raw_mag = NULL;
                 bool mag_is_fresh = false;
                 get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+                if (s->sensor_type == SENSOR_MPU9250_I2C) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = true;
-                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                } else if (s->sensor_type == SENSOR_ICM20948_SPI) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
                 }
@@ -1220,6 +1215,20 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
     }
 
     ctx->total_channels += s->num_channels;
+
+    // Resolve sensor_type once so the hot path never calls strcmp
+    if (strcmp(s->name, "MPU9250") == 0)
+        s->sensor_type = s->is_spi ? SENSOR_MPU9250_SPI : SENSOR_MPU9250_I2C;
+    else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi)
+        s->sensor_type = SENSOR_ICM20948_SPI;
+    else if (strcmp(s->name, "BNO055") == 0)
+        s->sensor_type = SENSOR_BNO055;
+    else if (s->split_read)
+        s->sensor_type = SENSOR_SPLIT_I2C;
+    else
+        s->sensor_type = s->is_spi ? SENSOR_GENERIC_SPI : SENSOR_GENERIC_I2C;
+    s->current_bank = 0xFF; // invalid sentinel — force first bank-select write
+
     s->cfg_acc_id = 0;
     s->cfg_gyr_id = 0;
     s->cfg_target_hz = DESIRED_SAMPLE_RATE_HZ;
@@ -1417,9 +1426,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     int buffered_bytes_per_frame = bytes_per_frame;
     bool record = true;
     int buf_idx = 0;
-    long long vqf_total_ns = 0;
-    long long vqf_max_ns = 0;
-    unsigned long long vqf_call_count = 0;
     double csv_elapsed = 0.0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL) {
@@ -1476,11 +1482,9 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
             }
         }
         ns++;
-        acquire_sensor_samples_decimated(ctx, with_fusion, bytes_per_frame, frame_buffer,
-                               &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
+        acquire_sensor_samples_decimated(ctx, with_fusion, bytes_per_frame, frame_buffer);
         clock_gettime(CLOCK_MONOTONIC, &t_end);
         warn_if_sample_loop_slow_us(&t_start, &t_end);
-        maybe_report_vqf_stats(with_fusion, ns, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
 
         // --- File Logging (The Unblocked Double-Buffer) ---
         if (record && bin_file != NULL) {
