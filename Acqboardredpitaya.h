@@ -227,6 +227,10 @@ public:
     float analogInGain = 1.0f;
     float analogOutVoltage = 0.0f;
 
+    String boardHostname = "rp-f0f85a.local";
+
+    void setHostname (const String& h) { boardHostname = h.trim().isEmpty() ? "rp-f0f85a.local" : h.trim(); }
+
     StreamingSocket* commandSocket = nullptr;
 
     String lastRecordingPath;
