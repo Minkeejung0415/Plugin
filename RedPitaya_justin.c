@@ -17,6 +17,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <sched.h>
+#include <pthread.h>
 
 #include <netinet/tcp.h>
 
@@ -112,6 +113,90 @@ typedef struct {
     int active_sensor_count;
     int total_channels;
 } HardwareContext;
+
+// --- Fusion background thread ---
+#define FUSION_BG_MAX_SENSORS 6
+
+typedef struct {
+    int16_t raw_acc[3];
+    int16_t raw_gyr[3];  /* bias already subtracted */
+    int16_t raw_mag[3];
+    bool    mag_is_fresh;
+    bool    has_mag;
+    bool    valid;
+} FusionBgIn;
+
+typedef struct {
+    int16_t quat[4];
+    bool    valid;
+} FusionBgOut;
+
+typedef struct {
+    FusionBgIn      in[FUSION_BG_MAX_SENSORS];
+    FusionBgOut     out[FUSION_BG_MAX_SENSORS];
+    int             count;
+    bool            work_pending;
+    bool            running;
+    pthread_mutex_t in_mutex;
+    pthread_cond_t  in_cond;
+    pthread_mutex_t out_mutex;
+    pthread_t       thread;
+} FusionBgCtx;
+
+static FusionBgCtx g_fbg;
+
+static void *fusion_bg_thread_fn(void *arg) {
+    FusionBgCtx *w = (FusionBgCtx *)arg;
+    FusionBgIn local[FUSION_BG_MAX_SENSORS];
+    int count;
+
+    while (1) {
+        pthread_mutex_lock(&w->in_mutex);
+        while (!w->work_pending && w->running)
+            pthread_cond_wait(&w->in_cond, &w->in_mutex);
+        if (!w->running) { pthread_mutex_unlock(&w->in_mutex); break; }
+        count = w->count;
+        memcpy(local, w->in, count * sizeof(FusionBgIn));
+        w->work_pending = false;
+        pthread_mutex_unlock(&w->in_mutex);
+
+        for (int i = 0; i < count; i++) {
+            if (!local[i].valid) continue;
+            int16_t quat[4] = {0, 0, 0, 0};
+            const int16_t *mag = local[i].has_mag ? local[i].raw_mag : NULL;
+            fusion_update_sensor(i, local[i].raw_acc, local[i].raw_gyr,
+                                 mag, local[i].mag_is_fresh, quat);
+            pthread_mutex_lock(&w->out_mutex);
+            memcpy(w->out[i].quat, quat, sizeof(quat));
+            w->out[i].valid = true;
+            pthread_mutex_unlock(&w->out_mutex);
+        }
+    }
+    return NULL;
+}
+
+static int fusion_bg_start(int sensor_count) {
+    memset(&g_fbg, 0, sizeof(g_fbg));
+    g_fbg.count   = sensor_count;
+    g_fbg.running = true;
+    pthread_mutex_init(&g_fbg.in_mutex,  NULL);
+    pthread_cond_init (&g_fbg.in_cond,   NULL);
+    pthread_mutex_init(&g_fbg.out_mutex, NULL);
+    return pthread_create(&g_fbg.thread, NULL, fusion_bg_thread_fn, &g_fbg);
+}
+
+static void fusion_bg_stop(void) {
+    if (!g_fbg.running) return;
+    pthread_mutex_lock(&g_fbg.in_mutex);
+    g_fbg.running = false;
+    pthread_cond_signal(&g_fbg.in_cond);
+    pthread_mutex_unlock(&g_fbg.in_mutex);
+    pthread_join(g_fbg.thread, NULL);
+    pthread_mutex_destroy(&g_fbg.in_mutex);
+    pthread_cond_destroy(&g_fbg.in_cond);
+    pthread_mutex_destroy(&g_fbg.out_mutex);
+    memset(&g_fbg, 0, sizeof(g_fbg));
+}
 
 // Global jump buffer for the watchdog
 static sigjmp_buf watchdog_bucket;
@@ -666,111 +751,107 @@ static void acquire_sensor_samples_decimated(
     int bytes_per_frame,
     int16_t *frame_buffer
 ) {
-    /* DIAGNOSTIC: remove when overhead source is identified */
-    static long long diag_sensor_ns = 0, diag_fusion_ns = 0, diag_analog_ns = 0;
-    static long diag_count = 0;
-    struct timespec _ta, _tb, _tc, _tf0, _tf1;
-    long long this_fusion_ns = 0;
-    clock_gettime(CLOCK_MONOTONIC, &_ta);
-    /* END DIAGNOSTIC HEADER */
-
     memset(frame_buffer, 0, bytes_per_frame);
     int current_byte_offset = 0;
 
+    /* Snapshot previous quaternion output before touching frame_buffer */
+    int16_t prev_quat[FUSION_BG_MAX_SENSORS][4];
+    bool    prev_quat_valid[FUSION_BG_MAX_SENSORS];
+    if (with_fusion) {
+        pthread_mutex_lock(&g_fbg.out_mutex);
+        for (int i = 0; i < ctx->active_sensor_count && i < FUSION_BG_MAX_SENSORS; i++) {
+            prev_quat_valid[i] = g_fbg.out[i].valid;
+            if (g_fbg.out[i].valid)
+                memcpy(prev_quat[i], g_fbg.out[i].quat, sizeof(prev_quat[i]));
+        }
+        pthread_mutex_unlock(&g_fbg.out_mutex);
+    }
+
+    /* Local fusion inputs populated this iteration, posted after the loop */
+    FusionBgIn local_in[FUSION_BG_MAX_SENSORS];
+    bool       local_in_valid[FUSION_BG_MAX_SENSORS];
+    memset(local_in_valid, 0, sizeof(local_in_valid));
+
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         SensorInstance *s = &ctx->sensors[i];
-        int slot_ints = s->num_channels + 4;
+        int slot_ints  = s->num_channels + 4;
         int slot_bytes = slot_ints * 2;
         int16_t *channel_out = (int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset);
+
+        bool did_fresh_read = false;
 
         if (i < HOLD_SLOTS) {
             g_decim_counter[i]++;
             if (g_decim_counter[i] >= g_decim_interval[i]) {
                 g_decim_counter[i] = 0;
                 read_sensor_raw_channels(s, channel_out);
-
-                if (with_fusion) {
-                    int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-                    int16_t raw_gyr[3];
-                    const int16_t *raw_mag = NULL;
-                    bool mag_is_fresh = false;
-
-                    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                    if (s->sensor_type == SENSOR_BNO055) {
-                        raw_mag = &channel_out[3];
-                        mag_is_fresh = true;
-                    } else if (s->sensor_type == SENSOR_MPU9250_I2C) {
-                        raw_mag = &channel_out[6];
-                        mag_is_fresh = true;
-                    } else if (s->sensor_type == SENSOR_ICM20948_SPI) {
-                        raw_mag = &channel_out[6];
-                        mag_is_fresh = s->mag_is_fresh;
-                    }
-
-                    raw_gyr[0] -= s->gyro_bias[0];
-                    raw_gyr[1] -= s->gyro_bias[1];
-                    raw_gyr[2] -= s->gyro_bias[2];
-
-                    clock_gettime(CLOCK_MONOTONIC, &_tf0);
-                    fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
-                    clock_gettime(CLOCK_MONOTONIC, &_tf1);
-                    this_fusion_ns += (_tf1.tv_sec - _tf0.tv_sec) * 1000000000LL + (_tf1.tv_nsec - _tf0.tv_nsec);
-                }
-                if (slot_ints <= HOLD_INT16)
-                    memcpy(g_sensor_hold[i], channel_out, (size_t) slot_bytes);
+                did_fresh_read = true;
             } else {
                 if (slot_ints <= HOLD_INT16)
-                    memcpy(channel_out, g_sensor_hold[i], (size_t) slot_bytes);
+                    memcpy(channel_out, g_sensor_hold[i], (size_t)slot_bytes);
             }
         } else {
             read_sensor_raw_channels(s, channel_out);
-            if (with_fusion) {
-                int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-                int16_t raw_gyr[3];
-                const int16_t *raw_mag = NULL;
-                bool mag_is_fresh = false;
-                get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                if (s->sensor_type == SENSOR_MPU9250_I2C) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = true;
+            did_fresh_read = true;
+        }
+
+        if (did_fresh_read) {
+            if (with_fusion && i < FUSION_BG_MAX_SENSORS) {
+                /* Place last computed quaternion into this frame (1 sample latency) */
+                if (prev_quat_valid[i])
+                    memcpy(channel_out + s->num_channels, prev_quat[i], 8);
+
+                /* Build fusion input for the background thread */
+                FusionBgIn *fin = &local_in[i];
+                fin->raw_acc[0] = channel_out[0];
+                fin->raw_acc[1] = channel_out[1];
+                fin->raw_acc[2] = channel_out[2];
+                get_sensor_gyro_from_channels(s, channel_out, fin->raw_gyr);
+                fin->raw_gyr[0] -= s->gyro_bias[0];
+                fin->raw_gyr[1] -= s->gyro_bias[1];
+                fin->raw_gyr[2] -= s->gyro_bias[2];
+                fin->has_mag      = false;
+                fin->mag_is_fresh = false;
+                if (s->sensor_type == SENSOR_BNO055 || s->sensor_type == SENSOR_MPU9250_I2C) {
+                    fin->raw_mag[0] = channel_out[6];
+                    fin->raw_mag[1] = channel_out[7];
+                    fin->raw_mag[2] = channel_out[8];
+                    fin->has_mag = true; fin->mag_is_fresh = true;
                 } else if (s->sensor_type == SENSOR_ICM20948_SPI) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = s->mag_is_fresh;
+                    fin->raw_mag[0] = channel_out[6];
+                    fin->raw_mag[1] = channel_out[7];
+                    fin->raw_mag[2] = channel_out[8];
+                    fin->has_mag = true; fin->mag_is_fresh = s->mag_is_fresh;
                 }
-                raw_gyr[0] -= s->gyro_bias[0];
-                raw_gyr[1] -= s->gyro_bias[1];
-                raw_gyr[2] -= s->gyro_bias[2];
-                clock_gettime(CLOCK_MONOTONIC, &_tf0);
-                fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
-                clock_gettime(CLOCK_MONOTONIC, &_tf1);
-                this_fusion_ns += (_tf1.tv_sec - _tf0.tv_sec) * 1000000000LL + (_tf1.tv_nsec - _tf0.tv_nsec);
+                fin->valid = true;
+                local_in_valid[i] = true;
             }
+
+            /* Save to hold: raw + quat (quat is zeros if fusion off, else prev quat) */
+            if (i < HOLD_SLOTS && slot_ints <= HOLD_INT16)
+                memcpy(g_sensor_hold[i], channel_out, (size_t)slot_bytes);
         }
 
         current_byte_offset += slot_bytes;
     }
 
-    /* DIAGNOSTIC: measure analog read cost */
-    clock_gettime(CLOCK_MONOTONIC, &_tb);
-    read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
-    clock_gettime(CLOCK_MONOTONIC, &_tc);
-
-    {
-        long long pre_analog_ns = (_tb.tv_sec - _ta.tv_sec) * 1000000000LL + (_tb.tv_nsec - _ta.tv_nsec);
-        long long analog_ns    = (_tc.tv_sec - _tb.tv_sec) * 1000000000LL + (_tc.tv_nsec - _tb.tv_nsec);
-        diag_sensor_ns += pre_analog_ns - this_fusion_ns;
-        diag_fusion_ns += this_fusion_ns;
-        diag_analog_ns += analog_ns;
-        diag_count++;
-        if (diag_count >= 1000) {
-            printf("DIAG (1000 samples): sensor_read=%.1fus  fusion=%.1fus  analog=%.1fus\n",
-                   (double)diag_sensor_ns / diag_count / 1000.0,
-                   (double)diag_fusion_ns / diag_count / 1000.0,
-                   (double)diag_analog_ns / diag_count / 1000.0);
-            diag_sensor_ns = 0; diag_fusion_ns = 0; diag_analog_ns = 0; diag_count = 0;
+    /* Post new raw data to the background VQF thread (non-blocking) */
+    if (with_fusion) {
+        bool any = false;
+        for (int i = 0; i < ctx->active_sensor_count && i < FUSION_BG_MAX_SENSORS; i++)
+            if (local_in_valid[i]) { any = true; break; }
+        if (any) {
+            pthread_mutex_lock(&g_fbg.in_mutex);
+            g_fbg.count = ctx->active_sensor_count;
+            for (int i = 0; i < ctx->active_sensor_count && i < FUSION_BG_MAX_SENSORS; i++)
+                if (local_in_valid[i]) g_fbg.in[i] = local_in[i];
+            g_fbg.work_pending = true;
+            pthread_cond_signal(&g_fbg.in_cond);
+            pthread_mutex_unlock(&g_fbg.in_mutex);
         }
     }
-    /* END DIAGNOSTIC */
+
+    read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
 }
 
 static void warn_if_sample_loop_slow_us(const struct timespec *t_start, const struct timespec *t_end)
@@ -1492,6 +1573,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     uint32_t last_counter = *ctx->gpio_counter;
     init_sensor_decimation(ctx, hw_hz);
 
+    fusion_bg_start(ctx->active_sensor_count);
+
     while (1) {
         int current_hw_hz = current_stream_hw_hz();
         if (current_hw_hz != hw_hz) {
@@ -1505,6 +1588,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
+                fusion_bg_stop();
                 free(packet); free(frame_buffer); free(sd_write_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1515,6 +1599,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
+                fusion_bg_stop();
                 free(packet); free(frame_buffer); free(sd_write_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1564,6 +1649,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
 
 
     // Standard exit cleanup
+    fusion_bg_stop();
     if (record && bin_file != NULL && buf_idx > 0) {
         fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
     }
