@@ -26,29 +26,29 @@
 #include "vqf.h"
 
 // --- FPGA Image Selection ---
-// Pass one of these on the compiler command line to select the loaded bitstream:
-//   -DFPGA_IMAGE_TENKHZTIMER  : tenkHzTimer — 10 kHz tick counter at 0x41210000
-//   -DFPGA_IMAGE_ANALOG_IN    : analog_in   — 125 MHz timer + AXI analog GPIO at 0x41230000
-// Default (no flag): CtrlSysV0.4 — 125 MHz counter at 0x41200000
+// Default: analog_in image — 125 MHz timer at 0x41200000, analog via AXI GPIO at 0x41230000
+// Override with a compiler flag to select a different bitstream:
+//   -DFPGA_IMAGE_CTRLSYSV04  : CtrlSysV0.4 — 125 MHz timer, analog via librp
+//   -DFPGA_IMAGE_TENKHZTIMER : tenkHzTimer  — 10 kHz timer at 0x41210000, analog via librp
 
 // All known FPGA GPIO base addresses:
-#define AXI_TIMER_CTRLSYSV04  0x41200000  // CtrlSysV0.4: 125 MHz free-running counter
+#define AXI_TIMER_CTRLSYSV04  0x41200000  // CtrlSysV0.4 / analog_in: 125 MHz free-running counter
 #define AXI_TIMER_TENKHZ      0x41210000  // tenkHzTimer: 10 kHz tick counter
-#define AXI_ANALOG_IN_GPIO    0x41230000  // analog_in:   CH1 @ +0x00, CH2 @ +0x08
+#define AXI_ANALOG_IN_GPIO    0x41230000  // analog_in: CH1 @ +0x00, CH2 @ +0x08
 
-#if defined(FPGA_IMAGE_TENKHZTIMER)
+#if defined(FPGA_IMAGE_CTRLSYSV04)
+#  define AXI_GPIO_ADDRESS  AXI_TIMER_CTRLSYSV04
+#  define CTR_CLK_RATE      125000000
+#  define USE_AXI_ANALOG    0
+#elif defined(FPGA_IMAGE_TENKHZTIMER)
 #  define AXI_GPIO_ADDRESS  AXI_TIMER_TENKHZ
 #  define CTR_CLK_RATE      10000         // counter increments at 10 kHz
 #  define USE_AXI_ANALOG    0
-#elif defined(FPGA_IMAGE_ANALOG_IN)
+#else
+/* Default: analog_in image */
 #  define AXI_GPIO_ADDRESS  AXI_TIMER_CTRLSYSV04
 #  define CTR_CLK_RATE      125000000
 #  define USE_AXI_ANALOG    1
-#else
-/* Default: CtrlSysV0.4 */
-#  define AXI_GPIO_ADDRESS  AXI_TIMER_CTRLSYSV04
-#  define CTR_CLK_RATE      125000000
-#  define USE_AXI_ANALOG    0
 #endif
 
 // --- Other Hardware Constants ---
