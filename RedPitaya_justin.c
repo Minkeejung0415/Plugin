@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <sched.h>
 
 #include <netinet/tcp.h>
 
@@ -73,6 +74,7 @@ static uint32_t ticks_for_stream_hz(int hz)
 
 // --- Discovery Logic Structures ---
 typedef enum {
+    SENSOR_MPU6050,
     SENSOR_MPU9250_SPI,
     SENSOR_MPU9250_I2C,
     SENSOR_ICM20948_SPI,
@@ -344,6 +346,17 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
     s->mag_is_fresh = false;
 
     switch (s->sensor_type) {
+    case SENSOR_MPU6050: {
+        // Single 14-byte read: accel(6) + temp(2, discarded) + gyro(6)
+        // Saves one I2C transaction vs the old split_read approach (~200us)
+        uint8_t raw[14];
+        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 14);
+        for (int j = 0; j < 3; j++)
+            channel_out[j]   = (int16_t)((raw[j * 2] << 8)       | raw[j * 2 + 1]);
+        for (int j = 0; j < 3; j++)
+            channel_out[3+j] = (int16_t)((raw[8 + j * 2] << 8)   | raw[8 + j * 2 + 1]);
+        break;
+    }
     case SENSOR_MPU9250_SPI: {
         uint8_t raw[12];
         axi_spi_read(s->axi_map, 0x3B, raw, 12);
@@ -1217,7 +1230,9 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
     ctx->total_channels += s->num_channels;
 
     // Resolve sensor_type once so the hot path never calls strcmp
-    if (strcmp(s->name, "MPU9250") == 0)
+    if (strcmp(s->name, "MPU6050") == 0)
+        s->sensor_type = SENSOR_MPU6050;
+    else if (strcmp(s->name, "MPU9250") == 0)
         s->sensor_type = s->is_spi ? SENSOR_MPU9250_SPI : SENSOR_MPU9250_I2C;
     else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi)
         s->sensor_type = SENSOR_ICM20948_SPI;
@@ -1443,6 +1458,13 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     uint32_t last_counter = *ctx->gpio_counter;
     init_sensor_decimation(ctx, hw_hz);
 
+    // Elevate to real-time priority to prevent Linux scheduler preemption mid-sample
+    {
+        struct sched_param sp = { .sched_priority = 80 };
+        if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0)
+            perror("sched_setscheduler (non-fatal, continuing without RT priority)");
+    }
+
     while (1) {
         int current_hw_hz = current_stream_hw_hz();
         if (current_hw_hz != hw_hz) {
@@ -1511,6 +1533,12 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
 
         if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
+    }
+
+    // Drop back to normal scheduling so the idle server doesn't starve other processes
+    {
+        struct sched_param sp = { .sched_priority = 0 };
+        sched_setscheduler(0, SCHED_OTHER, &sp);
     }
 
     // Standard exit cleanup
