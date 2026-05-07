@@ -922,8 +922,17 @@ static void warn_if_sample_loop_slow_us(const struct timespec *t_start, const st
 {
     long elapsed_us = (long)((t_end->tv_sec - t_start->tv_sec) * 1000000L +
                              (t_end->tv_nsec - t_start->tv_nsec) / 1000L);
-    if (elapsed_us > 1000) {
-        printf("WARNING: loop took %ld us\n", elapsed_us);
+    if (elapsed_us <= 1000) return;
+
+    /* Throttle: print at most once per second showing the worst overrun seen */
+    static long worst_us = 0;
+    static long long last_s = 0;
+    if (elapsed_us > worst_us) worst_us = elapsed_us;
+    long long now_s = t_end->tv_sec;
+    if (now_s != last_s) {
+        printf("WARNING: loop slow — worst %ld us in last second\n", worst_us);
+        worst_us = 0;
+        last_s = now_s;
     }
 }
 
@@ -1672,41 +1681,31 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         }
         last_counter += ticks_per_sample;
 
-        {
-            int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
-            if (command_state != 0) {
-                fusion_bg_stop();
-                free(packet); free(frame_buffer); free(sd_write_buffer);
-                return command_state > 0 ? 0 : -1;
-            }
+        int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
+        if (command_state != 0) {
+            fusion_bg_stop();
+            free(packet); free(frame_buffer); free(sd_write_buffer);
+            return command_state > 0 ? 0 : -1;
         }
+
+        bool old_fusion = with_fusion;
+        update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
+        if (with_fusion != old_fusion)
+            printf("Fusion %s during stream.\n", with_fusion ? "enabled" : "disabled");
+        ns++;
 
         struct timespec t_start, t_end;
         clock_gettime(CLOCK_MONOTONIC, &t_start);
-        {
-            bool old_with_fusion = with_fusion;
-            update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
-
-            if (with_fusion != old_with_fusion) {
-                printf("Fusion %s during stream.\n", with_fusion ? "enabled" : "disabled");
-            }
-        }
-        ns++;
         acquire_sensor_samples_decimated(ctx, with_fusion, bytes_per_frame, frame_buffer);
         clock_gettime(CLOCK_MONOTONIC, &t_end);
         warn_if_sample_loop_slow_us(&t_start, &t_end);
 
-        // --- File Logging (The Unblocked Double-Buffer) ---
         if (record && bin_file != NULL) {
-            // Copy this single frame into our giant RAM block
             memcpy(sd_write_buffer + (buf_idx * buffered_bytes_per_frame), frame_buffer, bytes_per_frame);
-            buf_idx++;
-
-            // Only trigger the slow SD card write once the block is full
-            if (buf_idx >= BUF_SAMPLES) {
+            if (++buf_idx >= BUF_SAMPLES) {
                 fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * BUF_SAMPLES, bin_file);
                 fflush(bin_file);
-                buf_idx = 0;     
+                buf_idx = 0;
             }
         }
 
@@ -1715,11 +1714,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
             csv_elapsed += 1.0 / (double)current_stream_hw_hz();
         }
 
-        // --- Network Send (Still fires instantly to keep GUI real-time) ---
         memcpy(packet + HEADER_SIZE, frame_buffer, bytes_per_frame);
-        
         write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
-
         if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
     }
 
