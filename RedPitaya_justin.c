@@ -25,13 +25,37 @@
 #include "sensor_fusion.h"
 #include "vqf.h"
 
-// --- Hardware Constants ---
-#define AXI_GPIO_ADDRESS  0x41200000
+// --- FPGA Image Selection ---
+// Pass one of these on the compiler command line to select the loaded bitstream:
+//   -DFPGA_IMAGE_TENKHZTIMER  : tenkHzTimer — 10 kHz tick counter at 0x41210000
+//   -DFPGA_IMAGE_ANALOG_IN    : analog_in   — 125 MHz timer + AXI analog GPIO at 0x41230000
+// Default (no flag): CtrlSysV0.4 — 125 MHz counter at 0x41200000
+
+// All known FPGA GPIO base addresses:
+#define AXI_TIMER_CTRLSYSV04  0x41200000  // CtrlSysV0.4: 125 MHz free-running counter
+#define AXI_TIMER_TENKHZ      0x41210000  // tenkHzTimer: 10 kHz tick counter
+#define AXI_ANALOG_IN_GPIO    0x41230000  // analog_in:   CH1 @ +0x00, CH2 @ +0x08
+
+#if defined(FPGA_IMAGE_TENKHZTIMER)
+#  define AXI_GPIO_ADDRESS  AXI_TIMER_TENKHZ
+#  define CTR_CLK_RATE      10000         // counter increments at 10 kHz
+#  define USE_AXI_ANALOG    0
+#elif defined(FPGA_IMAGE_ANALOG_IN)
+#  define AXI_GPIO_ADDRESS  AXI_TIMER_CTRLSYSV04
+#  define CTR_CLK_RATE      125000000
+#  define USE_AXI_ANALOG    1
+#else
+/* Default: CtrlSysV0.4 */
+#  define AXI_GPIO_ADDRESS  AXI_TIMER_CTRLSYSV04
+#  define CTR_CLK_RATE      125000000
+#  define USE_AXI_ANALOG    0
+#endif
+
+// --- Other Hardware Constants ---
 #define RANGE             64000
 #define IIC_RANGE         64000
 #define PORT              5000
 #define DESIRED_SAMPLE_RATE_HZ 100
-#define CTR_CLK_RATE      125000000
 #define HEADER_SIZE       22
 #define ANALOG_WAVEFORM_CHANNELS 2
 #define GYRO_BIAS_CALIBRATION_SAMPLES 200
@@ -202,6 +226,9 @@ static void fusion_bg_stop(void) {
 static sigjmp_buf watchdog_bucket;
 static volatile sig_atomic_t stop_requested = 0;
 static bool analog_inputs_ready = false;
+#if USE_AXI_ANALOG
+static volatile uint32_t *g_analog_axi_map = NULL;
+#endif
 
 static long long timespec_diff_ns(const struct timespec *start, const struct timespec *end) {
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
@@ -382,18 +409,31 @@ static void build_measurement_path(char *buffer, size_t buffer_size, const char 
 }
 
 static void init_analog_waveform_inputs(void) {
+#if USE_AXI_ANALOG
+    /* analog_in image: reads directly from AXI GPIO at AXI_ANALOG_IN_GPIO.
+     * g_analog_axi_map is mapped in init_hardware(); just confirm it succeeded. */
+    if (g_analog_axi_map != NULL) {
+        analog_inputs_ready = true;
+        printf("Analog inputs via AXI GPIO (analog_in image) — %d channels at 0x%08X.\n",
+               ANALOG_WAVEFORM_CHANNELS, AXI_ANALOG_IN_GPIO);
+    } else {
+        fprintf(stderr, "AXI analog GPIO not mapped; analog channels will be zero.\n");
+        analog_inputs_ready = false;
+    }
+#else
+    /* CtrlSysV0.4 / tenkHzTimer images: use librp oscilloscope API. */
     signal(SIGBUS, watchdog_handler);
 
     if (sigsetjmp(watchdog_bucket, 1) != 0) {
-        fprintf(stderr, "SIGBUS caught during RP analog init: acquisition hardware not present in current FPGA bitstream.\n");
-        fprintf(stderr, "Analog waveform channels will be zero until a bitstream with the oscilloscope IP is loaded.\n");
+        fprintf(stderr, "SIGBUS during RP analog init: oscilloscope IP not in this bitstream.\n");
+        fprintf(stderr, "Analog channels will be zero.\n");
         analog_inputs_ready = false;
         signal(SIGBUS, SIG_DFL);
         return;
     }
 
     if (rp_Init() != RP_OK) {
-        fprintf(stderr, "Red Pitaya analog input API init failed. Analog waveform channels will be zero.\n");
+        fprintf(stderr, "Red Pitaya analog input API init failed. Analog channels will be zero.\n");
         analog_inputs_ready = false;
         signal(SIGBUS, SIG_DFL);
         return;
@@ -405,26 +445,31 @@ static void init_analog_waveform_inputs(void) {
     analog_inputs_ready = true;
     signal(SIGBUS, SIG_DFL);
     printf("Red Pitaya analog waveform inputs enabled (%d channels).\n", ANALOG_WAVEFORM_CHANNELS);
+#endif
 }
 
 static void read_analog_waveform_channels(int16_t *channel_out) {
-    for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++) {
+    for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++)
         channel_out[ch] = 0;
-    }
 
-    if (!analog_inputs_ready) {
-        return;
-    }
+    if (!analog_inputs_ready) return;
 
+#if USE_AXI_ANALOG
+    /* AXI GPIO register layout (analog_in image):
+     *   offset 0x00 (g_analog_axi_map[0]): CH1 — 14-bit ADC, sign-extended to 32 bits
+     *   offset 0x08 (g_analog_axi_map[2]): CH2 — 14-bit ADC, sign-extended to 32 bits
+     * Adjust the offsets below if the FPGA IP uses a different layout. */
+    channel_out[0] = (int16_t)(int32_t)g_analog_axi_map[0];
+    channel_out[1] = (int16_t)(int32_t)g_analog_axi_map[2];
+#else
     for (int ch = 0; ch < ANALOG_WAVEFORM_CHANNELS; ch++) {
         uint32_t size = 1;
         int16_t sample = 0;
         rp_channel_t channel = ch == 0 ? RP_CH_1 : RP_CH_2;
-
-        if (rp_AcqGetLatestDataRaw(channel, &size, &sample) == RP_OK && size > 0) {
+        if (rp_AcqGetLatestDataRaw(channel, &size, &sample) == RP_OK && size > 0)
             channel_out[ch] = sample;
-        }
     }
+#endif
 }
 
 static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
@@ -1386,6 +1431,18 @@ static int init_hardware(HardwareContext *ctx) {
     ctx->gpio_counter = (volatile uint32_t *)(ctx->axi_gpio_map + 0x0);
     ctx->gpio_reset   = (volatile uint32_t *)(ctx->axi_gpio_map + 0x8);
 
+#if USE_AXI_ANALOG
+    /* Map the AXI GPIO for direct analog input (analog_in image) */
+    void *analog_map = mmap(NULL, RANGE, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, fd, AXI_ANALOG_IN_GPIO);
+    if (analog_map == MAP_FAILED) {
+        fprintf(stderr, "WARNING: Failed to map AXI analog GPIO at 0x%08X. "
+                        "Analog channels will be zero.\n", AXI_ANALOG_IN_GPIO);
+    } else {
+        g_analog_axi_map = (volatile uint32_t *)analog_map;
+    }
+#endif
+
     uint32_t i2c_bases[] = {0x41600000, 0x41610000, 0x41620000, 0x41630000};
     ctx->active_sensor_count = 0;
     ctx->total_channels = 0;
@@ -1867,8 +1924,10 @@ int main(void) {
         close(client_fd);
     }
     fusion_shutdown();
+#if !USE_AXI_ANALOG
     if (analog_inputs_ready) {
         rp_Release();
     }
+#endif
     return 0;
 }
