@@ -411,15 +411,34 @@ static void build_measurement_path(char *buffer, size_t buffer_size, const char 
 static void init_analog_waveform_inputs(void) {
 #if USE_AXI_ANALOG
     /* analog_in image: reads directly from AXI GPIO at AXI_ANALOG_IN_GPIO.
-     * g_analog_axi_map is mapped in init_hardware(); just confirm it succeeded. */
-    if (g_analog_axi_map != NULL) {
-        analog_inputs_ready = true;
-        printf("Analog inputs via AXI GPIO (analog_in image) — %d channels at 0x%08X.\n",
-               ANALOG_WAVEFORM_CHANNELS, AXI_ANALOG_IN_GPIO);
-    } else {
+     * mmap() alone does not verify the peripheral exists — a probe read is needed.
+     * If the current FPGA bitstream has no peripheral at that address, the read
+     * triggers a SIGBUS which we catch here and fall back to zero output. */
+    if (g_analog_axi_map == NULL) {
         fprintf(stderr, "AXI analog GPIO not mapped; analog channels will be zero.\n");
         analog_inputs_ready = false;
+        return;
     }
+
+    signal(SIGBUS, watchdog_handler);
+    if (sigsetjmp(watchdog_bucket, 1) != 0) {
+        fprintf(stderr, "SIGBUS probing AXI analog GPIO at 0x%08X: "
+                        "peripheral not present in current FPGA bitstream.\n",
+                AXI_ANALOG_IN_GPIO);
+        fprintf(stderr, "Analog channels will be zero.\n");
+        analog_inputs_ready = false;
+        signal(SIGBUS, SIG_DFL);
+        return;
+    }
+
+    /* Probe read — will fault here (not during streaming) if address is invalid */
+    volatile uint32_t probe = g_analog_axi_map[0];
+    (void)probe;
+
+    analog_inputs_ready = true;
+    signal(SIGBUS, SIG_DFL);
+    printf("Analog inputs via AXI GPIO at 0x%08X (%d channels).\n",
+           AXI_ANALOG_IN_GPIO, ANALOG_WAVEFORM_CHANNELS);
 #else
     /* CtrlSysV0.4 / tenkHzTimer images: use librp oscilloscope API. */
     signal(SIGBUS, watchdog_handler);
