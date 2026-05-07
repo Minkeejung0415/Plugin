@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstring>
 
+// *** Change this to switch which Red Pitaya board the plugin connects to ***
+static const char* BOARD_NAME = "rp-f0f85a.local";
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
     : AcquisitionBoard()
@@ -38,7 +40,7 @@ bool AcqBoardRedPitaya::detectBoard()
     StreamingSocket socket;
 
     // Use a slightly larger timeout for discovery since the RP might be scanning AXI
-    if (! socket.connect (boardHostname.toRawUTF8(), 5000, 1000))
+    if (! socket.connect (BOARD_NAME, 5000, 1000))
     {
         std::cout << "connect failed" << std::endl;
         return false;
@@ -109,7 +111,7 @@ bool AcqBoardRedPitaya::detectBoard()
     if (commandSocket == nullptr)
         commandSocket = new StreamingSocket();
 
-    if (! commandSocket->connect (boardHostname.toRawUTF8(), 5000, 1000))
+    if (! commandSocket->connect (BOARD_NAME, 5000, 1000))
     {
         std::cout << "connect failed" << std::endl;
         delete commandSocket;
@@ -296,7 +298,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     }
 
     commandSocket = new StreamingSocket();
-    if (! commandSocket->connect (boardHostname.toRawUTF8(), 5000, 1000))
+    if (! commandSocket->connect (BOARD_NAME, 5000, 1000))
     {
         std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
         delete commandSocket;
@@ -517,7 +519,7 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
     {
         commandSocket = new StreamingSocket();
 
-        if (! commandSocket->connect (boardHostname.toRawUTF8(), 5000, 1000))
+        if (! commandSocket->connect (BOARD_NAME, 5000, 1000))
         {
             std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
             delete commandSocket;

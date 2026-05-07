@@ -172,20 +172,6 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
     if (isRedPitaya)
     {
-        hostnameTitle = std::make_unique<Label> ("hostnameTitle", "Board hostname");
-        hostnameTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        hostnameTitle->setBounds (col1, 68, 118, 12);
-        addAndMakeVisible (hostnameTitle.get());
-
-        hostnameLabel = std::make_unique<Label> ("hostnameLabel", "rp-f0f85a.local");
-        hostnameLabel->setEditable (true);
-        hostnameLabel->setColour (Label::backgroundColourId, Colours::black);
-        hostnameLabel->setColour (Label::textColourId, Colours::white);
-        hostnameLabel->setBounds (col1, 82, 118, 20);
-        hostnameLabel->addListener (this);
-        hostnameLabel->setTooltip ("Hostname or IP of the Red Pitaya (e.g. rp-f0cd35.local)");
-        addAndMakeVisible (hostnameLabel.get());
-
         const int comboW = 118;
 
         sensorCfgAccelTitle = std::make_unique<Label> ("sensorCfgAccelTitle", "Accel");
@@ -823,9 +809,6 @@ void DeviceEditor::startAcquisition()
     if (filterButton != nullptr)
         filterButton->setEnabledState (true);
 
-    if (hostnameLabel != nullptr)
-        hostnameLabel->setEnabled (false);
-
     if (analogInLabel != nullptr)
         analogInLabel->setEnabled (true);
 
@@ -845,10 +828,6 @@ void DeviceEditor::startAcquisition()
             sampleRateTitle->toFront (false);
         if (sampleRateLabel != nullptr)
             sampleRateLabel->toFront (false);
-        if (hostnameTitle != nullptr)
-            hostnameTitle->toFront (false);
-        if (hostnameLabel != nullptr)
-            hostnameLabel->toFront (false);
         if (filterTitle != nullptr)
             filterTitle->toFront (false);
         if (filterButton != nullptr)
@@ -900,9 +879,6 @@ void DeviceEditor::stopAcquisition()
     if (filterButton != nullptr)
         filterButton->setEnabledState (true);
 
-    if (hostnameLabel != nullptr)
-        hostnameLabel->setEnabled (true);
-
     if (analogInLabel != nullptr)
         analogInLabel->setEnabled (true);
 
@@ -950,11 +926,6 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
             if (! acquisitionIsActive)
                 CoreServices::updateSignalChain (this);
         }
-    }
-    else if (labelThatHasChanged == hostnameLabel.get())
-    {
-        if (board != nullptr)
-            static_cast<AcqBoardRedPitaya*> (board)->setHostname (hostnameLabel->getText());
     }
     else if (labelThatHasChanged == analogInLabel.get())
     {
@@ -1070,8 +1041,6 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
     xml->setAttribute ("AnalogInGain", analogInLabel->getText().getFloatValue());
     xml->setAttribute ("AnalogOutVoltage", analogOutLabel->getText().getFloatValue());
 
-    if (hostnameLabel != nullptr)
-        xml->setAttribute ("RedPitayaHostname", hostnameLabel->getText());
 }
 
 void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
@@ -1161,12 +1130,6 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
     // load channel naming scheme
     board->setNamingScheme ((ChannelNamingScheme) xml->getIntAttribute ("Channel_Naming_Scheme", 0));
 
-    if (hostnameLabel != nullptr)
-    {
-        String h = xml->getStringAttribute ("RedPitayaHostname", "rp-f0f85a.local");
-        hostnameLabel->setText (h, dontSendNotification);
-        static_cast<AcqBoardRedPitaya*> (board)->setHostname (h);
-    }
 }
 
 Visualizer* DeviceEditor::createNewCanvas()
