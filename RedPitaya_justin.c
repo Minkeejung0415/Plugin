@@ -1483,6 +1483,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
+                struct sched_param sp = { .sched_priority = 0 };
+                sched_setscheduler(0, SCHED_OTHER, &sp);
                 free(packet); free(frame_buffer); free(sd_write_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1493,6 +1495,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
+                struct sched_param sp = { .sched_priority = 0 };
+                sched_setscheduler(0, SCHED_OTHER, &sp);
                 free(packet); free(frame_buffer); free(sd_write_buffer);
                 return command_state > 0 ? 0 : -1;
             }
