@@ -666,6 +666,14 @@ static void acquire_sensor_samples_decimated(
     int bytes_per_frame,
     int16_t *frame_buffer
 ) {
+    /* DIAGNOSTIC: remove when overhead source is identified */
+    static long long diag_sensor_ns = 0, diag_fusion_ns = 0, diag_analog_ns = 0;
+    static long diag_count = 0;
+    struct timespec _ta, _tb, _tc, _tf0, _tf1;
+    long long this_fusion_ns = 0;
+    clock_gettime(CLOCK_MONOTONIC, &_ta);
+    /* END DIAGNOSTIC HEADER */
+
     memset(frame_buffer, 0, bytes_per_frame);
     int current_byte_offset = 0;
 
@@ -703,7 +711,10 @@ static void acquire_sensor_samples_decimated(
                     raw_gyr[1] -= s->gyro_bias[1];
                     raw_gyr[2] -= s->gyro_bias[2];
 
+                    clock_gettime(CLOCK_MONOTONIC, &_tf0);
                     fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
+                    clock_gettime(CLOCK_MONOTONIC, &_tf1);
+                    this_fusion_ns += (_tf1.tv_sec - _tf0.tv_sec) * 1000000000LL + (_tf1.tv_nsec - _tf0.tv_nsec);
                 }
                 if (slot_ints <= HOLD_INT16)
                     memcpy(g_sensor_hold[i], channel_out, (size_t) slot_bytes);
@@ -729,14 +740,37 @@ static void acquire_sensor_samples_decimated(
                 raw_gyr[0] -= s->gyro_bias[0];
                 raw_gyr[1] -= s->gyro_bias[1];
                 raw_gyr[2] -= s->gyro_bias[2];
+                clock_gettime(CLOCK_MONOTONIC, &_tf0);
                 fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
+                clock_gettime(CLOCK_MONOTONIC, &_tf1);
+                this_fusion_ns += (_tf1.tv_sec - _tf0.tv_sec) * 1000000000LL + (_tf1.tv_nsec - _tf0.tv_nsec);
             }
         }
 
         current_byte_offset += slot_bytes;
     }
 
+    /* DIAGNOSTIC: measure analog read cost */
+    clock_gettime(CLOCK_MONOTONIC, &_tb);
     read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
+    clock_gettime(CLOCK_MONOTONIC, &_tc);
+
+    {
+        long long pre_analog_ns = (_tb.tv_sec - _ta.tv_sec) * 1000000000LL + (_tb.tv_nsec - _ta.tv_nsec);
+        long long analog_ns    = (_tc.tv_sec - _tb.tv_sec) * 1000000000LL + (_tc.tv_nsec - _tb.tv_nsec);
+        diag_sensor_ns += pre_analog_ns - this_fusion_ns;
+        diag_fusion_ns += this_fusion_ns;
+        diag_analog_ns += analog_ns;
+        diag_count++;
+        if (diag_count >= 1000) {
+            printf("DIAG (1000 samples): sensor_read=%.1fus  fusion=%.1fus  analog=%.1fus\n",
+                   (double)diag_sensor_ns / diag_count / 1000.0,
+                   (double)diag_fusion_ns / diag_count / 1000.0,
+                   (double)diag_analog_ns / diag_count / 1000.0);
+            diag_sensor_ns = 0; diag_fusion_ns = 0; diag_analog_ns = 0; diag_count = 0;
+        }
+    }
+    /* END DIAGNOSTIC */
 }
 
 static void warn_if_sample_loop_slow_us(const struct timespec *t_start, const struct timespec *t_end)
