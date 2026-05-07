@@ -1420,7 +1420,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
     unsigned long long vqf_call_count = 0;
-    double csv_elapsed = 0.0;
+    int total_samples_written = 0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL) {
         free(packet);
@@ -1496,10 +1496,8 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
             }
         }
 
-        if (record && csv_file != NULL) {
-            write_csv_row(csv_file, ctx, with_fusion, ns, csv_elapsed, frame_buffer);
-            csv_elapsed += 1.0 / (double)current_stream_hw_hz();
-        }
+        if (record && bin_file != NULL)
+            total_samples_written++;
 
         // --- Network Send (Still fires instantly to keep GUI real-time) ---
         memcpy(packet + HEADER_SIZE, frame_buffer, bytes_per_frame);
@@ -1509,11 +1507,29 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
     }
 
-    // Standard exit cleanup
+    // Standard exit cleanup — flush any remaining binary frames
     if (record && bin_file != NULL && buf_idx > 0) {
         fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * buf_idx, bin_file);
+        fflush(bin_file);
     }
-    if (csv_file != NULL) fflush(csv_file);
+
+    // Generate CSV post-acquisition by replaying the binary file — keeps fprintf out of the hot path
+    if (csv_file != NULL && bin_file != NULL && total_samples_written > 0) {
+        printf("Generating CSV from %d samples...\n", total_samples_written);
+        rewind(bin_file);
+        const double dt = (hw_hz > 0) ? 1.0 / (double)hw_hz : 0.001;
+        double elapsed = 0.0;
+        for (int i = 0; i < total_samples_written; i++) {
+            if (fread(frame_buffer, 1, (size_t)buffered_bytes_per_frame, bin_file)
+                    < (size_t)buffered_bytes_per_frame)
+                break;
+            write_csv_row(csv_file, ctx, with_fusion, i, elapsed, frame_buffer);
+            elapsed += dt;
+        }
+        fflush(csv_file);
+        printf("CSV generation complete.\n");
+    }
+
     if (bin_file != NULL) fclose(bin_file);
     if (csv_file != NULL) fclose(csv_file);
     free(packet); free(frame_buffer); free(sd_write_buffer);
