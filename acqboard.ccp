@@ -785,69 +785,23 @@ void AcqBoardRedPitaya::run()
     if (numAdcChannelsLocal <= 0 || numAdcChannelsLocal > MAX_CHANNELS || samplesPerBuffer <= 0)
         return;
 
-    constexpr int headerSize = 22;
-    constexpr int maxPacketSize = 1024;
-
-    uint8_t packet[maxPacketSize];
-
-    // Non-blocking read helper: polls in 100ms slices so threadShouldExit() is
-    // checked regularly and stopAcquisition()'s close() is noticed promptly.
-    auto socketReadFully = [&] (void* buf, int size) -> bool
+    // Open a dedicated UDP socket for the data stream.
+    // The TCP commandSocket remains open exclusively for control commands
+    // (STOP signalled by TCP close in stopAcquisition()).
+    DatagramSocket udpSocket;
+    if (! udpSocket.bindToPort (55001))
     {
-        int done = 0;
-        char* ptr = static_cast<char*> (buf);
-        while (done < size && ! threadShouldExit())
-        {
-            int ready = commandSocket->waitUntilReady (true, 100);
-            if (ready < 0)
-                return false; // socket closed / error
-            if (ready == 0)
-                continue; // 100ms timeout — recheck threadShouldExit
-            int n = commandSocket->read (ptr + done, size - done, false);
-            if (n <= 0)
-                return false;
-            done += n;
-        }
-        return ! threadShouldExit();
-    };
+        std::cout << "Red Pitaya ERROR: Failed to bind UDP socket on port 55001" << std::endl;
+        return;
+    }
 
-    // MSVC: nested lambda must capture constexpr locals explicitly (no implicit capture in []).
-    auto parseHeaderBytesPerFrame = [=] (const uint8_t* hdr, int32_t& outBytes) -> bool
-    {
-        if (hdr[8] != 0x03 || hdr[9] != 0x00)
-            return false;
+    constexpr int headerSize      = 22;
+    const int     payloadSize     = numAdcChannelsLocal * 2;  // int16 per channel
+    const int     packetSize      = headerSize + payloadSize;
+    constexpr int packetsPerChunk = 100;                      // must match CHUNK_SAMPLES in RedPitaya_justin.c
+    const int     chunkSize       = packetSize * packetsPerChunk;
 
-        memcpy (&outBytes, hdr + 4, sizeof (int32_t));
-
-        // int16 samples per frame; keep in sync with Red Pitaya write_stream_header
-        if (outBytes < 2 || outBytes > (maxPacketSize - headerSize) || (outBytes & 1) != 0)
-            return false;
-
-        return true;
-    };
-
-    // Read one 22-byte header + variable payload. If the header is not valid,
-    // slide one byte and retry (same framing idea as the original sync loop).
-    auto readOneFrame = [&] (int32_t& outPayloadBytes) -> bool
-    {
-        if (! socketReadFully (packet, headerSize))
-            return false;
-
-        constexpr int maxResync = 65536;
-
-        for (int guard = 0; guard < maxResync && ! threadShouldExit(); ++guard)
-        {
-            if (parseHeaderBytesPerFrame (packet, outPayloadBytes))
-                return socketReadFully (packet + headerSize, (int) outPayloadBytes);
-
-            memmove (packet, packet + 1, (size_t) headerSize - 1);
-
-            if (! socketReadFully (packet + headerSize - 1, 1))
-                return false;
-        }
-
-        return false;
-    };
+    uint8_t chunkBuffer[65507]; // max UDP payload
 
     while (! threadShouldExit())
     {
@@ -906,15 +860,24 @@ void AcqBoardRedPitaya::run()
             // analog waveform channels after sensors left at 1.0
         }
 
-        for (int sampleIndex = 0; sampleIndex < samplesPerBuffer; ++sampleIndex)
+        // Poll with 100ms timeout so threadShouldExit() is checked regularly.
+        if (! udpSocket.waitUntilReady (true, 100))
+            continue;
+
+        int n = udpSocket.read ((char*) chunkBuffer, chunkSize, false);
+
+        // Skip malformed or empty datagrams.
+        if (n <= 0 || (n % packetSize) != 0)
+            continue;
+
+        const int numPackets = n / packetSize;
+
+        for (int p = 0; p < numPackets && ! threadShouldExit(); ++p)
         {
-            int32_t payloadBytes = 0;
-
-            if (! readOneFrame (payloadBytes))
-                return;
-
-            const int16_t* channels = reinterpret_cast<const int16_t*> (packet + headerSize);
-            const int channelsInPacket = payloadBytes / 2;
+            uint8_t*       pkt             = chunkBuffer + (p * packetSize);
+            const int16_t* channels        = reinterpret_cast<const int16_t*> (pkt + headerSize);
+            const int      channelsInPacket = payloadSize / 2;
+            const int      sampleIndex      = p % (int) samplesPerBuffer;
 
             for (int adc = 0; adc < numAdcChannelsLocal; ++adc)
             {
@@ -924,21 +887,22 @@ void AcqBoardRedPitaya::run()
 
             const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
             sampleNumbers[sampleIndex] = sampleNumber;
-            timestamps[sampleIndex] = elapsedSeconds;
-            event_codes[sampleIndex] = eventCode;
+            timestamps[sampleIndex]    = elapsedSeconds;
+            event_codes[sampleIndex]   = eventCode;
 
             ++sampleNumber;
             elapsedSeconds += 1.0 / currentSampleRate;
+
+            if (sampleIndex == (int) samplesPerBuffer - 1)
+            {
+                currentBuffer = buffer;
+                if (currentBuffer != nullptr && ! threadShouldExit())
+                    currentBuffer->addToBuffer (samples,
+                                                sampleNumbers,
+                                                timestamps,
+                                                event_codes,
+                                                (int) samplesPerBuffer);
+            }
         }
-
-        currentBuffer = buffer;
-        if (currentBuffer == nullptr || threadShouldExit())
-            return;
-
-        currentBuffer->addToBuffer (samples,
-                                    sampleNumbers,
-                                    timestamps,
-                                    event_codes,
-                                    (int) samplesPerBuffer);
     }
 }

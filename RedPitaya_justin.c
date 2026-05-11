@@ -49,6 +49,8 @@
 #define ICM20948_AK09916_CNTL2 0x31
 
 #define BUF_SAMPLES 1000 // Flushes to SD card every 1,000 samples
+#define UDP_PORT       55001
+#define CHUNK_SAMPLES  100  // packets bundled per UDP datagram; must match packetsPerChunk in acqboard.ccp
 #define MAX_STREAM_SENSORS 6
 
 /* Hardware tick rate for streaming (Hz); FREQ: command updates this before START. */
@@ -1434,7 +1436,8 @@ static void write_sensors_snapshot_line(int client_fd, HardwareContext *ctx) {
     write(client_fd, line, strlen(line));
 }
 
-static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
+static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_addr,
+                      HardwareContext *ctx, FILE *bin_file, FILE *csv_file, int base_channels) {
     int hw_hz = current_stream_hw_hz();
     uint32_t ticks_per_sample = ticks_for_stream_hz(hw_hz);
     const int max_total_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
@@ -1457,10 +1460,17 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     unsigned long long vqf_call_count = 0;
     double csv_elapsed = 0.0;
 
-    if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL) {
+    // UDP chunk buffer: accumulates CHUNK_SAMPLES packets before a single sendto().
+    const int chunk_pkt_size  = HEADER_SIZE + bytes_per_frame;
+    const int chunk_buf_bytes = chunk_pkt_size * CHUNK_SAMPLES;
+    uint8_t  *chunk_buffer    = (uint8_t *)malloc(chunk_buf_bytes);
+    int       chunk_idx       = 0;
+
+    if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL || chunk_buffer == NULL) {
         free(packet);
         free(frame_buffer);
         free(sd_write_buffer);
+        free(chunk_buffer);
         return -1;
     }
 
@@ -1484,7 +1494,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
-                free(packet); free(frame_buffer); free(sd_write_buffer);
+                free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
                 return command_state > 0 ? 0 : -1;
             }
             usleep(100); continue;
@@ -1494,7 +1504,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
-                free(packet); free(frame_buffer); free(sd_write_buffer);
+                free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
                 return command_state > 0 ? 0 : -1;
             }
         }
@@ -1535,12 +1545,23 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
             csv_elapsed += 1.0 / (double)current_stream_hw_hz();
         }
 
-        // --- Network Send (Still fires instantly to keep GUI real-time) ---
+        // --- Network Send over UDP (buffered into CHUNK_SAMPLES-packet datagrams) ---
         memcpy(packet + HEADER_SIZE, frame_buffer, bytes_per_frame);
-        
         write_stream_header(packet, bytes_per_frame, ctx->total_channels, ns);
 
-        if (send(client_fd, packet, HEADER_SIZE + bytes_per_frame, 0) <= 0) break;
+        memcpy(chunk_buffer + (chunk_idx * chunk_pkt_size), packet, chunk_pkt_size);
+        chunk_idx++;
+        if (chunk_idx >= CHUNK_SAMPLES) {
+            sendto(udp_fd, chunk_buffer, chunk_pkt_size * CHUNK_SAMPLES, 0,
+                   (struct sockaddr*)client_udp_addr, sizeof(*client_udp_addr));
+            chunk_idx = 0;
+        }
+    }
+
+    // Flush any packets remaining in the chunk buffer before exiting.
+    if (chunk_idx > 0) {
+        sendto(udp_fd, chunk_buffer, chunk_pkt_size * chunk_idx, 0,
+               (struct sockaddr*)client_udp_addr, sizeof(*client_udp_addr));
     }
 
     // Standard exit cleanup
@@ -1550,7 +1571,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     if (csv_file != NULL) fflush(csv_file);
     if (bin_file != NULL) fclose(bin_file);
     if (csv_file != NULL) fclose(csv_file);
-    free(packet); free(frame_buffer); free(sd_write_buffer);
+    free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
     return 0;
 }
 
@@ -1626,6 +1647,21 @@ int main(void) {
 
     listen(server_fd, 1);
     printf("Server is listening on Port %d. Waiting for client...\n", PORT);
+
+    // UDP socket for streaming data back to the client on port UDP_PORT.
+    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_fd < 0) { perror("UDP socket creation failed"); return 1; }
+    {
+        struct sockaddr_in udp_addr = {0};
+        udp_addr.sin_family      = AF_INET;
+        udp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        udp_addr.sin_port        = htons(UDP_PORT);
+        if (bind(udp_fd, (struct sockaddr *)&udp_addr, sizeof(udp_addr)) < 0) {
+            perror("UDP bind failed");
+            return 1;
+        }
+    }
+    printf("UDP data socket bound on port %d.\n", UDP_PORT);
 
     while (1) {
         client_fd = accept(server_fd, NULL, NULL);
@@ -1750,7 +1786,19 @@ int main(void) {
                 snprintf(started_msg, sizeof(started_msg), "STARTED BIN:%s CSV:%s\n", bin_filename, csv_filename);
                 write(client_fd, started_msg, strlen(started_msg));
                 write_sensors_snapshot_line(client_fd, &ctx);
-                if (run_stream(client_fd, &ctx, bin_fp, csv_fp, base_channels) < 0) {
+
+                // Derive client UDP address from the established TCP connection.
+                struct sockaddr_in client_udp_addr = {0};
+                {
+                    struct sockaddr_in tcp_peer = {0};
+                    socklen_t peer_len = sizeof(tcp_peer);
+                    getpeername(client_fd, (struct sockaddr *)&tcp_peer, &peer_len);
+                    client_udp_addr.sin_family = AF_INET;
+                    client_udp_addr.sin_addr   = tcp_peer.sin_addr;
+                    client_udp_addr.sin_port   = htons(UDP_PORT);
+                }
+
+                if (run_stream(client_fd, udp_fd, &client_udp_addr, &ctx, bin_fp, csv_fp, base_channels) < 0) {
                     break;
                 }
                 drain_client_rx(client_fd);
