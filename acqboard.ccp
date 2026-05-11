@@ -284,6 +284,23 @@ bool AcqBoardRedPitaya::startAcquisition()
 
     streamSensorNames.clear();
 
+    if (isThreadRunning())
+    {
+        std::cout << "Red Pitaya WARNING: previous reader thread still running; stopping before restart." << std::endl;
+        signalThreadShouldExit();
+
+        if (commandSocket != nullptr)
+            commandSocket->close();
+
+        stopThread (2000);
+
+        if (isThreadRunning())
+        {
+            std::cout << "Red Pitaya ERROR: previous reader thread did not stop; refusing to start a new acquisition." << std::endl;
+            return false;
+        }
+    }
+
     // Always use a new TCP session for each acquisition so the board's command
     // loop never inherits stale RX data from a previous stream (same issue class
     // as sending STOP while our reader thread still shares this socket).
@@ -441,7 +458,15 @@ bool AcqBoardRedPitaya::stopAcquisition()
         commandSocket->close();
 
     // 4. Wait for run() to finish before deleting the socket object.
-    stopThread (500);
+    //    The backend can keep streaming if the old reader/socket lifecycle does
+    //    not complete cleanly before Open Ephys starts a new acquisition.
+    stopThread (2000);
+
+    if (isThreadRunning())
+    {
+        std::cout << "Red Pitaya WARNING: reader thread did not stop; keeping socket object alive." << std::endl;
+        return false;
+    }
 
     if (commandSocket != nullptr)
     {
