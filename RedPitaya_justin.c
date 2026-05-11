@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <errno.h>
 
 #include <netinet/tcp.h>
 
@@ -1073,7 +1074,7 @@ static int process_stream_commands(
         }
     }
 
-    if (n == 0) {
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
         if (*record && *bin_file != NULL && *buf_idx > 0) {
             fwrite(sd_write_buffer, 1, buffered_bytes_per_frame * (*buf_idx), *bin_file);
             fflush(*bin_file);
