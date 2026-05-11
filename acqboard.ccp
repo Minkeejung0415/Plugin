@@ -443,13 +443,7 @@ bool AcqBoardRedPitaya::stopAcquisition()
     if (isThreadRunning())
         signalThreadShouldExit();
 
-    // 2. Null the buffer so run() sees nullptr before addToBuffer on the next
-    //    iteration. The framework's updateSettings() will delete and recreate the
-    //    DataBuffer after startAcquisition() returns; if run() still holds the
-    //    old pointer at that moment it would crash (use-after-free).
-    buffer = nullptr;
-
-    // 3. Close the TCP connection. The Red Pitaya server then sees EOF /
+    // 2. Close the TCP connection. The Red Pitaya server then sees EOF /
     //    send failure and leaves run_stream; we must NOT write STOP (or anything)
     //    on this socket while run() is still consuming the same byte stream as
     //    binary packets — that corrupts framing and leaves stale bytes for the
@@ -457,7 +451,7 @@ bool AcqBoardRedPitaya::stopAcquisition()
     if (commandSocket != nullptr)
         commandSocket->close();
 
-    // 4. Wait for run() to finish before deleting the socket object.
+    // 3. Wait for run() to finish before deleting the socket object.
     //    The backend can keep streaming if the old reader/socket lifecycle does
     //    not complete cleanly before Open Ephys starts a new acquisition.
     stopThread (2000);
