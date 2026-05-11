@@ -169,7 +169,7 @@ static void get_sensor_default_config(
         config.has_mag = has_mag;
         config.accel_mps2_per_lsb = FUSION_STANDARD_GRAVITY_MPS2 / 16384.0f;
         config.gyro_rads_per_lsb = deg_to_rad(1.0f / 131.0f);
-        config.mag_units_per_lsb = 0.15f;
+        config.mag_units_per_lsb = 0.15f / 16.0f;
         config.mag_sample_rate_hz = has_mag ? 100.0f : 0.0f;
         break;
 

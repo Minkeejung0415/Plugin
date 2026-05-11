@@ -83,6 +83,8 @@ typedef struct {
     bool is_spi; // NEW: Flag to tell run_stream which protocol to use
     int16_t gyro_bias[3];
     bool mag_is_fresh;
+    int16_t mag_cache[3];
+    int mag_skip_counter;
     /* Per-sensor UI config (CFG lines from Open Ephys); applied during stream */
     int cfg_acc_id;
     int cfg_gyr_id;
@@ -343,22 +345,42 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
             channel_out[8] = 0;
         } else {
             uint8_t raw[12];
-            uint8_t mag_raw[7];
             axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 12);
-            axi_iic_read_n_bytes(s->axi_map, 0x0C, 0x03, mag_raw, 7);
 
             for (int j = 0; j < 6; j++) {
                 channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
             }
 
-            for (int j = 0; j < 3; j++) {
-                int16_t val = (int16_t)(mag_raw[j * 2] | (mag_raw[j * 2 + 1] << 8));
-                int32_t amplified = (int32_t)val * 16;
-                if (amplified > 32767) amplified = 32767;
-                if (amplified < -32768) amplified = -32768;
-                channel_out[j + 6] = (int16_t)amplified;
+            int mag_period = current_stream_hw_hz() / 100;
+            if (mag_period < 1) mag_period = 1;
+
+            if (++s->mag_skip_counter >= mag_period) {
+                uint8_t mag_raw[7];
+                s->mag_skip_counter = 0;
+                axi_iic_read_n_bytes(s->axi_map, 0x0C, 0x03, mag_raw, 7);
+
+                if (mag_raw[6] & 0x08) {
+                    channel_out[6] = s->mag_cache[0];
+                    channel_out[7] = s->mag_cache[1];
+                    channel_out[8] = s->mag_cache[2];
+                } else {
+                    for (int j = 0; j < 3; j++) {
+                        int16_t val = (int16_t)(mag_raw[j * 2] | (mag_raw[j * 2 + 1] << 8));
+                        int32_t amplified = (int32_t)val * 16;
+                        if (amplified > 32767) amplified = 32767;
+                        if (amplified < -32768) amplified = -32768;
+                        channel_out[j + 6] = (int16_t)amplified;
+                    }
+                    s->mag_cache[0] = channel_out[6];
+                    s->mag_cache[1] = channel_out[7];
+                    s->mag_cache[2] = channel_out[8];
+                    s->mag_is_fresh = true;
+                }
+            } else {
+                channel_out[6] = s->mag_cache[0];
+                channel_out[7] = s->mag_cache[1];
+                channel_out[8] = s->mag_cache[2];
             }
-            s->mag_is_fresh = true;
         }
     } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
         uint8_t raw[12];
@@ -395,11 +417,13 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
         }
     } else if (s->split_read) {
-        uint8_t raw[12];
-        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 6);
-        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x43, raw + 6, 6);
-        for (int j = 0; j < s->num_channels; j++) {
+        uint8_t raw[14];
+        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 14);
+        for (int j = 0; j < 3; j++) {
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
+        }
+        for (int j = 0; j < 3; j++) {
+            channel_out[j + 3] = (int16_t)((raw[8 + j * 2] << 8) | raw[8 + j * 2 + 1]);
         }
     } else {
         uint8_t raw[32];
@@ -579,7 +603,7 @@ static void acquire_sensor_samples(
                 get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
                 if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                     raw_mag = &channel_out[6];
-                    mag_is_fresh = true;
+                    mag_is_fresh = s->mag_is_fresh;
                 } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
@@ -673,7 +697,7 @@ static void acquire_sensor_samples_decimated(
                         get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
                         if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                             raw_mag = &channel_out[6];
-                            mag_is_fresh = true;
+                            mag_is_fresh = s->mag_is_fresh;
                         } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
                             raw_mag = &channel_out[6];
                             mag_is_fresh = s->mag_is_fresh;
@@ -713,7 +737,7 @@ static void acquire_sensor_samples_decimated(
                 get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
                 if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                     raw_mag = &channel_out[6];
-                    mag_is_fresh = true;
+                    mag_is_fresh = s->mag_is_fresh;
                 } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
@@ -1187,6 +1211,14 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
             axi_iic_write_byte(map, addr, 0x6A, 0x00);
             axi_iic_write_byte(map, addr, 0x37, 0x02);
             usleep(5000);
+
+            uint8_t ak_wia = 0;
+            axi_iic_read_n_bytes(map, 0x0C, 0x00, &ak_wia, 1);
+            if (ak_wia != 0x48) {
+                printf("  WARNING: AK8963 WIA = 0x%02X (expected 0x48) - bypass mode may have failed\n", ak_wia);
+            } else {
+                printf("  -> AK8963 verified at 0x0C (WIA = 0x48)\n");
+            }
 
             // This call is safe here because we are actually on an I2C bus
             axi_iic_write_byte(map, 0x0C, 0x0A, 0x16);
