@@ -535,16 +535,16 @@ static void write_csv_row(FILE *fp, HardwareContext *ctx, bool with_fusion, int 
     fprintf(fp, "\n");
 }
 
-static int update_frame_layout(HardwareContext *ctx, int base_channels, bool *with_fusion, int *current_channels, int *bytes_per_frame) {
-    bool next_with_fusion = fusion_is_enabled();
-    int next_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
-    int next_bytes_per_frame = next_channels * 2;
+static void init_frame_layout(HardwareContext *ctx, int base_channels,
+                               int *current_channels, int *bytes_per_frame) {
+    int next_channels       = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
+    *current_channels       = next_channels;
+    *bytes_per_frame        = next_channels * 2;
+    ctx->total_channels     = next_channels;
+}
 
-    *with_fusion = next_with_fusion;
-    *current_channels = next_channels;
-    *bytes_per_frame = next_bytes_per_frame;
-    ctx->total_channels = next_channels;
-    return 0;
+static void update_fusion_state(bool *with_fusion) {
+    *with_fusion = fusion_is_enabled();
 }
 
 static void acquire_sensor_samples(
@@ -728,7 +728,7 @@ static void acquire_sensor_samples_decimated(
         current_byte_offset += slot_bytes;
     }
 
-    read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
+    // read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
 }
 
 static void warn_if_sample_loop_slow_us(const struct timespec *t_start, const struct timespec *t_end)
@@ -1073,8 +1073,9 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
     const int total_samples = duration_seconds * capture_hz;
     int16_t *frame_buffer = (int16_t *)malloc(max_bytes_per_frame);
     bool with_fusion = fusion_is_enabled();
-    int current_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
-    int bytes_per_frame = current_channels * 2;
+    int current_channels = 0;
+    int bytes_per_frame  = 0;
+    init_frame_layout(ctx, base_channels, &current_channels, &bytes_per_frame);
     long long vqf_total_ns = 0;
     long long vqf_max_ns = 0;
     unsigned long long vqf_call_count = 0;
@@ -1125,7 +1126,7 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
 
         struct timespec t_start, t_end;
         clock_gettime(CLOCK_MONOTONIC, &t_start);
-        update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
+        update_fusion_state(&with_fusion);
         acquire_sensor_samples(ctx, with_fusion, bytes_per_frame, frame_buffer,
                                &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
         clock_gettime(CLOCK_MONOTONIC, &t_end);
@@ -1412,8 +1413,9 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
     uint8_t *sd_write_buffer = (uint8_t *)malloc(max_bytes_per_frame * BUF_SAMPLES); // The massive RAM queue
 
     bool with_fusion = fusion_is_enabled();
-    int current_channels = base_channels + ctx->active_sensor_count * 4 + ANALOG_WAVEFORM_CHANNELS;
-    int bytes_per_frame = current_channels * 2;
+    int current_channels = 0;
+    int bytes_per_frame  = 0;
+    init_frame_layout(ctx, base_channels, &current_channels, &bytes_per_frame);
     int buffered_bytes_per_frame = bytes_per_frame;
     bool record = true;
     int buf_idx = 0;
@@ -1431,7 +1433,6 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
 
     // --- Header Setup (first sent frame uses sequence 0; ns increments before each send) ---
     int32_t ns = -1;
-    ctx->total_channels = current_channels;
 
     *ctx->gpio_reset = 1; usleep(1); *ctx->gpio_reset = 0;
     uint32_t last_counter = *ctx->gpio_counter;
@@ -1469,7 +1470,7 @@ static int run_stream(int client_fd, HardwareContext *ctx, FILE *bin_file, FILE 
         clock_gettime(CLOCK_MONOTONIC, &t_start);
         {
             bool old_with_fusion = with_fusion;
-            update_frame_layout(ctx, base_channels, &with_fusion, &current_channels, &bytes_per_frame);
+            update_fusion_state(&with_fusion);
 
             if (with_fusion != old_with_fusion) {
                 printf("Fusion %s during stream.\n", with_fusion ? "enabled" : "disabled");
