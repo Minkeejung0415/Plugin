@@ -11,170 +11,71 @@
 
 ---
 
-## Final summary (Red Pitaya + Open Ephys plugin)
+## Current system summary (Red Pitaya + Open Ephys plugin)
 
-This document describes the **current** behavior after the acquisition, streaming, UI, and stability work. Rebuild and deploy **both** the Open Ephys plugin and the Red Pitaya server binary when you change either side.
+Rebuild and deploy **both** the Open Ephys plugin and the Red Pitaya server binary when you change either side.
 
 ### Red Pitaya server (`RedPitaya_justin.c`)
 
 | Topic | Behavior |
 |--------|----------|
-| **Recordings** | Streamed sessions still write **`.bin`** and **`.csv`** under `/root/Measurements/` as before. |
-| **TCP RX after stream** | After `run_stream()` returns, **`drain_client_rx()`** clears leftover bytes in the client socket receive buffer so the next command loop `read()` does not see tail data from binary packets. |
+| **Recordings** | Streamed sessions write **`.bin`** and **`.csv`** under `/root/Measurements/`. |
+| **TCP RX after stream** | After `run_stream()` returns, `drain_client_rx()` clears leftover bytes in the client socket receive buffer so the next command loop `read()` does not see tail data. |
 | **Frame sequence** | First binary frame of each session uses sequence **`0`** in the 22-byte header (`ns` starts at `-1`, increments once per frame before acquire/send). |
-| **Hardware tick** | Global stream interval uses **`g_stream_hw_hz`** (default `DESIRED_SAMPLE_RATE_HZ`). **`FREQ:n\n`** (1–2000) updates it (idle + during stream). |
-| **Per-sensor rate** | **`CFG i SRATE h\n`** sets desired effective Hz for sensor index `i` (capped to HW rate). Writes the chip's internal ODR register immediately AND updates the decimation counter in `run_stream`. |
-| **Sensor snapshot** | Immediately after **`STARTED …`**, server sends **`SENSORS:0,Name;1,Name2\n`** (active sensors at stream start). |
-| **Accel/gyro presets** | **`CFG i ACC p\n`** / **`CFG i GYR p\n`** immediately write the sensor chip's full-scale range register over I2C/SPI. Takes effect on the very next sample. |
-| **ADC channels** | Red Pitaya IN1/IN2 are enabled (`ANALOG_WAVEFORM_CHANNELS = 2`). If the oscilloscope IP is absent from the FPGA bitstream, SIGBUS is caught and both channels silently output zero. |
+| **Hardware tick** | Global stream interval uses `g_stream_hw_hz` (default `DESIRED_SAMPLE_RATE_HZ`). `FREQ:n\n` (1–2000) updates it (idle + during stream). |
+| **Per-sensor rate** | `CFG i SRATE h\n` sets desired effective Hz for sensor `i` (capped to HW rate). Writes the chip's internal ODR register immediately AND updates the decimation counter in `run_stream`. |
+| **Sensor snapshot** | Immediately after `STARTED …`, server sends `SENSORS:0,Name;1,Name2\n` (active sensors at stream start). |
+| **Accel/gyro presets** | `CFG i ACC p\n` / `CFG i GYR p\n` immediately write the sensor chip's full-scale range register over I2C/SPI. Takes effect on the very next sample. |
+| **ADC channels** | Red Pitaya IN1/IN2 enabled (`ANALOG_WAVEFORM_CHANNELS = 2`). If the oscilloscope IP is absent from the FPGA bitstream, SIGBUS is caught and both channels silently output zero. |
+| **Data transport** | Sample packets sent over **UDP port 55001** (`sendto()` per packet). TCP port 5000 is for control commands only. |
 
 ### Open Ephys plugin (Red Pitaya board)
 
 | Topic | Behavior |
 |--------|----------|
-| **Start handshake** | `startAcquisition()` requires a **`STARTED`** or **`STARTED …`** line from the board before `startThread()`. On failure, the command socket is closed and cleared. |
-| **Stop / restart** | **`stopAcquisition()`** does **not** send `STOP\n` on the same socket while `run()` reads binary data (that corrupted framing). Order: signal thread → **close socket** → `stopThread()` → delete socket. |
-| **Fresh TCP each run** | Each **`startAcquisition()`** opens a **new** TCP connection before sending `START\n`. |
-| **Variable frame size** | **`run()`** reads **`bytes_per_frame`** from byte **offset 4** of each 22-byte header and reads exactly that many payload bytes, with byte sliding resync if the magic bytes (`dtype` at offset 8–9) are wrong. Maps up to the configured channel count; pads with zeros if the frame is short. |
-| **MSVC** | Nested lambdas in `run()` use explicit capture / naming (`socketReadFully`, `parseHeaderBytesPerFrame` with `[=]`) so Visual Studio builds cleanly. |
-| **Sensor list** | After **`STARTED`**, reads **`SENSORS:`** line into **`streamSensorNames`**; cleared on **`stopAcquisition()`**. |
-| **CFG send** | **`sendSensorCfgAcc/Gyr`** send `CFG …\n` and also store the preset locally in `sensorAccPreset[]` / `sensorGyrPreset[]` so `run()` can apply the correct scale factor immediately. |
-| **Physical unit scaling** | `run()` rebuilds a `channelScale[64]` array each buffer pass and multiplies every raw int16 by the appropriate factor before handing samples to Open Ephys. ACC channels → g, GYR channels → °/s. Same physical motion displays at the same amplitude regardless of active range preset. |
+| **Start handshake** | `startAcquisition()` requires a `STARTED` or `STARTED …` line from the board before `startThread()`. On failure, the command socket is closed and cleared. |
+| **Stop / restart** | `stopAcquisition()` closes the TCP command socket; the server detects the close and stops sending UDP data. Order: signal thread → close socket → `stopThread()` → delete socket. |
+| **Fresh TCP each run** | Each `startAcquisition()` opens a new TCP connection before sending `START\n`. |
+| **Data transport** | Sample data arrives over **UDP port 55001** (`DatagramSocket` bound in `run()`). One packet per sample (`CHUNK_SAMPLES = 1`). Each packet is `HEADER_SIZE (22) + numChannels × 2` bytes. TCP is used only for control commands. |
+| **Sensor list** | After `STARTED`, reads `SENSORS:` line into `streamSensorNames`; cleared on `stopAcquisition()`. |
+| **CFG send** | `sendSensorCfgAcc/Gyr/Srate` send `CFG …\n` when the command socket is open. Also store the preset locally in `sensorAccPreset[]` / `sensorGyrPreset[]` so `run()` can apply the correct scale factor immediately. |
+| **Physical unit scaling** | `run()` rebuilds a `channelScale[64]` array each buffer pass and multiplies every raw int16 by the appropriate factor. ACC channels → g, GYR channels → °/s. Same physical motion displays at the same amplitude regardless of active range preset. |
 
 ### Device editor (Red Pitaya wide layout)
 
 - Editor width **560** for Red Pitaya only.
 - **Left column (~x 6):** sample rate, filter, compact analog in/out, **RECORD** at bottom (y 118).
-- **Middle (~x 200):** three **ComboBox** rows — Accel preset, Gyro preset, Sensor Hz (choices derived from HW rate from the sample-rate field).
-- **Right (~x 430):** **Sensor** combo filled from **`SENSORS:`** after acquisition starts (freeze **A**).
-- **`toFront()`** includes the new combos during animation.
+- **Middle (~x 200):** three ComboBox rows — Accel preset, Gyro preset, Sensor Hz.
+- **Right (~x 430):** Sensor combo filled from `SENSORS:` after acquisition starts.
+- `toFront()` includes the new combos during animation.
 
 Other board types keep the original **340** width and **x=155** column for filter/analog.
-
-**Note:** Option A full-stack-only layout was reverted earlier due to **RECORD** clipping at fixed panel height.
-
----
-
-## Changes in the last week of April (detail)
-
-### `RedPitaya_justin.c`
-
-- Save recordings to `.bin` and `.csv`.
-- After each streaming session, **drain the TCP receive buffer** on the client socket so leftover binary tail bytes are not read as the next command by the outer `read()` loop.
-- **Stream sequence (`ns`):** First binary frame of each session uses sequence **0** in the header; counter increments once per frame before send (CSV row index matches the header).
-- **`SO_REUSEPORT`:** On the listen socket when the OS supports it (in addition to `SO_REUSEADDR`).
-
-### Open Ephys plugin (bullet list)
-
-- Fixed channel layout: raw sensor, VQF/filter channels, analog waveform inputs (e.g. per sensor: 9 raw + 4 filter + 2 analog where applicable).
-- Filter/VQF toggling; two analog waveform input channels; UI for record, filter, sample rate, analog in gain, analog out voltage.
-- **Acquisition start validation:** `STARTED` required before reader thread; socket reset on failure.
-- **Stop / restart:** Close-first teardown; new TCP per start; no in-band `STOP` on the binary stream.
-- **Header-driven payload** in `run()` for fusion/frame-size changes.
-- **Device editor:** Original geometry + `toFront()` during acquisition (see table above).
-
-![[Screenshot 2026-04-27 142836 1.png]]
-
----
-
-## Changes — 2026-05-04
-
-### `RedPitaya_justin.c`
-
-#### ADC re-enabled
-- `ANALOG_WAVEFORM_CHANNELS` changed from `0` to `2` — Red Pitaya IN1 and IN2 are now appended as the last two int16 values in every streamed frame.
-- `init_analog_waveform_inputs()` is called at startup. SIGBUS is caught if the oscilloscope IP is absent from the FPGA bitstream; in that case `analog_inputs_ready = false` and both channels output zero silently.
-
-#### Sensor ACC/GYR range preset register writes (`apply_sensor_cfg_acc` / `apply_sensor_cfg_gyr`)
-
-Previously `CFG i ACC p` and `CFG i GYR p` only stored the preset ID — no register was ever written to the sensor chip. Now the full-scale range register is written immediately over I2C or SPI when the command arrives, in both the pre-START idle loop and during a live stream.
-
-Preset mapping (same for ACC and GYR direction):
-
-| Preset | ACC range | GYR range |
-|--------|-----------|-----------|
-| 0 | ±2 g | ±250 °/s |
-| 1 | ±4 g | ±500 °/s |
-| 2 | ±8 g | ±1000 °/s |
-| 3 | ±16 g | ±2000 °/s |
-
-Per-sensor register details:
-- **MPU6050 / MPU9250 I2C:** ACCEL_CONFIG `0x1C`, GYRO_CONFIG `0x1B` — bits `[4:3]` select FS_SEL.
-- **MPU9250 / ICM20948 SPI:** same registers via `axi_spi_write`.
-- **ICM20948 I2C & SPI:** switches to Bank 2, writes ACCEL_CONFIG `0x14` and GYRO_CONFIG_1 `0x01` (bits `[2:1]`), then restores Bank 0.
-- **BNO055:** switches to CONFIG mode, writes ACC_Config `0x08` and GYR_Config_0 `0x0A`, then restores NDOF mode (~60 ms blocking during switch).
-
-`ICM20948_BANK_2 = 0x02` define added alongside existing BANK_0 / BANK_3.
-
-#### Sensor internal ODR register writes (`apply_sensor_odr`)
-
-Previously `CFG i SRATE h` only controlled software decimation — the sensor chip kept running at its power-on default internal rate regardless. Now the chip's own ODR register is written so hardware production rate matches the requested rate.
-
-| Sensor | Register | Formula |
-|--------|----------|---------|
-| MPU6050 / MPU9250 | CONFIG `0x1A` = `0x01` (enable DLPF → 1 kHz base), SMPLRT_DIV `0x19` | `div = 1000/hz − 1`, clamped 0–255 |
-| ICM20948 | Bank 2: GYRO_SMPLRT_DIV `0x00`, ACCEL_SMPLRT_DIV_1/2 `0x10`/`0x11` | gyro: `1100/hz−1` (8-bit); accel: `1125/hz−1` (12-bit) |
-| BNO055 | No write — NDOF fusion engine owns the ODR at fixed ~100 Hz | — |
-
-Called at three points:
-1. **`identify_and_add_sensor()`** — sets chip to `DESIRED_SAMPLE_RATE_HZ` (100 Hz) at boot instead of leaving it at max default.
-2. **`process_stream_commands()`** — fires immediately mid-stream alongside decimation update.
-3. **Pre-START command loop** — fires when `CFG i SRATE h` arrives before `START`.
-
----
-
-### `acqboard.ccp` / `Acqboardredpitaya.h`
-
-#### Per-sensor preset storage
-- `sensorAccPreset[6]` and `sensorGyrPreset[6]` added to `AcqBoardRedPitaya`. Default 0 (±2g / ±250°/s).
-- `sendSensorCfgAcc` and `sendSensorCfgGyr` now write to these arrays before sending the TCP command so `run()` always has the current preset without a round-trip.
-
-#### Physical unit scaling in `run()`
-- Sensitivity lookup tables added at file scope:
-  - `kAccSensitivity[4]` = `{ 16384, 8192, 4096, 2048 }` LSB/g
-  - `kGyrSensitivity[4]` = `{ 131.072, 65.536, 32.768, 16.384 }` LSB/°/s
-- At the top of each buffer pass, `run()` rebuilds a `channelScale[MAX_CHANNELS]` array from `streamSensorNames` and the current presets, then multiplies every raw int16 by its factor before handing the sample to Open Ephys.
-- Channel layout handled per sensor type:
-  - **MPU family:** `[0-2]` = acc (accScale), `[3-5]` = gyr (gyrScale), `[6-8]` = mag (1.0), `[N..N+3]` = quaternion (1.0)
-  - **BNO055:** `[0-2]` = acc, `[3-5]` = mag (1.0), `[6-8]` = gyr (reordered), `[N..N+3]` = quaternion (1.0)
-- Result: the same physical motion displays at the same amplitude regardless of which range preset is active. The graph only changes when motion exceeds the narrower range and clips.
 
 ---
 
 ## VQF / Filter feature
 
-The **`FILTER`** button controls whether VQF/filter values are written into the reserved VQF channels.
+The **`FILTER`** button controls whether VQF quaternion values are written into the reserved VQF channels.
 
-**When filter is on:** VQF channels contain calculated values.
+**When filter is on:** VQF channels (4 per sensor: qw, qx, qy, qz) contain calculated orientation.
 
-**When filter is off:** VQF channels are still present and are filled with zeros.
+**When filter is off:** VQF channels are present but filled with zeros.
 
-The Red Pitaya server applies filter commands between frames when possible. **Caveat:** filter commands share the same TCP connection as the binary stream from the plugin's perspective; the plugin and server were hardened for start/stop and framing, but toggling filter very rapidly during streaming can still stress framing—prefer toggling when idle if you see glitches.
+The server applies filter state changes between frames. Prefer toggling when idle if you see glitches from rapid toggling during acquisition.
 
 ---
 
 ## Analog output voltage control
 
-The UI has an editable **`Analog Out (V)`** field.
-
-**Valid range:** `0.0` to `1.8` V
-
-**Command sent to the board:**
-
-```
-AOUT:<value>
-```
-
-The Red Pitaya server receives and logs this command. Analog output is a **command**, not a measured waveform channel; to show the real voltage on-screen you would need to sense it on an input channel.
+The UI has an editable **`Analog Out (V)`** field. Valid range: `0.0` to `1.8` V. Command sent: `AOUT:<value>`. Analog output is a command, not a measured waveform channel.
 
 ---
 
-# What more needs to be done
+## What more needs to be done
 
-- Answer hardware questions before implementing 10kHz FPGA sync signal (see open questions below).
 - Test ADC analog input and output with hardware.
-- Fix the Makefile issue where new files using `vqf.c` or `sensor_fusion.c` must be wired in manually instead of being picked up automatically.
-- ACC channels display in g (0–2 range) which is very small relative to the default Open Ephys Range=250 display setting — consider scaling to milli-g or advising users to reduce the display range for acc channels.
+- Fix the Makefile issue where new files using `vqf.c` or `sensor_fusion.c` must be wired in manually.
+- ACC channels display in g (0–2 range) which is small relative to the default Open Ephys Range=250 — consider advising users to reduce the display range.
 
 ## Open questions — 10kHz FPGA sync (not yet implemented)
 
@@ -189,131 +90,107 @@ The Red Pitaya server receives and logs this command. Analog output is a **comma
 
 ## Tests (no Open Ephys build required)
 
-From the repo root:
-
 ```bash
 cc -std=c99 -Wall -Wextra -o /tmp/rp_framing_test tests/redpitaya_stream_framing_test.c && /tmp/rp_framing_test
 ```
 
-This checks variable-payload framing and header resync logic used by the plugin reader.
-
-
-1. check if you can access the [rp-f0f85a.local](http://rp-f0f85a.local/) page
-2. check if you can ssh into the red pitaya
-3. check if blue and green lights are on and red light is blinking
-4. If the led lights are doing fine but you can't ssh into the red pitaya, check if the red pitaya is correctly wired to the router which is connected to the PC
-5. if those are fine but you can't access the red pitaya, go to terminal and use "arp -a" command and check if you can see f0f85a or f0cd35 as one of the addresses
-6. If you can find them but can't access both of them check if the router is connected to the power on the wall
-7. If that is also good, just unplug everything and let is rest for a bit
+Checks variable-payload framing and header resync logic used by the plugin reader.
 
 ---
 
-## Final summary (Red Pitaya + Open Ephys plugin)
+## Change log
 
-This document describes the **current** behavior after the acquisition, streaming, UI, and stability work. Rebuild and deploy **both** the Open Ephys plugin and the Red Pitaya server binary when you change either side.
+### Week of 2026-04-27
 
-### Red Pitaya server (`RedPitaya_justin.c`)
+**`RedPitaya_justin.c`**
+- Save recordings to `.bin` and `.csv` under `/root/Measurements/`.
+- Drain TCP receive buffer after `run_stream()` returns (`drain_client_rx()`).
+- Stream sequence counter `ns` starts at `-1`, increments before each frame, so the first frame has sequence 0.
+- `SO_REUSEPORT` on the listen socket when the OS supports it.
 
-| Topic | Behavior |
-|--------|----------|
-| **Recordings** | Streamed sessions still write **`.bin`** and **`.csv`** under `/root/Measurements/` as before. |
-| **TCP RX after stream** | After `run_stream()` returns, **`drain_client_rx()`** clears leftover bytes in the client socket receive buffer so the next command loop `read()` does not see tail data from binary packets. |
-| **Frame sequence** | First binary frame of each session uses sequence **`0`** in the 22-byte header (`ns` starts at `-1`, increments once per frame before acquire/send). |
-| **Hardware tick** | Global stream interval uses **`g_stream_hw_hz`** (default `DESIRED_SAMPLE_RATE_HZ`). **`FREQ:n\n`** (1–2000) updates it (idle + during stream). |
-| **Per-sensor rate** | **`CFG i SRATE h\n`** sets desired effective Hz for sensor index `i` (capped to HW rate). **`run_stream`** **holds** prior sample when decimating (integer `hw/target` ratio). |
-| **Sensor snapshot** | Immediately after **`STARTED …`**, server sends **`SENSORS:0,Name;1,Name2\n`** (active sensors at stream start). |
-| **Accel/gyro presets** | **`CFG i ACC p\n`** / **`CFG i GYR p\n`** stored per sensor (`cfg_acc_id`, `cfg_gyr_id`); logged (register mapping can be added later). |
-
-### Open Ephys plugin (Red Pitaya board)
-
-| Topic | Behavior |
-|--------|----------|
-| **Start handshake** | `startAcquisition()` requires a **`STARTED`** or **`STARTED …`** line from the board before `startThread()`. On failure, the command socket is closed and cleared. |
-| **Stop / restart** | **`stopAcquisition()`** does **not** send `STOP\n` on the same socket while `run()` reads binary data (that corrupted framing). Order: signal thread → **close socket** → `stopThread()` → delete socket. |
-| **Fresh TCP each run** | Each **`startAcquisition()`** opens a **new** TCP connection before sending `START\n`. |
-| **Variable frame size** | **`run()`** reads **`bytes_per_frame`** from byte **offset 4** of each 22-byte header and reads exactly that many payload bytes, with byte sliding resync if the magic bytes (`dtype` at offset 8–9) are wrong. Maps up to the configured channel count; pads with zeros if the frame is short. |
-| **MSVC** | Nested lambdas in `run()` use explicit capture / naming (`socketReadFully`, `parseHeaderBytesPerFrame` with `[=]`) so Visual Studio builds cleanly. |
-
-| **Sensor list** | After **`STARTED`**, reads **`SENSORS:`** line into **`streamSensorNames`**; cleared on **`stopAcquisition()`**. |
-| **CFG send** | **`sendSensorCfgAcc/Gyr/Srate`** send **`CFG …\n`** when the command socket is open. |
-
-### Device editor (Red Pitaya wide layout)
-
-- Editor width **560** for Red Pitaya only.
-- **Left column (~x 6):** sample rate, filter, compact analog in/out, **RECORD** at bottom (y 118).
-- **Middle (~x 200):** three **ComboBox** rows — Accel preset, Gyro preset, Sensor Hz (choices derived from HW rate from the sample-rate field).
-- **Right (~x 430):** **Sensor** combo filled from **`SENSORS:`** after acquisition starts (freeze **A**).
-- **`toFront()`** includes the new combos during animation.
-
-Other board types keep the original **340** width and **x=155** column for filter/analog.
-
-**Note:** Option A full-stack-only layout was reverted earlier due to **RECORD** clipping at fixed panel height.
-
----
-
-## Changes in the last week of April (detail)
-
-### `RedPitaya_justin.c`
-
-- Save recordings to `.bin` and `.csv`.
-- After each streaming session, **drain the TCP receive buffer** on the client socket so leftover binary tail bytes are not read as the next command by the outer `read()` loop.
-- **Stream sequence (`ns`):** First binary frame of each session uses sequence **0** in the header; counter increments once per frame before send (CSV row index matches the header).
-- **`SO_REUSEPORT`:** On the listen socket when the OS supports it (in addition to `SO_REUSEADDR`).
-
-### Open Ephys plugin (bullet list)
-
-- Fixed channel layout: raw sensor, VQF/filter channels, analog waveform inputs (e.g. per sensor: 9 raw + 4 filter + 2 analog where applicable).
+**Open Ephys plugin**
+- Fixed channel layout: raw sensor + VQF channels + analog waveform inputs.
 - Filter/VQF toggling; two analog waveform input channels; UI for record, filter, sample rate, analog in gain, analog out voltage.
-- **Acquisition start validation:** `STARTED` required before reader thread; socket reset on failure.
-- **Stop / restart:** Close-first teardown; new TCP per start; no in-band `STOP` on the binary stream.
-- **Header-driven payload** in `run()` for fusion/frame-size changes.
-- **Device editor:** Original geometry + `toFront()` during acquisition (see table above).
-
-![[Screenshot 2026-04-27 142836 1.png]]
+- Acquisition start validation: `STARTED` required before reader thread; socket reset on failure.
+- Stop / restart: close-first teardown; new TCP per start.
+- Device editor wide layout for Red Pitaya (560 px).
 
 ---
 
-## VQF / Filter feature
+### 2026-05-04
 
-The **`FILTER`** button controls whether VQF/filter values are written into the reserved VQF channels.
+**`RedPitaya_justin.c`**
 
-**When filter is on:** VQF channels contain calculated values.
+- `ANALOG_WAVEFORM_CHANNELS` changed from `0` to `2` — Red Pitaya IN1 and IN2 appended to every frame. `init_analog_waveform_inputs()` called at startup; SIGBUS caught if oscilloscope IP absent.
+- `apply_sensor_cfg_acc` / `apply_sensor_cfg_gyr`: `CFG i ACC/GYR p` now writes the full-scale range register to the sensor chip immediately, in both the idle loop and during a live stream. Preset → register mapping:
 
-**When filter is off:** VQF channels are still present and are filled with zeros.
+| Preset | ACC | GYR |
+|--------|-----|-----|
+| 0 | ±2 g | ±250 °/s |
+| 1 | ±4 g | ±500 °/s |
+| 2 | ±8 g | ±1000 °/s |
+| 3 | ±16 g | ±2000 °/s |
 
-The Red Pitaya server applies filter commands between frames when possible. **Caveat:** filter commands share the same TCP connection as the binary stream from the plugin’s perspective; the plugin and server were hardened for start/stop and framing, but toggling filter very rapidly during streaming can still stress framing—prefer toggling when idle if you see glitches.
+- `apply_sensor_odr`: `CFG i SRATE h` now writes the chip's ODR register (MPU: SMPLRT_DIV; ICM20948 Bank 2: GYRO/ACCEL_SMPLRT_DIV; BNO055: no-op). Called at sensor init, pre-START, and mid-stream.
+- `ICM20948_BANK_2 = 0x02` define added.
+
+**`acqboard.ccp` / `Acqboardredpitaya.h`**
+- `sensorAccPreset[6]` and `sensorGyrPreset[6]` added to `AcqBoardRedPitaya`.
+- `run()` rebuilds `channelScale[MAX_CHANNELS]` each buffer pass from `streamSensorNames` and current presets (`kAccSensitivity[4]`, `kGyrSensitivity[4]`). Raw int16 × scale → physical units before `addToBuffer()`.
 
 ---
 
-## Analog output voltage control
+### 2026-05-11
 
-The UI has an editable **`Analog Out (V)`** field.
+#### Data transport switched from TCP to UDP
 
-**Valid range:** `0.0` to `1.8` V
+Sample data now streams over **UDP port 55001**. TCP port 5000 is control-only.
 
-**Command sent to the board:**
+**`RedPitaya_justin.c`:**
+- `UDP_PORT 55001` and `CHUNK_SAMPLES 1` constants added.
+- `main()` creates a `SOCK_DGRAM` socket bound to `INADDR_ANY:55001`.
+- On `START`, server calls `getpeername()` on the TCP client socket to get the client IP and stores it as `client_udp_addr` for `sendto()` destinations.
+- `run_stream()` signature: `int udp_fd, struct sockaddr_in *client_udp_addr` added.
+- Each assembled packet is sent via `sendto()`. The old `send(client_fd, packet, …)` TCP data path is removed.
+- Partial chunk flushed on exit (`chunk_idx > 0`).
+- `chunk_buffer` malloc/free added alongside `packet`.
 
+**`acqboard.ccp`:**
+- Removed: `socketReadFully`, `parseHeaderBytesPerFrame`, `readOneFrame` TCP lambdas; the inner TCP sample-collection loop.
+- Added: `DatagramSocket udpSocket` bound to port 55001; `waitUntilReady(true, 100)` + `read()` loop replacing the old TCP reads.
+- `packetsPerChunk = 1` (matches `CHUNK_SAMPLES`).
+
+`CHUNK_SAMPLES = 1` is critical: using 100 caused 100 ms of buffering before each UDP datagram, producing a staccato burst pattern (>1 ms inter-burst gaps visible in Open Ephys). Per-sample delivery (= 1) restores the original smooth cadence.
+
+#### ICM20948 magnetometer fixes
+
+**Fix 1 — Mag cache on SPI path (`read_sensor_raw_channels`, line ~400):**
+
+The AK09916 magnetometer inside the ICM20948 runs at ~100 Hz. At 1 kHz IMU rate, ~90% of frames have status bit 0 = 0 (no new data). Previously, `channel_out[6/7/8]` was written to literal zero on those frames. Now, fresh values are written to `s->mag_cache[]` and non-fresh frames replay the cache — matching the existing MPU9250 I2C behavior.
+
+**Fix 2 — ICM20948 I2C excluded from VQF fusion mag path:**
+
+All three fusion mag-assignment blocks in `acquire_sensor_samples` and `acquire_sensor_samples_decimated` had:
+```c
+} else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
 ```
-AOUT:<value>
+An ICM20948 on I2C fell through with `raw_mag = NULL`, running VQF in 6D mode with no heading data. Changed to:
+```c
+} else if (strcmp(s->name, "ICM20948") == 0) {
 ```
+The `&& s->is_spi` guard inside `read_sensor_raw_channels` (line 388) was left — it selects the SPI bank-switch register sequence vs. the I2C fallthrough, which is a bus routing decision, not a fusion assignment.
 
-The Red Pitaya server receives and logs this command. Analog output is a **command**, not a measured waveform channel; to show the real voltage on-screen you would need to sense it on an input channel.
+**Effect:** ICM20948 on I2C now feeds magnetometer data into VQF for 9D orientation. Quaternion channels (ch 10, 21, 22 in a two-sensor setup) populate correctly when the filter is active. Channels 8–10 no longer appear empty.
 
----
+#### Performance note — I2C latency at 1 kHz
 
-# What more needs to be done
+`warn_if_sample_loop_slow_us` (threshold: 900 µs) fires frequently with two I2C sensors:
 
-- Test analog input and output with ADC hardware.
-- Fix the Makefile issue where new files using `vqf.c` or `sensor_fusion.c` must be wired in manually instead of being picked up automatically.
+| Step | Cost |
+|------|------|
+| One 12-byte I2C read at 400 kHz | ~550 µs |
+| Two I2C sensors (no mag frames) | ~1100 µs |
+| VQF 6D update per sensor | ~150 µs |
+| VQF 9D update per sensor | ~400 µs |
 
----
-
-## Tests (no Open Ephys build required)
-
-From the repo root:
-
-```bash
-cc -std=c99 -Wall -Wextra -o /tmp/rp_framing_test tests/redpitaya_stream_framing_test.c && /tmp/rp_framing_test
-```
-
-This checks variable-payload framing and header resync logic used by the plugin reader.
+Root causes: AXI IIC soft-IP blocks the CPU for the full transaction duration; VQF motion-bias estimator runs a 3×3 matrix inverse (`vqf_matrix3_inv`) every sample. Possible mitigations (not yet implemented): move to SPI sensors, disable `motionBiasEstEnabled` in VQF params, or read sensors on separate threads if they are on independent I2C buses.
