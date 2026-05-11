@@ -798,7 +798,7 @@ void AcqBoardRedPitaya::run()
     constexpr int headerSize      = 22;
     const int     payloadSize     = numAdcChannelsLocal * 2;  // int16 per channel
     const int     packetSize      = headerSize + payloadSize;
-    constexpr int packetsPerChunk = 100;                      // must match CHUNK_SAMPLES in RedPitaya_justin.c
+    constexpr int packetsPerChunk = 1;                        // must match CHUNK_SAMPLES in RedPitaya_justin.c
     const int     chunkSize       = packetSize * packetsPerChunk;
 
     uint8_t chunkBuffer[65507]; // max UDP payload

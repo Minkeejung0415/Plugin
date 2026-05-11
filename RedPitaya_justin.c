@@ -50,7 +50,7 @@
 
 #define BUF_SAMPLES 1000 // Flushes to SD card every 1,000 samples
 #define UDP_PORT       55001
-#define CHUNK_SAMPLES  100  // packets bundled per UDP datagram; must match packetsPerChunk in acqboard.ccp
+#define CHUNK_SAMPLES  1    // 1 packet per UDP datagram keeps latency at ~1/sampleRate; increase only if network overhead becomes an issue
 #define MAX_STREAM_SENSORS 6
 
 /* Hardware tick rate for streaming (Hz); FREQ: command updates this before START. */
