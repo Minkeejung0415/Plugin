@@ -1558,6 +1558,7 @@ int main(void) {
     HardwareContext ctx = {0};
     printf(" Starting Server \n");
     /* SIGINT left at OS default so Ctrl+C terminates immediately. */
+    signal(SIGPIPE, SIG_IGN); /* writing to a closed socket returns -1, not SIGPIPE */
     if (init_hardware(&ctx) < 0) {
         fprintf(stderr, "Error: Hardware initialization failed!\n");
         return 1;
