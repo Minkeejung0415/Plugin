@@ -401,11 +401,14 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
             channel_out[6] = (int16_t)((mag_raw[2] << 8) | mag_raw[1]);
             channel_out[7] = (int16_t)((mag_raw[4] << 8) | mag_raw[3]);
             channel_out[8] = (int16_t)((mag_raw[6] << 8) | mag_raw[5]);
+            s->mag_cache[0] = channel_out[6];
+            s->mag_cache[1] = channel_out[7];
+            s->mag_cache[2] = channel_out[8];
             s->mag_is_fresh = true;
         } else {
-            channel_out[6] = 0;
-            channel_out[7] = 0;
-            channel_out[8] = 0;
+            channel_out[6] = s->mag_cache[0];
+            channel_out[7] = s->mag_cache[1];
+            channel_out[8] = s->mag_cache[2];
         }
     } else if (strcmp(s->name, "BNO055") == 0) {
         uint8_t raw[18];
@@ -607,7 +610,7 @@ static void acquire_sensor_samples(
                 if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                } else if (strcmp(s->name, "ICM20948") == 0) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
                 }
@@ -701,7 +704,7 @@ static void acquire_sensor_samples_decimated(
                         if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                             raw_mag = &channel_out[6];
                             mag_is_fresh = s->mag_is_fresh;
-                        } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                        } else if (strcmp(s->name, "ICM20948") == 0) {
                             raw_mag = &channel_out[6];
                             mag_is_fresh = s->mag_is_fresh;
                         }
@@ -741,7 +744,7 @@ static void acquire_sensor_samples_decimated(
                 if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                } else if (strcmp(s->name, "ICM20948") == 0) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
                 }
