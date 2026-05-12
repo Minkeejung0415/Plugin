@@ -76,6 +76,8 @@ The UI has an editable **`Analog Out (V)`** field. Valid range: `0.0` to `1.8` V
 - Test ADC analog input and output with hardware.
 - Fix the Makefile issue where new files using `vqf.c` or `sensor_fusion.c` must be wired in manually.
 - ACC channels display in g (0–2 range) which is small relative to the default Open Ephys Range=250 — consider advising users to reduce the display range.
+- Verify ICM20948 I2C mag channels (ch[16:18]) now return real data after bypass fix.
+- Test MPU9265 discovery on hardware (Phase 1b probe at 0x69).
 
 ## Open questions — 10kHz FPGA sync (not yet implemented)
 
@@ -183,4 +185,60 @@ An earlier change removed `&& s->is_spi` from the three fusion mag-assignment bl
 | VQF 6D update per sensor | ~150 µs |
 | VQF 9D update per sensor | ~400 µs |
 
-Root causes: AXI IIC soft-IP blocks the CPU for the full transaction duration; VQF motion-bias estimator runs a 3×3 matrix inverse (`vqf_matrix3_inv`) every sample. Possible mitigations (not yet implemented): move to SPI sensors, disable `motionBiasEstEnabled` in VQF params, or read sensors on separate threads if they are on independent I2C buses.
+Root causes: AXI IIC soft-IP blocks the CPU for the full transaction duration; VQF motion-bias estimator runs a 3×3 matrix inverse (`vqf_matrix3_inv`) every sample. Possible mitigations: move to SPI sensors, disable `motionBiasEstEnabled` in VQF params. Parallel sensor reads via persistent thread pool (see 2026-05-12 below) cut wall-clock time from ~1100 µs to ~600 µs for two sensors.
+
+---
+
+### 2026-05-12
+
+#### MPU9265 support
+
+**`RedPitaya_justin.c`:**
+- `identify_and_add_sensor`: added branch for WHO_AM_I `0x71` at I2C address `0x69` → `"MPU9265"`. Wakes chip, enables I2C bypass so AK8963 at `0x0C` is reachable, verifies AK8963 WIA, sets 16-bit 100 Hz continuous mode (`0x0A=0x16`).
+- `init_hardware` Phase 1b: after probing `0x68`, independently probes `0x69` with the same `sigsetjmp`/alarm(1) watchdog. MPU6050 at `0x68` and MPU9265 at `0x69` can coexist on the same I2C bus.
+- `apply_sensor_odr`, `apply_sensor_cfg_acc`, `apply_sensor_cfg_gyr`: MPU9265 grouped with MPU6050/MPU9250 for register writes (identical register map).
+- Fusion init in `reinit_fusion_for_hz` and `main()`: `"MPU9265"` maps to `FUSION_SENSOR_TYPE_MPU9250`; `has_mag = true` unconditionally (AK8963 bypass always enabled during init).
+
+**Disambiguation rule:**
+
+| WHO_AM_I | Address | Name |
+|----------|---------|------|
+| `0x68` | any | MPU6050 |
+| `0x71` | `0x68` | MPU9250 |
+| `0x71` | `0x69` | MPU9265 |
+
+#### ICM20948 I2C magnetometer fix
+
+**`RedPitaya_justin.c`** — `identify_and_add_sensor` I2C branch:
+- Added `reg 0x03=0x00` (disable internal I2C master) and `reg 0x0F=0x02` (enable bypass) so AK09916 is accessible at address `0x0C`.
+- Added AK09916 init: power-down (`0x31=0x00`) then 100 Hz continuous (`0x31=0x08`).
+- Before this fix, AK09916 was hidden behind ICM20948's internal I2C master and mag channels always read zero.
+
+#### VQF fusion `is_spi` guard removal
+
+Three locations in `sensor_worker` / `acquire_sensor_samples` that set `raw_mag` now include all three 9-axis sensors unconditionally:
+
+```c
+if (strcmp(s->name, "MPU9250")  == 0 ||
+    strcmp(s->name, "MPU9265")  == 0 ||
+    strcmp(s->name, "ICM20948") == 0) {
+    raw_mag = &channel_out[6];
+    mag_is_fresh = s->mag_is_fresh;
+}
+```
+
+The previous `&& s->is_spi` guard on ICM20948 (and `&& !s->is_spi` on MPU9250) were remnants from before the I2C bypass was properly initialized. Now that hardware init guarantees mag data on all paths, the guards are removed and 9D VQF runs for all 9-axis sensors.
+
+#### Persistent worker thread pool for parallel sensor reads
+
+**`RedPitaya_justin.c`:**
+- Added `SensorThreadCtx` struct with `sem_t go` / `sem_t done` semaphores and `volatile int running` flag.
+- `sensor_threads_init`: creates N−1 persistent `pthread` workers at stream start; each loops on `sem_wait(&go)` → `sensor_worker()` → `sem_post(&done)`.
+- `sensor_threads_shutdown`: sets `running=0`, posts `go` to unblock each worker, joins and destroys semaphores. Called at every `return` in `run_stream`.
+- `acquire_sensor_samples_decimated`: replaces `pthread_create`/`join` per iteration with `sem_post` to wake pre-created workers, runs last sensor on calling thread in parallel, then `sem_wait` to collect results.
+- Added `#include <semaphore.h>`.
+
+| | Per-iteration pthread | Persistent threads |
+|--|--|--|
+| Thread overhead | ~100–150 µs | ~2–5 µs |
+| Two-sensor wall time | ~1400 µs sequential / ~1100 µs with creation overhead | ~600 µs parallel |
