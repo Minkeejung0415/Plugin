@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <sched.h>
 
 #include <netinet/tcp.h>
 
@@ -710,8 +711,25 @@ static void sensor_threads_init(HardwareContext *ctx, int n)
         sem_init(&g_sensor_threads[i].done, 0, 0);
         g_sensor_threads[i].args.ctx          = ctx;
         g_sensor_threads[i].args.sensor_index = i;
-        pthread_create(&g_sensor_threads[i].thread, NULL,
-                       sensor_thread_loop, &g_sensor_threads[i]);
+        {
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            struct sched_param sp = { .sched_priority = 50 };
+            if (pthread_attr_setschedpolicy(&attr, SCHED_FIFO) == 0 &&
+                pthread_attr_setschedparam(&attr, &sp)         == 0 &&
+                pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED) == 0) {
+                if (pthread_create(&g_sensor_threads[i].thread, &attr,
+                                   sensor_thread_loop, &g_sensor_threads[i]) != 0) {
+                    /* SCHED_FIFO failed (likely no CAP_SYS_NICE) — fall back */
+                    pthread_create(&g_sensor_threads[i].thread, NULL,
+                                   sensor_thread_loop, &g_sensor_threads[i]);
+                }
+            } else {
+                pthread_create(&g_sensor_threads[i].thread, NULL,
+                               sensor_thread_loop, &g_sensor_threads[i]);
+            }
+            pthread_attr_destroy(&attr);
+        }
     }
 }
 

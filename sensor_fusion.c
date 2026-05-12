@@ -138,7 +138,13 @@ static void initialize_sensor_filter(FusionSensorState *sensor)
         mag_rate_hz = g_fusion.sample_rate_hz;
     }
 
-    vqf_init(&sensor->vqf, gyr_ts, acc_ts, 1.0f / mag_rate_hz);
+    VQFParams params;
+    vqf_params_init(&params);
+    /* Disable per-sample 3x3 matrix Kalman update; keep cheaper rest-only bias
+     * estimation. Eliminates the main source of timing spikes and step changes
+     * in bias that appear as filter output jumps. */
+    params.motionBiasEstEnabled = false;
+    vqf_init_params(&sensor->vqf, &params, gyr_ts, acc_ts, 1.0f / mag_rate_hz);
     set_identity_quaternion(sensor->last_quat);
     sensor->last_status_flags = FUSION_STATUS_ENABLED;
 }
