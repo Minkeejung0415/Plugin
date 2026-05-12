@@ -88,6 +88,37 @@ The UI has an editable **`Analog Out (V)`** field. Valid range: `0.0` to `1.8` V
 
 ---
 
+### 2026-05-12
+
+#### Parallel sensor reads with persistent worker thread pool
+
+Three commits in sequence built out full sensor parallelism in `RedPitaya_justin.c`.
+
+**Background — why this was needed:**
+The `warn_if_sample_loop_slow_us` threshold (900 µs) was firing regularly with two I2C sensors. Both sensors were read back-to-back on a single thread, totalling ~1100 µs — over the 1 ms budget. The fix runs both sensors simultaneously so the wall-clock cost is the slower of the two, not the sum.
+
+**Commit 1 — `pthread.h` include (17:24)**
+Added `#include <pthread.h>` as a standalone preparatory commit.
+
+**Commit 2 — Parallelize `acquire_sensor_samples_decimated` (17:32)**
+- Extracted per-sensor work (I2C/SPI read, decimation, VQF update) into `sensor_worker()`.
+- `acquire_sensor_samples_decimated()` spawns a `pthread` per sensor, runs the last sensor inline on the calling thread, then `pthread_join`s all workers.
+- Per-thread VQF stats (`vqf_total_ns`, `vqf_max_ns`, `vqf_call_count`) are merged after join.
+- No mutex needed — each sensor has an independent index into `g_decim_counter`, `g_sensor_hold`, and the `frame_buffer` slice.
+- With 2 sensors: wall-clock drops from ~1400 µs to ~700 µs since both bus reads happen simultaneously.
+
+**Commit 3 — Persistent worker thread pool (17:45)**
+The previous commit created and destroyed a `pthread` every sample iteration (up to 1000×/sec), costing 50–150 µs of OS overhead that cancelled most of the parallelism gain.
+
+- `sensor_threads_init(ctx, n)` creates `n-1` worker threads once at stream start. Each thread sits in a loop: `sem_wait(&go)` → `sensor_worker()` → `sem_post(&done)`.
+- Each sample iteration: post `go` to all workers, run the last sensor inline, then `sem_wait(&done)` from each worker.
+- Per-iteration thread overhead drops from ~100 µs (pthread_create/join) to ~2–5 µs (two semaphore ops), preserving the full ~550 µs parallel saving.
+- `sensor_threads_shutdown()` sets `running = 0`, posts `go` to unblock each thread, and `pthread_join`s them. Called at every `run_stream` exit point (malloc failure, command stop, normal exit).
+
+**Net result:** Two-sensor loop time reduced from ~1400 µs → ~700 µs. Warnings at 900 µs threshold eliminated at normal operating rates.
+
+---
+
 ## Tests (no Open Ephys build required)
 
 ```bash
