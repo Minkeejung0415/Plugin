@@ -609,10 +609,9 @@ static void acquire_sensor_samples(
                 mag_is_fresh = true;
             } else {
                 get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                if (strcmp(s->name, "MPU9250") == 0 ||
+                    strcmp(s->name, "MPU9265") == 0 ||
+                    strcmp(s->name, "ICM20948") == 0) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
                 }
@@ -756,10 +755,9 @@ static void *sensor_worker(void *arg)
                     mag_is_fresh = true;
                 } else {
                     get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                    if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                        raw_mag = &channel_out[6];
-                        mag_is_fresh = s->mag_is_fresh;
-                    } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                    if (strcmp(s->name, "MPU9250")  == 0 ||
+                        strcmp(s->name, "MPU9265")  == 0 ||
+                        strcmp(s->name, "ICM20948") == 0) {
                         raw_mag = &channel_out[6];
                         mag_is_fresh = s->mag_is_fresh;
                     }
@@ -795,10 +793,9 @@ static void *sensor_worker(void *arg)
             const int16_t *raw_mag = NULL;
             bool mag_is_fresh = false;
             get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                raw_mag = &channel_out[6];
-                mag_is_fresh = s->mag_is_fresh;
-            } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+            if (strcmp(s->name, "MPU9250")  == 0 ||
+                strcmp(s->name, "MPU9265")  == 0 ||
+                strcmp(s->name, "ICM20948") == 0) {
                 raw_mag = &channel_out[6];
                 mag_is_fresh = s->mag_is_fresh;
             }
@@ -951,7 +948,7 @@ static void apply_sensor_odr(SensorInstance *s, int target_hz)
 {
     if (target_hz < 1) target_hz = 1;
 
-    if (strcmp(s->name, "MPU6050") == 0 || strcmp(s->name, "MPU9250") == 0) {
+    if (strcmp(s->name, "MPU6050") == 0 || strcmp(s->name, "MPU9250") == 0 || strcmp(s->name, "MPU9265") == 0) {
         int div = (1000 / target_hz) - 1;
         if (div < 0)   div = 0;
         if (div > 255) div = 255;
@@ -1003,7 +1000,7 @@ static void apply_sensor_cfg_acc(SensorInstance *s, int preset)
 {
     if (preset < 0 || preset > 3) return;
 
-    if (strcmp(s->name, "MPU6050") == 0) {
+    if (strcmp(s->name, "MPU6050") == 0 || strcmp(s->name, "MPU9265") == 0) {
         axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1C, MPU_ACC_REG[preset]);
         printf("  %s ACC preset %d -> reg 0x1C = 0x%02X\n", s->name, preset, MPU_ACC_REG[preset]);
     } else if (strcmp(s->name, "MPU9250") == 0) {
@@ -1038,7 +1035,7 @@ static void apply_sensor_cfg_gyr(SensorInstance *s, int preset)
 {
     if (preset < 0 || preset > 3) return;
 
-    if (strcmp(s->name, "MPU6050") == 0) {
+    if (strcmp(s->name, "MPU6050") == 0 || strcmp(s->name, "MPU9265") == 0) {
         axi_iic_write_byte(s->axi_map, s->i2c_addr, 0x1B, MPU_GYR_REG[preset]);
         printf("  %s GYR preset %d -> reg 0x1B = 0x%02X\n", s->name, preset, MPU_GYR_REG[preset]);
     } else if (strcmp(s->name, "MPU9250") == 0) {
@@ -1078,10 +1075,12 @@ static void reinit_fusion_for_hz(HardwareContext *ctx, float hz)
         FusionSensorType ftype;
         if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
         else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
+        else if (strcmp(s->name, "MPU9265")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
         else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
         else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
         else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
         bool has_mag = (strcmp(s->name, "MPU9250")  == 0 && !s->is_spi) ||
+                       (strcmp(s->name, "MPU9265")  == 0) ||
                        (strcmp(s->name, "ICM20948") == 0) ||
                        (strcmp(s->name, "BNO055")   == 0);
         FusionSensorConfig cfg;
@@ -1313,7 +1312,29 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
         axi_iic_write_byte(map, addr, 0x6B, 0x01);
         usleep(5000);  // 5ms Wake delay
     }
-    else if (id == 0x71) { // MPU9250
+    else if (id == 0x71 && addr == 0x69) { // MPU9265 (AD0=HIGH, same register map as MPU9250)
+        strcpy(s->name, "MPU9265");
+        s->split_read = false;
+        s->num_channels = 9;
+        s->data_reg_start = 0x3B;
+
+        axi_iic_write_byte(map, addr, 0x6B, 0x01); // Wake
+        usleep(5000);
+        axi_iic_write_byte(map, addr, 0x6A, 0x00); // Disable I2C master
+        axi_iic_write_byte(map, addr, 0x37, 0x02); // Enable bypass → AK8963 at 0x0C
+        usleep(5000);
+
+        uint8_t ak_wia_9265 = 0;
+        axi_iic_read_n_bytes(map, 0x0C, 0x00, &ak_wia_9265, 1);
+        if (ak_wia_9265 != 0x48)
+            printf("  WARNING: MPU9265 AK8963 WIA = 0x%02X (expected 0x48)\n", ak_wia_9265);
+        else
+            printf("  -> MPU9265 AK8963 verified.\n");
+
+        axi_iic_write_byte(map, 0x0C, 0x0A, 0x16); // AK8963 16-bit 100 Hz
+        printf("  -> MPU9265 (I2C 0x69) initialized (9-axis).\n");
+    }
+    else if (id == 0x71) { // MPU9250 at 0x68
         strcpy(s->name, "MPU9250");
         s->split_read = false;
         s->num_channels = 9;
@@ -1324,26 +1345,21 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
             usleep(5000);
             printf("  -> MPU9250 (SPI) initialized (6-axis only for now).\n");
         } else {
-            // --- I2C PATH ---
             axi_iic_write_byte(map, addr, 0x6B, 0x01); // Wake
             usleep(5000);
-
-            // Disable I2C Master and Enable Bypass to see the Magnetometer (0x0C)
-            axi_iic_write_byte(map, addr, 0x6A, 0x00);
-            axi_iic_write_byte(map, addr, 0x37, 0x02);
+            axi_iic_write_byte(map, addr, 0x6A, 0x00); // Disable I2C master
+            axi_iic_write_byte(map, addr, 0x37, 0x02); // Enable bypass → AK8963 at 0x0C
             usleep(5000);
 
             uint8_t ak_wia = 0;
             axi_iic_read_n_bytes(map, 0x0C, 0x00, &ak_wia, 1);
-            if (ak_wia != 0x48) {
-                printf("  WARNING: AK8963 WIA = 0x%02X (expected 0x48) - bypass mode may have failed\n", ak_wia);
-            } else {
+            if (ak_wia != 0x48)
+                printf("  WARNING: AK8963 WIA = 0x%02X (expected 0x48)\n", ak_wia);
+            else
                 printf("  -> AK8963 verified at 0x0C (WIA = 0x48)\n");
-            }
 
-            // This call is safe here because we are actually on an I2C bus
-            axi_iic_write_byte(map, 0x0C, 0x0A, 0x16);
-            printf("  -> MPU9250 (I2C) initialized (9-axis enabled).\n");
+            axi_iic_write_byte(map, 0x0C, 0x0A, 0x16); // AK8963 16-bit 100 Hz
+            printf("  -> MPU9250 (I2C) initialized (9-axis).\n");
         }
     }
     else if (id == 0xEA) { // ICM20948
@@ -1362,6 +1378,14 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
             axi_iic_write_byte(map, addr, 0x7F, 0x00); // Bank 0
             axi_iic_write_byte(map, addr, 0x06, 0x01); // Wake
             usleep(10000);
+            axi_iic_write_byte(map, addr, 0x03, 0x00); // Disable I2C master
+            axi_iic_write_byte(map, addr, 0x0F, 0x02); // Enable bypass → AK09916 at 0x0C
+            usleep(5000);
+            axi_iic_write_byte(map, 0x0C, 0x31, 0x00); // AK09916 power down
+            usleep(5000);
+            axi_iic_write_byte(map, 0x0C, 0x31, 0x08); // AK09916 100 Hz continuous
+            usleep(5000);
+            printf("  -> ICM20948 (I2C) initialized (9-axis).\n");
         }
     }
     else if (id == 0xA0 && !is_spi) { // BNO055
@@ -1436,8 +1460,7 @@ static int init_hardware(HardwareContext *ctx) {
                 printf("  -> Found ICM20948!\n");
                 identify_and_add_sensor(ctx, map, id_icm, 0x68, false);
                 sensor_found = true;
-            }
-            else if (id_mpu == 0x71) {
+            } else if (id_mpu == 0x71) {
                 printf("  -> Found MPU9250!\n");
                 identify_and_add_sensor(ctx, map, id_mpu, 0x68, false);
                 sensor_found = true;
@@ -1446,7 +1469,23 @@ static int init_hardware(HardwareContext *ctx) {
             alarm(0); // Clear the alarm and safely proceed to Phase 2.
         }
 
-        if (sensor_found) continue; // If we found one, move to the next physical slot!
+        // --- PHASE 1b: Probe 0x69 (MPU9265, AD0=HIGH) on the same bus ---
+        // Runs regardless of Phase 1 result; MPU6050 at 0x68 and MPU9265 at 0x69 coexist.
+        if (sigsetjmp(watchdog_bucket, 1) == 0) {
+            alarm(1);
+            uint8_t id_9265 = 0;
+            axi_iic_read_n_bytes(map, 0x69, 0x75, &id_9265, 1);
+            alarm(0);
+            if (id_9265 == 0x71) {
+                printf("  -> Found MPU9265 at 0x69!\n");
+                identify_and_add_sensor(ctx, map, id_9265, 0x69, false);
+                sensor_found = true;
+            }
+        } else {
+            alarm(0); // Nothing at 0x69 on this bus.
+        }
+
+        if (sensor_found) continue; // move to the next physical slot
 
         // --- PHASE 2: Probe for 0x28 (BNO055) ---
         // We only reach this code if Phase 1 triggered a hang (meaning no 0x68 device)
@@ -1719,21 +1758,16 @@ int main(void) {
         FusionSensorType ftype;
         if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
         else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
+        else if (strcmp(s->name, "MPU9265")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
         else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
         else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
         else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
         FusionSensorConfig cfg;
         {
-            bool has_mag = false;
-
-            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                has_mag = true;
-            } else if (strcmp(s->name, "ICM20948") == 0) {
-                has_mag = true;
-            } else if (strcmp(s->name, "BNO055") == 0) {
-                has_mag = true;
-            }
-
+            bool has_mag = (strcmp(s->name, "MPU9250")  == 0 && !s->is_spi) ||
+                           (strcmp(s->name, "MPU9265")  == 0) ||
+                           (strcmp(s->name, "ICM20948") == 0) ||
+                           (strcmp(s->name, "BNO055")   == 0);
             fusion_get_default_sensor_config(ftype, has_mag, &cfg);
         }
         fusion_register_sensor_ex(i, &cfg);
