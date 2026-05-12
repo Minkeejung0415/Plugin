@@ -18,6 +18,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <pthread.h>
+#include <semaphore.h>
 
 #include <netinet/tcp.h>
 
@@ -676,6 +677,55 @@ typedef struct {
     unsigned long long vqf_call_count;
 } SensorWorkArgs;
 
+typedef struct {
+    SensorWorkArgs args;
+    pthread_t      thread;
+    sem_t          go;
+    sem_t          done;
+    volatile int   running;
+} SensorThreadCtx;
+
+static SensorThreadCtx g_sensor_threads[6];
+static int             g_sensor_thread_count = 0;
+
+static void *sensor_thread_loop(void *arg)
+{
+    SensorThreadCtx *t = (SensorThreadCtx *)arg;
+    while (1) {
+        sem_wait(&t->go);
+        if (!t->running) break;
+        sensor_worker(&t->args);
+        sem_post(&t->done);
+    }
+    return NULL;
+}
+
+static void sensor_threads_init(HardwareContext *ctx, int n)
+{
+    g_sensor_thread_count = (n > 1) ? n - 1 : 0;
+    for (int i = 0; i < g_sensor_thread_count; i++) {
+        g_sensor_threads[i].running = 1;
+        sem_init(&g_sensor_threads[i].go,   0, 0);
+        sem_init(&g_sensor_threads[i].done, 0, 0);
+        g_sensor_threads[i].args.ctx          = ctx;
+        g_sensor_threads[i].args.sensor_index = i;
+        pthread_create(&g_sensor_threads[i].thread, NULL,
+                       sensor_thread_loop, &g_sensor_threads[i]);
+    }
+}
+
+static void sensor_threads_shutdown(void)
+{
+    for (int i = 0; i < g_sensor_thread_count; i++) {
+        g_sensor_threads[i].running = 0;
+        sem_post(&g_sensor_threads[i].go);
+        pthread_join(g_sensor_threads[i].thread, NULL);
+        sem_destroy(&g_sensor_threads[i].go);
+        sem_destroy(&g_sensor_threads[i].done);
+    }
+    g_sensor_thread_count = 0;
+}
+
 static void *sensor_worker(void *arg)
 {
     SensorWorkArgs *a = (SensorWorkArgs *)arg;
@@ -789,34 +839,36 @@ static void acquire_sensor_samples_decimated(
         /* Single sensor — no thread overhead */
         SensorWorkArgs a = { ctx, 0, sensor_ptrs[0], with_fusion, 0, 0, 0 };
         sensor_worker(&a);
-        *vqf_total_ns  += a.vqf_total_ns;
+        *vqf_total_ns   += a.vqf_total_ns;
         *vqf_call_count += a.vqf_call_count;
         if (a.vqf_max_ns > *vqf_max_ns) *vqf_max_ns = a.vqf_max_ns;
     } else {
-        /* Multiple sensors — launch a thread per sensor, run last one inline */
-        SensorWorkArgs args[6];
-        pthread_t      threads[6];
-
+        /* Signal each pre-created worker thread with fresh args for this iteration */
         for (int i = 0; i < n - 1; i++) {
-            args[i] = (SensorWorkArgs){ ctx, i, sensor_ptrs[i], with_fusion, 0, 0, 0 };
-            pthread_create(&threads[i], NULL, sensor_worker, &args[i]);
+            g_sensor_threads[i].args.channel_out    = sensor_ptrs[i];
+            g_sensor_threads[i].args.with_fusion    = with_fusion;
+            g_sensor_threads[i].args.vqf_total_ns   = 0;
+            g_sensor_threads[i].args.vqf_max_ns     = 0;
+            g_sensor_threads[i].args.vqf_call_count = 0;
+            sem_post(&g_sensor_threads[i].go);
         }
 
-        /* Run the last sensor on the calling thread while others execute */
+        /* Run the last sensor on the calling thread simultaneously */
         int last = n - 1;
-        args[last] = (SensorWorkArgs){ ctx, last, sensor_ptrs[last], with_fusion, 0, 0, 0 };
-        sensor_worker(&args[last]);
+        SensorWorkArgs a = { ctx, last, sensor_ptrs[last], with_fusion, 0, 0, 0 };
+        sensor_worker(&a);
 
-        /* Wait for all threads then merge VQF stats */
+        /* Wait for all worker threads then merge VQF stats */
         for (int i = 0; i < n - 1; i++) {
-            pthread_join(threads[i], NULL);
-            *vqf_total_ns  += args[i].vqf_total_ns;
-            *vqf_call_count += args[i].vqf_call_count;
-            if (args[i].vqf_max_ns > *vqf_max_ns) *vqf_max_ns = args[i].vqf_max_ns;
+            sem_wait(&g_sensor_threads[i].done);
+            *vqf_total_ns   += g_sensor_threads[i].args.vqf_total_ns;
+            *vqf_call_count += g_sensor_threads[i].args.vqf_call_count;
+            if (g_sensor_threads[i].args.vqf_max_ns > *vqf_max_ns)
+                *vqf_max_ns = g_sensor_threads[i].args.vqf_max_ns;
         }
-        *vqf_total_ns  += args[last].vqf_total_ns;
-        *vqf_call_count += args[last].vqf_call_count;
-        if (args[last].vqf_max_ns > *vqf_max_ns) *vqf_max_ns = args[last].vqf_max_ns;
+        *vqf_total_ns   += a.vqf_total_ns;
+        *vqf_call_count += a.vqf_call_count;
+        if (a.vqf_max_ns > *vqf_max_ns) *vqf_max_ns = a.vqf_max_ns;
     }
 
     // read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
@@ -1516,6 +1568,7 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
     int current_channels = 0;
     int bytes_per_frame  = 0;
     init_frame_layout(ctx, base_channels, &current_channels, &bytes_per_frame);
+    sensor_threads_init(ctx, ctx->active_sensor_count);
     int buffered_bytes_per_frame = bytes_per_frame;
     bool record = true;
     int buf_idx = 0;
@@ -1531,6 +1584,7 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
     int       chunk_idx       = 0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL || chunk_buffer == NULL) {
+        sensor_threads_shutdown();
         free(packet);
         free(frame_buffer);
         free(sd_write_buffer);
@@ -1558,6 +1612,7 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
+                sensor_threads_shutdown();
                 free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1568,6 +1623,7 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
         {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
+                sensor_threads_shutdown();
                 free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
                 return command_state > 0 ? 0 : -1;
             }
@@ -1635,6 +1691,7 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
     if (csv_file != NULL) fflush(csv_file);
     if (bin_file != NULL) fclose(bin_file);
     if (csv_file != NULL) fclose(csv_file);
+    sensor_threads_shutdown();
     free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
     return 0;
 }
