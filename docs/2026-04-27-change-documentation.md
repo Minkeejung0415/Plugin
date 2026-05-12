@@ -168,19 +168,9 @@ Sample data now streams over **UDP port 55001**. TCP port 5000 is control-only.
 
 The AK09916 magnetometer inside the ICM20948 runs at ~100 Hz. At 1 kHz IMU rate, ~90% of frames have status bit 0 = 0 (no new data). Previously, `channel_out[6/7/8]` was written to literal zero on those frames. Now, fresh values are written to `s->mag_cache[]` and non-fresh frames replay the cache — matching the existing MPU9250 I2C behavior.
 
-**Fix 2 — ICM20948 I2C excluded from VQF fusion mag path:**
+**Fix 2 — ICM20948 I2C fusion mag path (reverted):**
 
-All three fusion mag-assignment blocks in `acquire_sensor_samples` and `acquire_sensor_samples_decimated` had:
-```c
-} else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-```
-An ICM20948 on I2C fell through with `raw_mag = NULL`, running VQF in 6D mode with no heading data. Changed to:
-```c
-} else if (strcmp(s->name, "ICM20948") == 0) {
-```
-The `&& s->is_spi` guard inside `read_sensor_raw_channels` (line 388) was left — it selects the SPI bank-switch register sequence vs. the I2C fallthrough, which is a bus routing decision, not a fusion assignment.
-
-**Effect:** ICM20948 on I2C now feeds magnetometer data into VQF for 9D orientation. Quaternion channels (ch 10, 21, 22 in a two-sensor setup) populate correctly when the filter is active. Channels 8–10 no longer appear empty.
+An earlier change removed `&& s->is_spi` from the three fusion mag-assignment blocks so ICM20948 on I2C would also feed magnetometer data into VQF. This was reverted: the current FPGA image does not collect magnetometer data when ICM20948 is connected over I2C, so passing those values to VQF would corrupt the heading estimate. The `&& s->is_spi` guard is restored in all three blocks. ICM20948 on I2C runs VQF in 6D mode (accelerometer + gyroscope only).
 
 #### Performance note — I2C latency at 1 kHz
 
