@@ -1436,8 +1436,7 @@ static int init_hardware(HardwareContext *ctx) {
                 printf("  -> Found ICM20948!\n");
                 identify_and_add_sensor(ctx, map, id_icm, 0x68, false);
                 sensor_found = true;
-            }
-            else if (id_mpu == 0x71) {
+            } else if (id_mpu == 0x71) {
                 printf("  -> Found MPU9250!\n");
                 identify_and_add_sensor(ctx, map, id_mpu, 0x68, false);
                 sensor_found = true;
