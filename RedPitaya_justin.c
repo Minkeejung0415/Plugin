@@ -610,7 +610,7 @@ static void acquire_sensor_samples(
                 if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0) {
+                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
                 }
@@ -704,7 +704,7 @@ static void acquire_sensor_samples_decimated(
                         if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                             raw_mag = &channel_out[6];
                             mag_is_fresh = s->mag_is_fresh;
-                        } else if (strcmp(s->name, "ICM20948") == 0) {
+                        } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
                             raw_mag = &channel_out[6];
                             mag_is_fresh = s->mag_is_fresh;
                         }
@@ -744,7 +744,7 @@ static void acquire_sensor_samples_decimated(
                 if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0) {
+                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
                     raw_mag = &channel_out[6];
                     mag_is_fresh = s->mag_is_fresh;
                 }
