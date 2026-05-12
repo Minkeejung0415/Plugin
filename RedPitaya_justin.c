@@ -17,6 +17,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include <netinet/tcp.h>
 
@@ -665,6 +666,101 @@ static void init_sensor_decimation(HardwareContext *ctx, int hw_hz)
     }
 }
 
+typedef struct {
+    HardwareContext   *ctx;
+    int                sensor_index;
+    int16_t           *channel_out;
+    bool               with_fusion;
+    long long          vqf_total_ns;
+    long long          vqf_max_ns;
+    unsigned long long vqf_call_count;
+} SensorWorkArgs;
+
+static void *sensor_worker(void *arg)
+{
+    SensorWorkArgs *a = (SensorWorkArgs *)arg;
+    HardwareContext *ctx = a->ctx;
+    int i = a->sensor_index;
+    SensorInstance *s = &ctx->sensors[i];
+    int16_t *channel_out = a->channel_out;
+    int slot_ints  = s->num_channels + 4;
+    int slot_bytes = slot_ints * 2;
+
+    if (i < HOLD_SLOTS) {
+        g_decim_counter[i]++;
+        if (g_decim_counter[i] >= g_decim_interval[i]) {
+            g_decim_counter[i] = 0;
+            read_sensor_raw_channels(s, channel_out);
+
+            if (a->with_fusion) {
+                int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
+                int16_t raw_gyr[3];
+                const int16_t *raw_mag = NULL;
+                bool mag_is_fresh = false;
+
+                if (strcmp(s->name, "BNO055") == 0) {
+                    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                    raw_mag = &channel_out[3];
+                    mag_is_fresh = true;
+                } else {
+                    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+                    if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+                        raw_mag = &channel_out[6];
+                        mag_is_fresh = s->mag_is_fresh;
+                    } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                        raw_mag = &channel_out[6];
+                        mag_is_fresh = s->mag_is_fresh;
+                    }
+                }
+
+                raw_gyr[0] -= s->gyro_bias[0];
+                raw_gyr[1] -= s->gyro_bias[1];
+                raw_gyr[2] -= s->gyro_bias[2];
+
+                struct timespec vqf_start, vqf_end;
+                clock_gettime(CLOCK_MONOTONIC, &vqf_start);
+                fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh,
+                                     channel_out + s->num_channels);
+                clock_gettime(CLOCK_MONOTONIC, &vqf_end);
+
+                long long elapsed = timespec_diff_ns(&vqf_start, &vqf_end);
+                a->vqf_total_ns += elapsed;
+                a->vqf_call_count++;
+                if (elapsed > a->vqf_max_ns) a->vqf_max_ns = elapsed;
+            }
+
+            if (slot_ints <= HOLD_INT16)
+                memcpy(g_sensor_hold[i], channel_out, (size_t)slot_bytes);
+        } else {
+            if (slot_ints <= HOLD_INT16)
+                memcpy(channel_out, g_sensor_hold[i], (size_t)slot_bytes);
+        }
+    } else {
+        read_sensor_raw_channels(s, channel_out);
+        if (a->with_fusion) {
+            int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
+            int16_t raw_gyr[3];
+            const int16_t *raw_mag = NULL;
+            bool mag_is_fresh = false;
+            get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+                raw_mag = &channel_out[6];
+                mag_is_fresh = s->mag_is_fresh;
+            } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+                raw_mag = &channel_out[6];
+                mag_is_fresh = s->mag_is_fresh;
+            }
+            raw_gyr[0] -= s->gyro_bias[0];
+            raw_gyr[1] -= s->gyro_bias[1];
+            raw_gyr[2] -= s->gyro_bias[2];
+            fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh,
+                                 channel_out + s->num_channels);
+        }
+    }
+
+    return NULL;
+}
+
 static void acquire_sensor_samples_decimated(
     HardwareContext *ctx,
     bool with_fusion,
@@ -675,87 +771,52 @@ static void acquire_sensor_samples_decimated(
     unsigned long long *vqf_call_count
 ) {
     memset(frame_buffer, 0, bytes_per_frame);
-    int current_byte_offset = 0;
 
-    for (int i = 0; i < ctx->active_sensor_count; i++) {
-        SensorInstance *s = &ctx->sensors[i];
-        int slot_ints = s->num_channels + 4;
-        int slot_bytes = slot_ints * 2;
-        int16_t *channel_out = (int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset);
+    int n = ctx->active_sensor_count;
+    if (n <= 0) return;
 
-        if (i < HOLD_SLOTS) {
-            g_decim_counter[i]++;
-            if (g_decim_counter[i] >= g_decim_interval[i]) {
-                g_decim_counter[i] = 0;
-                read_sensor_raw_channels(s, channel_out);
+    /* Pre-compute each sensor's output pointer into frame_buffer */
+    int16_t *sensor_ptrs[6];
+    {
+        int byte_off = 0;
+        for (int i = 0; i < n; i++) {
+            sensor_ptrs[i] = (int16_t *)(((uint8_t *)frame_buffer) + byte_off);
+            byte_off += (ctx->sensors[i].num_channels + 4) * 2;
+        }
+    }
 
-                if (with_fusion) {
-                    int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-                    int16_t raw_gyr[3];
-                    const int16_t *raw_mag = NULL;
-                    bool mag_is_fresh = false;
+    if (n == 1) {
+        /* Single sensor — no thread overhead */
+        SensorWorkArgs a = { ctx, 0, sensor_ptrs[0], with_fusion, 0, 0, 0 };
+        sensor_worker(&a);
+        *vqf_total_ns  += a.vqf_total_ns;
+        *vqf_call_count += a.vqf_call_count;
+        if (a.vqf_max_ns > *vqf_max_ns) *vqf_max_ns = a.vqf_max_ns;
+    } else {
+        /* Multiple sensors — launch a thread per sensor, run last one inline */
+        SensorWorkArgs args[6];
+        pthread_t      threads[6];
 
-                    if (strcmp(s->name, "BNO055") == 0) {
-                        get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                        raw_mag = &channel_out[3];
-                        mag_is_fresh = true;
-                    } else {
-                        get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                        if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                            raw_mag = &channel_out[6];
-                            mag_is_fresh = s->mag_is_fresh;
-                        } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-                            raw_mag = &channel_out[6];
-                            mag_is_fresh = s->mag_is_fresh;
-                        }
-                    }
-
-                    raw_gyr[0] -= s->gyro_bias[0];
-                    raw_gyr[1] -= s->gyro_bias[1];
-                    raw_gyr[2] -= s->gyro_bias[2];
-
-                    struct timespec vqf_start;
-                    struct timespec vqf_end;
-                    clock_gettime(CLOCK_MONOTONIC, &vqf_start);
-                    fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
-                    clock_gettime(CLOCK_MONOTONIC, &vqf_end);
-
-                    long long vqf_elapsed_ns = timespec_diff_ns(&vqf_start, &vqf_end);
-                    *vqf_total_ns += vqf_elapsed_ns;
-                    (*vqf_call_count)++;
-                    if (vqf_elapsed_ns > *vqf_max_ns) {
-                        *vqf_max_ns = vqf_elapsed_ns;
-                    }
-                }
-                if (slot_ints <= HOLD_INT16)
-                    memcpy(g_sensor_hold[i], channel_out, (size_t) slot_bytes);
-            } else {
-                if (slot_ints <= HOLD_INT16)
-                    memcpy(channel_out, g_sensor_hold[i], (size_t) slot_bytes);
-            }
-        } else {
-            read_sensor_raw_channels(s, channel_out);
-            if (with_fusion) {
-                int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-                int16_t raw_gyr[3];
-                const int16_t *raw_mag = NULL;
-                bool mag_is_fresh = false;
-                get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = s->mag_is_fresh;
-                }
-                raw_gyr[0] -= s->gyro_bias[0];
-                raw_gyr[1] -= s->gyro_bias[1];
-                raw_gyr[2] -= s->gyro_bias[2];
-                fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
-            }
+        for (int i = 0; i < n - 1; i++) {
+            args[i] = (SensorWorkArgs){ ctx, i, sensor_ptrs[i], with_fusion, 0, 0, 0 };
+            pthread_create(&threads[i], NULL, sensor_worker, &args[i]);
         }
 
-        current_byte_offset += slot_bytes;
+        /* Run the last sensor on the calling thread while others execute */
+        int last = n - 1;
+        args[last] = (SensorWorkArgs){ ctx, last, sensor_ptrs[last], with_fusion, 0, 0, 0 };
+        sensor_worker(&args[last]);
+
+        /* Wait for all threads then merge VQF stats */
+        for (int i = 0; i < n - 1; i++) {
+            pthread_join(threads[i], NULL);
+            *vqf_total_ns  += args[i].vqf_total_ns;
+            *vqf_call_count += args[i].vqf_call_count;
+            if (args[i].vqf_max_ns > *vqf_max_ns) *vqf_max_ns = args[i].vqf_max_ns;
+        }
+        *vqf_total_ns  += args[last].vqf_total_ns;
+        *vqf_call_count += args[last].vqf_call_count;
+        if (args[last].vqf_max_ns > *vqf_max_ns) *vqf_max_ns = args[last].vqf_max_ns;
     }
 
     // read_analog_waveform_channels((int16_t *)(((uint8_t *)frame_buffer) + current_byte_offset));
