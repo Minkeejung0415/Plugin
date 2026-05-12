@@ -17,6 +17,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include <netinet/tcp.h>
 
