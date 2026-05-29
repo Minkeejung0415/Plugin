@@ -131,6 +131,22 @@ Checks variable-payload framing and header resync logic used by the plugin reade
 
 ## Change log
 
+### 2026-05-29 — I2C bus recovery after motion / stuck AXI IIC
+
+**File:** `RedPitaya_justin.c`
+
+Hard motion could wedge the Xilinx AXI IIC master (`SR=0x00000040`, `TX_FIFO_EMPTY` timeout). UDP streaming stopped (`[AGE] freeze=true`) and a server restart without power cycle could not re-probe slot 0.
+
+**Changes:**
+
+- `axi_iic_force_reset()` — soft reset, TX FIFO reset, drain RX FIFO, re-enable core.
+- `iic_read_n_bytes_recovering()` — pre/post read stuck check, recover + one retry.
+- All streaming I2C reads in `read_sensor_raw_channels()` use the recovering wrapper.
+- `recover_active_i2c_buses()` on every `run_stream()` exit (normal, STOP, malloc fail).
+- `axi_iic_force_reset()` before each discovery slot probe so a new server process can find MPU6050 after a prior stuck session.
+
+Rebuild and deploy **`RedPitaya_DAQ_justin`** on the board (same compile line as before; no new source files).
+
 ### Week of 2026-04-27
 
 **`RedPitaya_justin.c`**
