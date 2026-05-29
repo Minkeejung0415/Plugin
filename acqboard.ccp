@@ -10,6 +10,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+
+namespace
+{
+    const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
+}
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
     : AcquisitionBoard()
@@ -468,6 +474,15 @@ bool AcqBoardRedPitaya::stopAcquisition()
         commandSocket = nullptr;
     }
 
+    openSimEnabled = false;
+    openSimSocket.reset();
+
+    if (openSimLiveProcess != nullptr)
+    {
+        openSimLiveProcess->kill();
+        openSimLiveProcess.reset();
+    }
+
     streamSensorNames.clear();
 
     return true;
@@ -768,6 +783,112 @@ void AcqBoardRedPitaya::setNumHeadstageChannels (int /*headstageIndex*/, int /*c
 {
 }
 
+void AcqBoardRedPitaya::launchOpenSimMotion()
+{
+    const juce::String workDir = kOpenSimWorkDir;
+    const juce::String bridgePath = workDir + "\\ephys_to_opensim_bridge.py";
+    const juce::String logPath = workDir + "\\ephys_bridge_run.log";
+    juce::File batFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                             .getChildFile ("opensim_motion_hidden_launch.bat");
+
+    batFile.replaceWithText (
+        "@echo off\r\n"
+        "cd /d \"" + workDir + "\"\r\n"
+        "set PATH=C:\\OpenSim 4.5\\bin;%PATH%\r\n"
+        "set PYTHONPATH=C:\\OpenSim 4.5\\sdk\\Python;%PYTHONPATH%\r\n"
+        "py -3.12 \"" + bridgePath + "\" listen --until-idle 5"
+        + " > \"" + logPath + "\" 2>&1\r\n");
+
+    const juce::String command = "cmd.exe /c \"\"" + batFile.getFullPathName() + "\"\"";
+
+    openSimProcess = std::make_unique<juce::ChildProcess>();
+    if (openSimProcess->start (command))
+    {
+        std::cout << "OpenSim Motion generation launched hidden. Log: "
+                  << logPath << std::endl;
+    }
+    else
+    {
+        openSimProcess.reset();
+        std::cout << "OpenSim Motion generation failed to launch." << std::endl;
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            "Gen Motion",
+            "Could not launch the OpenSim bridge. See ephys_bridge_run.log.");
+        return;
+    }
+
+    openSimSocket = std::make_unique<DatagramSocket>();
+    openSimEnabled = true;
+    std::cout << "Red Pitaya: OpenSim UDP forwarding enabled -> 127.0.0.1:5000" << std::endl;
+}
+
+void AcqBoardRedPitaya::launchOpenSimLive()
+{
+    const juce::String workDir = kOpenSimWorkDir;
+    const juce::String scriptPath = workDir + "\\opensim_live_realtime.py";
+    juce::File batFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                             .getChildFile ("opensim_live_visible.bat");
+
+    batFile.replaceWithText (
+        "@echo off\r\n"
+        "cd /d \"" + workDir + "\"\r\n"
+        "set PATH=C:\\OpenSim 4.5\\bin;%PATH%\r\n"
+        "set PYTHONPATH=C:\\OpenSim 4.5\\sdk\\Python;%PYTHONPATH%\r\n"
+        "set OPENSIM_LIVE_SOURCE=real_redpitaya\r\n"
+        "set OPENSIM_LIVE_GYRO_TEST=normal\r\n"
+        "for /f \"tokens=5\" %%p in ('netstat -ano ^| findstr \":5000\"') do taskkill /PID %%p /F >nul 2>&1\r\n"
+        "start \"OpenSim Live\" cmd /k py -3.8 -u \"" + scriptPath + "\"\r\n");
+
+    const juce::String command = "cmd.exe /c \"\"" + batFile.getFullPathName() + "\"\"";
+
+    openSimLiveProcess = std::make_unique<juce::ChildProcess>();
+    if (! openSimLiveProcess->start (command))
+    {
+        openSimLiveProcess.reset();
+        std::cout << "OpenSim Live: failed to launch." << std::endl;
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::AlertWindow::WarningIcon,
+            "OpenSim Live",
+            "Could not start the live bridge.");
+        return;
+    }
+
+    std::cout << "OpenSim Live: launched visible console (py -3.8 -u)." << std::endl;
+
+    openSimSocket = std::make_unique<DatagramSocket>();
+    openSimEnabled = true;
+    std::cout << "Red Pitaya: OpenSim UDP forwarding enabled -> 127.0.0.1:5000" << std::endl;
+}
+
+void AcqBoardRedPitaya::sendOpenSimImuPacket (float timestamp, const float* data, int numImus)
+{
+    if (! openSimEnabled || openSimSocket == nullptr || data == nullptr || numImus < 1)
+        return;
+
+    const int totalFloats = 1 + numImus * 6;
+    juce::HeapBlock<float> pkt (totalFloats);
+    pkt[0] = timestamp;
+
+    for (int i = 0; i < numImus * 6; ++i)
+        pkt[1 + i] = data[i];
+
+    openSimSocket->write ("127.0.0.1", 5000, pkt, totalFloats * (int) sizeof (float));
+
+    static int openSimUdpSendCount = 0;
+    ++openSimUdpSendCount;
+
+    if (openSimUdpSendCount == 1 || (openSimUdpSendCount % 1000) == 0)
+    {
+        const float imu2Gy = (numImus >= 3) ? data[2 * 6 + 4] : std::numeric_limits<float>::quiet_NaN();
+        std::cout << "OpenSim UDP sent #" << openSimUdpSendCount
+                  << " t=" << timestamp
+                  << " n_imus=" << numImus
+                  << " gy[2]=" << imu2Gy << std::endl;
+    }
+}
+
+
 void AcqBoardRedPitaya::run()
 {
     if (commandSocket == nullptr)
@@ -883,6 +1004,27 @@ void AcqBoardRedPitaya::run()
             {
                 const float raw = (adc < channelsInPacket) ? float (channels[adc]) : 0.0f;
                 samples[(adc * samplesPerBuffer) + sampleIndex] = raw * channelScale[adc];
+            }
+
+            {
+                const int numImusLocal = numAdcChannelsLocal / 6;
+
+                if (numImusLocal >= 1)
+                {
+                    const int nCh = numImusLocal * 6;
+                    float imuPkt[MAX_CHANNELS];
+
+                    for (int ch = 0; ch < nCh; ++ch)
+                        imuPkt[ch] = samples[ch * samplesPerBuffer + sampleIndex];
+
+                    if (sampleNumber == 0)
+                    {
+                        std::cout << "Red Pitaya: real " << numImusLocal << "-IMU packet with "
+                                  << nCh << " floats — IMU0 ax=" << imuPkt[0] << std::endl;
+                    }
+
+                    sendOpenSimImuPacket ((float) elapsedSeconds, imuPkt, numImusLocal);
+                }
             }
 
             const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));

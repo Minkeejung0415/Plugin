@@ -177,6 +177,12 @@ public:
     bool sendSensorCfgGyr (int sensorIndex, int presetId);
     bool sendSensorCfgSrate (int sensorIndex, int targetHz);
 
+    /** Launches Python bridge: collect IMU UDP, run IK, open OpenSim GUI. */
+    void launchOpenSimMotion();
+
+    /** Launches Python live Simbody viewer; press Play to stream IMU UDP. */
+    void launchOpenSimLive();
+
     /** Fills data buffer */
     void run();
 
