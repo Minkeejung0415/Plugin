@@ -166,6 +166,9 @@ private:
     std::unique_ptr<Label> sensorSelectTitle;
     std::unique_ptr<ComboBox> sensorSelectCombo;
 
+    std::unique_ptr<UtilityButton> openSimMotionButton;
+    std::unique_ptr<UtilityButton> openSimLiveButton;
+
     enum AudioChannel
     {
         LEFT = 0,

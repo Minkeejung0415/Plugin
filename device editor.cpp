@@ -766,6 +766,24 @@ void DeviceEditor::buttonClicked (Button* button)
                                                  : "Filter disabled for next data buffer.");
         }
     }
+    else if (button == openSimMotionButton.get())
+    {
+        if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+        {
+            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+            rp->launchOpenSimMotion();
+            CoreServices::sendStatusMessage ("OpenSim Motion generation started — will open OpenSim GUI when done");
+        }
+    }
+    else if (button == openSimLiveButton.get())
+    {
+        if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+        {
+            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+            rp->launchOpenSimLive();
+            CoreServices::sendStatusMessage ("OpenSim Live started — press Play to stream");
+        }
+    }
     /*
     else if (button == auxButton.get() && ! acquisitionIsActive)
     {
@@ -858,6 +876,10 @@ void DeviceEditor::startAcquisition()
             sensorSelectTitle->toFront (false);
         if (sensorSelectCombo != nullptr)
             sensorSelectCombo->toFront (false);
+        if (openSimMotionButton != nullptr)
+            openSimMotionButton->toFront (false);
+        if (openSimLiveButton != nullptr)
+            openSimLiveButton->toFront (false);
     }
 
     if (memoryUsage != nullptr)
