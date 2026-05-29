@@ -115,119 +115,6 @@ static long long timespec_diff_ns(const struct timespec *start, const struct tim
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
            (long long)(end->tv_nsec - start->tv_nsec);
 }
-/* --- AXI IIC bus recovery (Xilinx core register map) --- */
-#define XIIC_RESETR_OFFSET           0x40u
-#define XIIC_CR_REG_OFFSET           0x100u
-#define XIIC_SR_REG_OFFSET           0x104u
-#define XIIC_DRR_REG_OFFSET          0x10Cu
-#define XIIC_RESET_MASK              0x0Au
-#define XIIC_CR_ENABLE_DEVICE_MASK   0x01u
-#define XIIC_CR_TX_FIFO_RESET_MASK   0x02u
-#define XIIC_SR_BUS_BUSY_MASK        0x04u
-#define XIIC_SR_RX_FIFO_EMPTY_MASK   0x40u
-#define XIIC_SR_TX_FIFO_EMPTY_MASK   0x80u
-
-static uint32_t axi_iic_read_sr(void *axi_map)
-{
-    volatile uint32_t *sr = (volatile uint32_t *)((uint8_t *)axi_map + XIIC_SR_REG_OFFSET);
-    return *sr;
-}
-
-static void axi_iic_force_reset(void *axi_map)
-{
-    if (axi_map == NULL)
-        return;
-
-    volatile uint32_t *reset_reg = (volatile uint32_t *)((uint8_t *)axi_map + XIIC_RESETR_OFFSET);
-    volatile uint8_t *cr = (volatile uint8_t *)((uint8_t *)axi_map + XIIC_CR_REG_OFFSET);
-    volatile uint32_t *drr = (volatile uint32_t *)((uint8_t *)axi_map + XIIC_DRR_REG_OFFSET);
-
-    *reset_reg = XIIC_RESET_MASK;
-    usleep(2000);
-
-    *cr = XIIC_CR_TX_FIFO_RESET_MASK;
-    usleep(200);
-
-    for (int i = 0; i < 256; i++) {
-        if (axi_iic_read_sr(axi_map) & XIIC_SR_RX_FIFO_EMPTY_MASK)
-            break;
-        (void)*drr;
-    }
-
-    *cr = XIIC_CR_ENABLE_DEVICE_MASK;
-    usleep(500);
-}
-
-static bool axi_iic_bus_looks_stuck(void *axi_map)
-{
-    const uint32_t sr = axi_iic_read_sr(axi_map);
-
-    if (!(sr & XIIC_SR_TX_FIFO_EMPTY_MASK))
-        return true;
-
-    if ((sr & XIIC_SR_BUS_BUSY_MASK) && !(sr & XIIC_SR_TX_FIFO_EMPTY_MASK))
-        return true;
-
-    return false;
-}
-
-static void axi_iic_recover_bus(void *axi_map, const char *reason)
-{
-    static time_t last_log_sec;
-    static unsigned suppressed_logs;
-
-    if (axi_map == NULL)
-        return;
-
-    {
-        const time_t now = time(NULL);
-        if (now != last_log_sec) {
-            if (suppressed_logs > 0)
-                fprintf(stderr, "  (%u additional I2C recoveries suppressed)\n", suppressed_logs);
-            fprintf(stderr, "axi_iic_recover_bus: %s (SR=0x%08X before reset)\n",
-                    reason ? reason : "recovery", axi_iic_read_sr(axi_map));
-            last_log_sec = now;
-            suppressed_logs = 0;
-        } else {
-            suppressed_logs++;
-        }
-    }
-
-    axi_iic_force_reset(axi_map);
-    axi_iic_initialize(axi_map);
-    usleep(500);
-}
-
-static void iic_read_n_bytes_recovering(void *axi_map, uint8_t slave_addr, uint8_t reg_addr,
-                                        uint8_t *buffer, int num_bytes)
-{
-    if (axi_map == NULL || buffer == NULL || num_bytes <= 0)
-        return;
-
-    if (axi_iic_bus_looks_stuck(axi_map))
-        axi_iic_recover_bus(axi_map, "pre-read");
-
-    axi_iic_read_n_bytes(axi_map, slave_addr, reg_addr, buffer, num_bytes);
-
-    if (axi_iic_bus_looks_stuck(axi_map)) {
-        axi_iic_recover_bus(axi_map, "post-read");
-        axi_iic_read_n_bytes(axi_map, slave_addr, reg_addr, buffer, num_bytes);
-    }
-}
-
-static void recover_active_i2c_buses(HardwareContext *ctx)
-{
-    if (ctx == NULL)
-        return;
-
-    for (int i = 0; i < ctx->active_sensor_count; i++) {
-        SensorInstance *s = &ctx->sensors[i];
-        if (s->is_spi || s->axi_map == NULL)
-            continue;
-        axi_iic_recover_bus(s->axi_map, "stream-stop");
-    }
-}
-
 
 static void icm20948_spi_select_bank(void *axi_map, uint8_t bank)
 {
@@ -463,7 +350,7 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
             channel_out[8] = 0;
         } else {
             uint8_t raw[12];
-            iic_read_n_bytes_recovering(s->axi_map, s->i2c_addr, 0x3B, raw, 12);
+            axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 12);
 
             for (int j = 0; j < 6; j++) {
                 channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
@@ -475,7 +362,7 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
             if (++s->mag_skip_counter >= mag_period) {
                 uint8_t mag_raw[7];
                 s->mag_skip_counter = 0;
-                iic_read_n_bytes_recovering(s->axi_map, 0x0C, 0x03, mag_raw, 7);
+                axi_iic_read_n_bytes(s->axi_map, 0x0C, 0x03, mag_raw, 7);
 
                 if (mag_raw[6] & 0x08) {
                     channel_out[6] = s->mag_cache[0];
@@ -527,7 +414,7 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
         }
     } else if (strcmp(s->name, "BNO055") == 0) {
         uint8_t raw[18];
-        iic_read_n_bytes_recovering(s->axi_map, s->i2c_addr, s->data_reg_start, raw, 18);
+        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, s->data_reg_start, raw, 18);
         for (int j = 0; j < s->num_channels; j++) {
             channel_out[j] = (int16_t)(raw[j * 2] | (raw[j * 2 + 1] << 8));
         }
@@ -539,7 +426,7 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
         }
     } else if (s->split_read) {
         uint8_t raw[14];
-        iic_read_n_bytes_recovering(s->axi_map, s->i2c_addr, 0x3B, raw, 14);
+        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, 0x3B, raw, 14);
         for (int j = 0; j < 3; j++) {
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
         }
@@ -548,7 +435,7 @@ static void read_sensor_raw_channels(SensorInstance *s, int16_t *channel_out) {
         }
     } else {
         uint8_t raw[32];
-        iic_read_n_bytes_recovering(s->axi_map, s->i2c_addr, s->data_reg_start, raw, s->num_channels * 2);
+        axi_iic_read_n_bytes(s->axi_map, s->i2c_addr, s->data_reg_start, raw, s->num_channels * 2);
         for (int j = 0; j < s->num_channels; j++) {
             channel_out[j] = (int16_t)((raw[j * 2] << 8) | raw[j * 2 + 1]);
         }
@@ -800,6 +687,8 @@ typedef struct {
 
 static SensorThreadCtx g_sensor_threads[6];
 static int             g_sensor_thread_count = 0;
+
+static void *sensor_worker(void *arg);
 
 static void *sensor_thread_loop(void *arg)
 {
@@ -1523,10 +1412,6 @@ static int init_hardware(HardwareContext *ctx) {
         void* map = mmap(NULL, IIC_RANGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, i2c_bases[i]);
         if (map == MAP_FAILED) continue;
 
-        /* Clear stuck state from a previous session (motion glitch / abrupt stop). */
-        axi_iic_force_reset(map);
-        usleep(2000);
-
         uint8_t id_mpu = 0, id_icm = 0, id_bno = 0;
         bool sensor_found = false;
 
@@ -1701,7 +1586,6 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
     int       chunk_idx       = 0;
 
     if (packet == NULL || frame_buffer == NULL || sd_write_buffer == NULL || chunk_buffer == NULL) {
-        recover_active_i2c_buses(ctx);
         sensor_threads_shutdown();
         free(packet);
         free(frame_buffer);
@@ -1730,7 +1614,6 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
         if ((now - last_counter) < ticks_per_sample) {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
-                recover_active_i2c_buses(ctx);
                 sensor_threads_shutdown();
                 free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
                 return command_state > 0 ? 0 : -1;
@@ -1742,7 +1625,6 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
         {
             int command_state = process_stream_commands(client_fd, ctx, &bin_file, &csv_file, &record, &buf_idx, sd_write_buffer, buffered_bytes_per_frame);
             if (command_state != 0) {
-                recover_active_i2c_buses(ctx);
                 sensor_threads_shutdown();
                 free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
                 return command_state > 0 ? 0 : -1;
@@ -1811,7 +1693,6 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
     if (csv_file != NULL) fflush(csv_file);
     if (bin_file != NULL) fclose(bin_file);
     if (csv_file != NULL) fclose(csv_file);
-    recover_active_i2c_buses(ctx);
     sensor_threads_shutdown();
     free(packet); free(frame_buffer); free(sd_write_buffer); free(chunk_buffer);
     return 0;
