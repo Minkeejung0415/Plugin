@@ -1,7 +1,7 @@
 """
 opensim_live_realtime.py  -  Python 3.8 ONLY
 Real-time OpenSim IK with Simbody visualizer.
-Receives UDP raw IMU packets (ax,ay,az,gx,gy,gz per sensor, 6 floats each)
+Receives UDP from Open Ephys: v2 quaternion packets (t, version=2, N, N×qw,qx,qy,qz) or legacy acc/gyro IMU packets
 on port 5000, same format as the Open Ephys bridge sends.
 Runs imufusion AHRS per sensor -> quaternions -> OpenSim orientation IK
 -> Simbody visualizer update.
@@ -35,6 +35,11 @@ os.environ["PATH"] = OPENSIM_BIN + os.pathsep + os.environ.get("PATH", "")
 import opensim as osim
 import imufusion
 import numpy as np
+
+import json
+
+UDP_PACKET_VERSION_QUAT = 2.0
+_sensor_map_cache = None
 
 try:
     osim.Logger.setLevelString("Warn")
@@ -122,6 +127,55 @@ def _is_flat_fake_packet(values):
             return False
     return True
 
+
+
+
+def _load_sensor_map():
+    global _sensor_map_cache
+    if _sensor_map_cache is not None:
+        return _sensor_map_cache
+    path = os.path.join(WORK_DIR, "opensim_sensor_map.json")
+    if not os.path.isfile(path):
+        _sensor_map_cache = {}
+        return _sensor_map_cache
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            _sensor_map_cache = json.load(f)
+    except Exception as exc:
+        print(f"[WARN] Could not read {path}: {exc}")
+        _sensor_map_cache = {}
+    return _sensor_map_cache
+
+
+def _slot_map_for_quat_packet(n_sensors, sensor_map=None):
+    if sensor_map is None:
+        sensor_map = _load_sensor_map()
+    names = sensor_map.get("sensor_slots")
+    if isinstance(names, list) and len(names) >= n_sensors:
+        slots = []
+        for name in names[:n_sensors]:
+            if name not in SENSORS:
+                return None
+            slots.append(SENSORS.index(name))
+        return slots
+    return _slot_map_for_packet_imus(n_sensors)
+
+
+def _parse_quat_v2_packet(data):
+    n_floats = len(data) // 4
+    if n_floats < 3:
+        return None
+    t0, ver, n_s = struct.unpack("<3f", data[:12])
+    if not (1.99 < ver < 2.01):
+        return None
+    n_sensors = int(round(n_s))
+    if n_sensors < 1 or n_sensors > N_SENSORS:
+        return None
+    expected = 3 + n_sensors * 4
+    if n_floats != expected:
+        return None
+    quats = struct.unpack(f"<{n_sensors * 4}f", data[12:12 + n_sensors * 16])
+    return t0, n_sensors, quats
 
 def _slot_map_for_packet_imus(n_imus):
     if n_imus == 1:
@@ -240,6 +294,75 @@ def _udp_ahrs_thread():
 
         n_bytes = len(data)
         n_floats_total = n_bytes // 4
+
+        quat_pkt = _parse_quat_v2_packet(data)
+        if quat_pkt is not None:
+            packet_timestamp, n_sensors, quat_floats = quat_pkt
+            slot_map = _slot_map_for_quat_packet(n_sensors)
+            if slot_map is None:
+                continue
+            source_key = (SOURCE_LABEL, "quat_v2", n_sensors, tuple(slot_map))
+            packet_imus = n_sensors
+
+            new_session = False
+            reason = ""
+            if last_source_key is not None and source_key != last_source_key:
+                new_session = True
+                reason = f"source/slot changed {last_source_key}->{source_key}"
+            elif first_packet_timestamp is None or last_packet_timestamp is None:
+                new_session = True
+                reason = "first packet"
+            elif packet_timestamp < last_packet_timestamp - 0.05:
+                new_session = True
+                reason = f"timestamp reset {last_packet_timestamp:.3f}->{packet_timestamp:.3f}"
+            elif dt > SESSION_GAP_S:
+                new_session = True
+                reason = f"packet gap {dt*1000.0:.1f} ms"
+
+            if new_session:
+                session_id += 1
+                first_packet_timestamp = packet_timestamp
+                last_packet_timestamp = packet_timestamp
+                with _frame_lock:
+                    _frame_queue.clear()
+                dt = 1.0 / SAMPLE_RATE
+                last_source_key = source_key
+                last_expanded_values = None
+                neutral_static_since = None
+                neutral_warned = False
+                _connected_announced = False
+                print(f"[SESSION] new quat v2 session id={session_id} reason={reason}")
+            else:
+                dt = max(1.0 / SAMPLE_RATE, packet_timestamp - last_packet_timestamp)
+                last_packet_timestamp = packet_timestamp
+
+            if not _connected_announced:
+                _connected_announced = True
+                active_names = [SENSORS[s] for s in slot_map]
+                print(f"[CONNECTED] Receiving OpenSim UDP v2 quaternion packets.")
+                print(f"[SENSORS] {n_sensors} sensor(s): {', '.join(active_names)}")
+                for idx, name in zip(slot_map, active_names):
+                    print(f"[MAP] sensor{idx} → {name}")
+
+            active_quats = []
+            active_sensors = []
+            for pkt_i, slot_i in enumerate(slot_map):
+                base = pkt_i * 4
+                qw, qx, qy, qz = quat_floats[base:base + 4]
+                active_quats.append(_quat_mul(_Q_OPENSIM_FRAME, [qw, qx, qy, qz]))
+                active_sensors.append(SENSORS[slot_i])
+
+            if not active_quats:
+                continue
+
+            _pkt_n += 1
+            t_stream = max(0.0, packet_timestamp - first_packet_timestamp)
+            if _pkt_n <= 5 or _pkt_n % PACKET_LOG_INTERVAL == 0:
+                print(f"[PKT v2 {_pkt_n}] t={t_stream:.3f}s sensors={n_sensors} slots={slot_map}")
+            with _frame_lock:
+                _frame_queue.clear()
+                _frame_queue.append((t_stream, active_quats, active_sensors, session_id, now, False, 0.0, 0.0))
+            continue
 
         # Disambiguate packet format:
         #   With-timestamp (Open Ephys):  (n_floats_total - 1) % 6 == 0

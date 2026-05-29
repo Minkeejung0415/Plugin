@@ -1,0 +1,6 @@
+{
+  "comment": "Maps Red Pitaya SENSORS: index (0-based) to OpenSim orientation sensor name.",
+  "sensor_slots": [
+    "tibia_r_imu"
+  ]
+}
