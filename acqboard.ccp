@@ -851,7 +851,6 @@ void AcqBoardRedPitaya::launchOpenSimLive()
         "set PYTHONPATH=C:\\OpenSim 4.5\\sdk\\Python;%PYTHONPATH%\r\n"
         "set OPENSIM_LIVE_SOURCE=real_redpitaya\r\n"
         "set OPENSIM_LIVE_GYRO_TEST=normal\r\n"
-        "for /f \"tokens=5\" %%p in ('netstat -ano ^| findstr \":5000\"') do taskkill /PID %%p /F >nul 2>&1\r\n"
         "start \"OpenSim Live\" cmd /k py -3.8 -u \"" + scriptPath + "\"\r\n");
 
     const juce::String command = "cmd.exe /c \"\"" + batFile.getFullPathName() + "\"\"";
