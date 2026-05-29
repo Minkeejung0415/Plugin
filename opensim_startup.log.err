@@ -1,0 +1,29 @@
+Traceback (most recent call last):
+  File "C:\Users\KIN Student\Open-Sim--Bio-Mech\opensim_live_realtime.py", line 252, in <module>
+    run_live()
+  File "C:\Users\KIN Student\Open-Sim--Bio-Mech\opensim_live_realtime.py", line 163, in run_live
+    state = model.initSystem()
+  File "C:\OpenSim 4.5\sdk\Python\opensim\simulation.py", line 24819, in initSystem
+    return _simulation.Model_initSystem(self)
+RuntimeError: std::exception in 'SimTK::State & OpenSim::Model::initSystem()': SimTK Exception thrown at VisualizerProtocol.cpp:167:
+  Error detected by Simbody method VisualizerProtocol::ctor(): Unable to spawn executable 'simbody-visualizer' from directories:
+  c:\Users\KIN Student\AppData\Local\Programs\Python\Python38\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\Users\KIN Student\AppData\Local\Programs\Python\Python312\Scripts\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\Users\KIN Student\AppData\Local\Programs\Microsoft VS Code\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\WINDOWS\system32\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\WINDOWS\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\WINDOWS\System32\Wbem\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\WINDOWS\System32\WindowsPowerShell\v1.0\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\WINDOWS\System32\OpenSSH\
+  c:\Users\KIN Student\Documents\RedPitaya-ctrl-system\C code\C\
+  c:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\
+  c:\Users\KIN Student\Do
+  (Required condition 'status == 0' was not met.)
+

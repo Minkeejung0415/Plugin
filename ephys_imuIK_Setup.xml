@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<OpenSimDocument Version="40000">
+	<IMUInverseKinematicsTool>
+		<model_file>Rajagopal2015_opensense_calibrated.osim</model_file>
+		<results_directory>.</results_directory>
+		<time_range>0 999</time_range>
+		<output_motion_file>ephys_live_motion.sto</output_motion_file>
+		<report_errors>false</report_errors>
+		<sensor_to_opensim_rotations>-1.5707963267948966 0 0</sensor_to_opensim_rotations>
+		<orientations_file>ephys_live_orientations.sto</orientations_file>
+	</IMUInverseKinematicsTool>
+</OpenSimDocument>
