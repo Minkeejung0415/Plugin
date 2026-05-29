@@ -226,6 +226,20 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         sensorSelectCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorSelectCombo.get());
 
+        openSimMotionButton = std::make_unique<UtilityButton> ("Gen Motion");
+        openSimMotionButton->setRadius (3.0f);
+        openSimMotionButton->setBounds (col4, 68, comboW, 20);
+        openSimMotionButton->addListener (this);
+        openSimMotionButton->setTooltip ("Collect IMU data, run OpenSim IK, and open result in OpenSim 4.5 GUI");
+        addAndMakeVisible (openSimMotionButton.get());
+
+        openSimLiveButton = std::make_unique<UtilityButton> ("OpenSim Live");
+        openSimLiveButton->setRadius (3.0f);
+        openSimLiveButton->setBounds (col4, 92, comboW, 20);
+        openSimLiveButton->addListener (this);
+        openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
+        addAndMakeVisible (openSimLiveButton.get());
+
         redPitayaSensorUiBuilt = true;
     }
 
