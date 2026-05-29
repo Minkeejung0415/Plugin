@@ -801,6 +801,8 @@ typedef struct {
 static SensorThreadCtx g_sensor_threads[6];
 static int             g_sensor_thread_count = 0;
 
+static void *sensor_worker(void *arg);
+
 static void *sensor_thread_loop(void *arg)
 {
     SensorThreadCtx *t = (SensorThreadCtx *)arg;
