@@ -22,13 +22,18 @@ Q15 values are scaled by `1/32767` and normalized. With **FILTER OFF**, quat cha
 
 ## Sensor → OpenSim body mapping
 
-Edit `opensim_sensor_map.json` in the OpenSim work directory (`sensor_slots` list, index = Red Pitaya sensor index).
+By default, Red Pitaya sensor index maps **distal → proximal** (up the leg/trunk):
 
-Default single MPU6050:
+| Sensors | RP index 0 | 1 | 2 | 3 |
+|---------|------------|---|---|---|
+| 1 | tibia | — | — | — |
+| 2 | tibia | thigh (femur) | — | — |
+| 3 | tibia | thigh | hip (pelvis) | — |
+| 4+ | … continues up (`torso`, foot, left leg) | | | |
 
-```json
-{ "sensor_slots": ["tibia_r_imu"] }
-```
+Uninstrumented segments stay at the **neutral standing pose** during live IK so the whole body does not drift.
+
+Override with `opensim_sensor_map.json` in the OpenSim work directory (`sensor_slots` list).
 
 ## Legacy v1 (acc/gyro)
 
