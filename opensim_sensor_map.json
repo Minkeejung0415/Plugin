@@ -1,6 +1,9 @@
 {
-  "comment": "Maps Red Pitaya SENSORS: index (0-based) to OpenSim orientation sensor name.",
+  "comment": "Optional. Default chain: 0=tibia, 1=thigh, 2=hip, 3=torso (distal to proximal).",
   "sensor_slots": [
-    "tibia_r_imu"
+    "tibia_r_imu",
+    "femur_r_imu",
+    "pelvis_imu",
+    "torso_imu"
   ]
 }

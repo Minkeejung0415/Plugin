@@ -60,21 +60,30 @@ FIRST_PACKET_TIMEOUT_S = 30.0  # seconds to wait for first packet before giving 
 # Available frames: torso_imu, pelvis_imu, femur_r_imu, tibia_r_imu,
 #                   calcn_r_imu, femur_l_imu, tibia_l_imu, calcn_l_imu
 
+# Distal → proximal: sensor 0 = tibia, 1 = thigh, 2 = hip, 3 = torso, ...
+SENSOR_CHAIN_UP = [
+    "tibia_r_imu",
+    "femur_r_imu",
+    "pelvis_imu",
+    "torso_imu",
+    "calcn_r_imu",
+    "femur_l_imu",
+    "tibia_l_imu",
+    "calcn_l_imu",
+]
+
 SENSOR_NAMES = {
-    1: ["tibia_r_imu"],
-    2: ["femur_r_imu",  "tibia_r_imu"],
-    6: ["pelvis_imu",   "femur_r_imu",  "tibia_r_imu",
-        "calcn_r_imu",  "femur_l_imu",  "tibia_l_imu"],
-    8: ["torso_imu",    "pelvis_imu",   "femur_r_imu",  "tibia_r_imu",
-        "calcn_r_imu",  "femur_l_imu",  "tibia_l_imu",  "calcn_l_imu"],
+    8: list(SENSOR_CHAIN_UP),
 }
 
 def _sensor_names_for(n_imus):
-    """Return the list of OpenSim frame names for n_imus sensors."""
-    if n_imus in SENSOR_NAMES:
-        return SENSOR_NAMES[n_imus]
-    # Fallback: generic names (won't match osim frames, but prevents crash)
-    return [f"sensor_{i}_imu" for i in range(n_imus)]
+    """Return the list of OpenSim frame names for n_imus sensors (distal → proximal)."""
+    n = int(n_imus)
+    if n in SENSOR_NAMES:
+        return SENSOR_NAMES[n]
+    if 1 <= n <= len(SENSOR_CHAIN_UP):
+        return list(SENSOR_CHAIN_UP[:n])
+    return [f"sensor_{i}_imu" for i in range(n)]
 
 
 def run_opensim_ik(setup_xml):

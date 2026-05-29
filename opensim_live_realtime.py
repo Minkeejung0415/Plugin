@@ -80,6 +80,49 @@ SENSORS = [
 ]
 N_SENSORS = len(SENSORS)
 
+# Distal → proximal: RP sensor index 0 = shank/tibia, 1 = thigh, 2 = hip, 3 = trunk, ...
+SENSOR_CHAIN_UP = [
+    "tibia_r_imu",
+    "femur_r_imu",
+    "pelvis_imu",
+    "torso_imu",
+    "calcn_r_imu",
+    "femur_l_imu",
+    "tibia_l_imu",
+    "calcn_l_imu",
+]
+
+
+def _sensor_names_for_count(n_sensors):
+    n = max(0, int(n_sensors))
+    if n <= 0:
+        return []
+    if n <= len(SENSOR_CHAIN_UP):
+        return list(SENSOR_CHAIN_UP[:n])
+    return list(SENSOR_CHAIN_UP) + [f"sensor_{i}_imu" for i in range(len(SENSOR_CHAIN_UP), n)]
+
+
+def _slot_map_for_sensor_count(n_sensors):
+    names = _sensor_names_for_count(n_sensors)
+    slots = []
+    for name in names:
+        if name not in SENSORS:
+            return None
+        slots.append(SENSORS.index(name))
+    return slots
+
+
+def _neutral_quats_opensim_frame():
+    return [_quat_mul(_Q_OPENSIM_FRAME, q) for q in _NEUTRAL_QUATS_8IMU]
+
+
+def _merge_live_quats_with_neutral(live_quats, live_sensor_names):
+    full = _neutral_quats_opensim_frame()
+    for q, name in zip(live_quats, live_sensor_names):
+        if name in SENSORS:
+            full[SENSORS.index(name)] = q
+    return full
+
 _NEUTRAL_QUATS_8IMU = [
     [0.0322464008, 0.8097193166, 0.0247206551, 0.5854089914],
     [0.0185830513, 0.7995226470, 0.0312063376, 0.5995367976],
@@ -158,7 +201,7 @@ def _slot_map_for_quat_packet(n_sensors, sensor_map=None):
                 return None
             slots.append(SENSORS.index(name))
         return slots
-    return _slot_map_for_packet_imus(n_sensors)
+    return _slot_map_for_sensor_count(n_sensors)
 
 
 def _parse_quat_v2_packet(data):
@@ -178,17 +221,7 @@ def _parse_quat_v2_packet(data):
     return t0, n_sensors, quats
 
 def _slot_map_for_packet_imus(n_imus):
-    if n_imus == 1:
-        return [3]   # single MPU6050 → tibia_r_imu
-    if n_imus == 2:
-        return [2, 3]
-    if n_imus == 4:
-        return [0, 1, 2, 3]
-    if n_imus == 6:
-        return [0, 1, 2, 3, 4, 5]
-    if n_imus >= 8:
-        return list(range(N_SENSORS))
-    return None
+    return _slot_map_for_sensor_count(n_imus)
 
 
 def _expand_imu_packet_to_8_slots(raw_values, slot_map):
@@ -361,7 +394,8 @@ def _udp_ahrs_thread():
                 print(f"[PKT v2 {_pkt_n}] t={t_stream:.3f}s sensors={n_sensors} slots={slot_map}")
             with _frame_lock:
                 _frame_queue.clear()
-                _frame_queue.append((t_stream, active_quats, active_sensors, session_id, now, False, 0.0, 0.0))
+                full_quats = _merge_live_quats_with_neutral(active_quats, active_sensors)
+                _frame_queue.append((t_stream, full_quats, list(SENSORS), session_id, now, False, 0.0, 0.0))
             continue
 
         # Disambiguate packet format:
@@ -524,7 +558,8 @@ def _udp_ahrs_thread():
             print(f"[DBG t={t_stream:.2f}s] active_sensors={active_sensors} n={len(active_quats)}")
         with _frame_lock:
             _frame_queue.clear()
-            _frame_queue.append((t_stream, active_quats, active_sensors, session_id, now, active_static, active_gyro_norm, active_change))
+            full_quats = _merge_live_quats_with_neutral(active_quats, active_sensors)
+            _frame_queue.append((t_stream, full_quats, list(SENSORS), session_id, now, active_static, active_gyro_norm, active_change))
 
     sock.close()
 
@@ -674,7 +709,8 @@ def run_live():
                 skipped_by_throttle = 0
 
             t_convert0 = time.perf_counter()
-            rot_table = _quats_to_rot_table(0.0, quats, active_sensors)
+            ik_quats = quats if active_sensors == SENSORS else _merge_live_quats_with_neutral(quats, active_sensors)
+            rot_table = _quats_to_rot_table(0.0, ik_quats, SENSORS)
             convert_times.append(time.perf_counter() - t_convert0)
 
             # BufferedOrientationsReference receives the changing rows, but on
