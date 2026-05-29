@@ -14,6 +14,9 @@
 
 namespace
 {
+    const char* kRedPitayaHosts[] = { "rp-f0f85a.local", "rp-f0cd35.local" };
+    constexpr int kNumRedPitayaHosts = 2;
+
     const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
 }
 
@@ -40,141 +43,159 @@ bool AcqBoardRedPitaya::detectBoard()
     std::cout << "detectBoard called" << std::endl;
 
     deviceFound = false;
-    StreamingSocket socket;
+    activeRedPitayaHost = {};
 
-    // Use a slightly larger timeout for discovery since the RP might be scanning AXI
-    if (! socket.connect ("rp-f0f85a.local", 5000, 1000))
+    if (commandSocket != nullptr && ! commandSocket->isConnected())
+        resetCommandSocket();
+
+    for (int i = 0; i < kNumRedPitayaHosts; ++i)
     {
-        std::cout << "connect failed" << std::endl;
-        return false;
-    }
+        const String host (kRedPitayaHosts[i]);
+        resetCommandSocket();
 
-    std::cout << "connected" << std::endl;
-
-    const char* msg = "REDPITAYA\n";
-    socket.write (msg, (int) strlen (msg));
-
-    if (! socket.waitUntilReady (true, 500))
-    {
-        std::cout << "no reply" << std::endl;
-        socket.close();
-        return false;
-    }
-
-    // Increased buffer size to catch "OK CHANNELS:XX"
-    char buffer[64] = { 0 };
-    int n = socket.read (buffer, sizeof (buffer) - 1, false);
-
-    if (n > 0)
-    {
-        buffer[n] = '\0';
-        String response (buffer);
-        std::cout << "Received response: " << response << std::endl;
-
-        // Check for the "OK" flag
-        if (response.contains ("OK"))
+        if (! connectCommandSocketToHost (host))
         {
-            // Parse the channel count
-            if (response.contains ("CHANNELS:"))
-            {
-                int startIdx = response.indexOf ("CHANNELS:") + 9;
-
-                // substring(startIdx) gets everything after the colon
-                // getIntValue() stops parsing at the newline/space
-                this->numAdcChannels = response.substring (startIdx).getIntValue();
-
-                std::cout << "Detected Red Pitaya with " << numAdcChannels << " channels." << std::endl;
-                deviceFound = true;
-            }
-            else
-            {
-                // Fallback for legacy code if needed
-                this->numAdcChannels = 6;
-                deviceFound = true;
-            }
+            std::cout << "Red Pitaya: connect failed: " << host << std::endl;
+            continue;
         }
+
+        activeRedPitayaHost = host;
+
+        if (performDetectionHandshake())
+            return true;
+
+        resetCommandSocket();
+        activeRedPitayaHost = {};
     }
 
-    socket.close();
-    return deviceFound;
+    return false;
 } */
+
+void AcqBoardRedPitaya::resetCommandSocket()
+{
+    if (commandSocket != nullptr)
+    {
+        commandSocket->close();
+        delete commandSocket;
+        commandSocket = nullptr;
+    }
+}
+
+bool AcqBoardRedPitaya::connectCommandSocketToHost (const String& host)
+{
+    if (commandSocket == nullptr)
+        commandSocket = new StreamingSocket();
+
+    if (! commandSocket->connect (host, 5000, 1000))
+        return false;
+
+    std::cout << "Red Pitaya: TCP connected to " << host << ":5000" << std::endl;
+    return true;
+}
+
+bool AcqBoardRedPitaya::performDetectionHandshake()
+{
+    const char* msg = "REDPITAYA\n";
+    commandSocket->write (msg, (int) strlen (msg));
+
+    if (! commandSocket->waitUntilReady (true, 500))
+    {
+        std::cout << "Red Pitaya: no handshake reply from " << activeRedPitayaHost << std::endl;
+        return false;
+    }
+
+    char buffer[64] = { 0 };
+    const int n = commandSocket->read (buffer, sizeof (buffer) - 1, false);
+
+    if (n <= 0)
+        return false;
+
+    buffer[n] = '\0';
+    String response (buffer);
+    std::cout << "Red Pitaya: handshake response: " << response << std::endl;
+
+    if (! response.contains ("OK"))
+        return false;
+
+    if (response.contains ("CHANNELS:"))
+    {
+        const int startIdx = response.indexOf ("CHANNELS:") + 9;
+        numAdcChannels = response.substring (startIdx).getIntValue();
+    }
+    else
+        numAdcChannels = 6;
+
+    deviceFound = true;
+    std::cout << "Detected Red Pitaya at " << activeRedPitayaHost << " with "
+              << numAdcChannels << " channels." << std::endl;
+    return true;
+}
+
+bool AcqBoardRedPitaya::connectCommandSocketToBoard()
+{
+    String hostsToTry[kNumRedPitayaHosts + 1];
+    int numTry = 0;
+
+    if (activeRedPitayaHost.isNotEmpty())
+        hostsToTry[numTry++] = activeRedPitayaHost;
+
+    for (int i = 0; i < kNumRedPitayaHosts; ++i)
+    {
+        const String candidate (kRedPitayaHosts[i]);
+        if (candidate != activeRedPitayaHost)
+            hostsToTry[numTry++] = candidate;
+    }
+
+    for (int i = 0; i < numTry; ++i)
+    {
+        resetCommandSocket();
+
+        if (! connectCommandSocketToHost (hostsToTry[i]))
+        {
+            std::cout << "Red Pitaya: connect failed: " << hostsToTry[i] << std::endl;
+            continue;
+        }
+
+        activeRedPitayaHost = hostsToTry[i];
+        return true;
+    }
+
+    activeRedPitayaHost = {};
+    return false;
+}
+
 
 bool AcqBoardRedPitaya::detectBoard()
 {
     std::cout << "detectBoard called" << std::endl;
 
     deviceFound = false;
+    activeRedPitayaHost = {};
 
     if (commandSocket != nullptr && ! commandSocket->isConnected())
+        resetCommandSocket();
+
+    for (int i = 0; i < kNumRedPitayaHosts; ++i)
     {
-        delete commandSocket;
-        commandSocket = nullptr;
-    }
+        const String host (kRedPitayaHosts[i]);
+        resetCommandSocket();
 
-    if (commandSocket == nullptr)
-        commandSocket = new StreamingSocket();
-
-    if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
-    {
-        std::cout << "connect failed" << std::endl;
-        delete commandSocket;
-        commandSocket = nullptr;
-        return false;
-    }
-
-    std::cout << "connected" << std::endl;
-
-    const char* msg = "REDPITAYA\n";
-    commandSocket->write (msg, (int) strlen (msg));
-
-    if (! commandSocket->waitUntilReady (true, 500))
-    {
-        std::cout << "no reply" << std::endl;
-        commandSocket->close();
-        delete commandSocket;
-        commandSocket = nullptr;
-        return false;
-    }
-
-    // Increased buffer size to catch "OK CHANNELS:XX"
-    char buffer[64] = { 0 };
-    int n = commandSocket->read (buffer, sizeof (buffer) - 1, false);
-
-    if (n > 0)
-    {
-        buffer[n] = '\0';
-        String response (buffer);
-        std::cout << "Received response: " << response << std::endl;
-
-        // Check for the "OK" flag
-        if (response.contains ("OK"))
+        if (! connectCommandSocketToHost (host))
         {
-            // Parse the channel count
-            if (response.contains ("CHANNELS:"))
-            {
-                int startIdx = response.indexOf ("CHANNELS:") + 9;
-
-                this->numAdcChannels = response.substring (startIdx).getIntValue();
-
-                std::cout << "Detected Red Pitaya with " << numAdcChannels << " channels." << std::endl;
-                deviceFound = true;
-            }
-            else
-            {
-                // Fallback for legacy code if needed
-                this->numAdcChannels = 6;
-                deviceFound = true;
-            }
+            std::cout << "Red Pitaya: connect failed: " << host << std::endl;
+            continue;
         }
-    }
-    if (! deviceFound)
-    {
-        commandSocket->close();
-        delete commandSocket;
-        commandSocket = nullptr;
+
+        activeRedPitayaHost = host;
+
+        if (performDetectionHandshake())
+            return true;
+
+        resetCommandSocket();
+        activeRedPitayaHost = {};
     }
 
-    return deviceFound;
+    return false;
 }
 
 bool AcqBoardRedPitaya::initializeBoard()
@@ -317,12 +338,9 @@ bool AcqBoardRedPitaya::startAcquisition()
         commandSocket = nullptr;
     }
 
-    commandSocket = new StreamingSocket();
-    if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
+    if (! connectCommandSocketToBoard())
     {
         std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
-        delete commandSocket;
-        commandSocket = nullptr;
         return false;
     }
 
@@ -548,13 +566,9 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
     // 2. SELF-HEALING: Build a new connection if needed
     if (commandSocket == nullptr)
     {
-        commandSocket = new StreamingSocket();
-
-        if (! commandSocket->connect ("rp-f0f85a.local", 5000, 1000))
+        if (! connectCommandSocketToBoard())
         {
             std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
-            delete commandSocket;
-            commandSocket = nullptr;
             return;
         }
     }
