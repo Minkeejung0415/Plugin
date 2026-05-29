@@ -218,7 +218,7 @@ def _launch_opensim_gui(motion_path, run_timestamp=None):
         print(f"    File -> Load Motion... -> {motion_path}")
 
 
-def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=None):
+def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=None, quat_stream=None):
     n_imus = len(imu_accels)
     if sample_count < 2 or n_imus == 0:
         print("[ERROR] No live IMU data received.")
@@ -236,9 +236,13 @@ def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=
 
     print(f"\n[UPDATE] {n_imus} sensor(s): {', '.join(sensor_names)}  |  {sample_count} frames  |  {motion_dur_s:.1f}s")
     quats_per_sensor = []
-    for i in range(n_imus):
-        print(f"[AHRS] Running fusion on sensor {i} ({sensor_names[i]})...")
-        quats_per_sensor.append(ahrs_to_quaternions(imu_accels[i], imu_gyros[i]))
+    if quat_stream is not None and all(len(q) == sample_count for q in quat_stream):
+        print("[QUAT] Using plugin quaternion stream (UDP v2); skipping AHRS.")
+        quats_per_sensor = quat_stream
+    else:
+        for i in range(n_imus):
+            print(f"[AHRS] Running fusion on sensor {i} ({sensor_names[i]})...")
+            quats_per_sensor.append(ahrs_to_quaternions(imu_accels[i], imu_gyros[i]))
 
     samples_to_sto(timestamps, quats_per_sensor, sensor_names, sto_path)
     ensure_ephys_xml(sensor_names)
@@ -260,6 +264,24 @@ def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=
 
 _logged_pkt_sizes: set = set()  # track sizes already announced to avoid log spam
 
+
+
+def _parse_quat_v2_packet(data):
+    n_floats = len(data) // 4
+    if n_floats < 3:
+        return None
+    t0, ver, n_s = struct.unpack("<3f", data[:12])
+    if not (1.99 < ver < 2.01):
+        return None
+    n_sensors = int(round(n_s))
+    if n_sensors < 1:
+        return None
+    expected = 3 + n_sensors * 4
+    if n_floats != expected:
+        return None
+    quats = struct.unpack(f"<{n_sensors * 4}f", data[12:12 + n_sensors * 16])
+    return {"format": "quat_v2", "timestamp": t0, "n_imus": n_sensors, "quats": quats}
+
 def _recv_packet(sock):
     """Receive one UDP packet.
 
@@ -274,6 +296,14 @@ def _recv_packet(sock):
         data, _ = sock.recvfrom(4096)
     except socket.timeout:
         return None
+    quat_pkt = _parse_quat_v2_packet(data)
+    if quat_pkt is not None:
+        key = ("quat_v2", quat_pkt["n_imus"])
+        if key not in _logged_pkt_sizes:
+            _logged_pkt_sizes.add(key)
+            print(f"[UDP] Received quat v2 packet: {quat_pkt['n_imus']} sensor(s)")
+        return quat_pkt
+
     n_floats = len(data) // 4
     n_imus   = n_floats // 6
     if n_imus < 1:
@@ -315,6 +345,7 @@ def _collect_loop(sock, deadline_fn, max_samples):
     imu_accels[i] / imu_gyros[i] are lists of [x,y,z] for IMU i.
     """
     imu_accels, imu_gyros = None, None
+    quat_stream          = None
     sample_count         = 0
     announced            = False
     last_packet_time     = None
@@ -328,21 +359,35 @@ def _collect_loop(sock, deadline_fn, max_samples):
         if pkt is None:
             continue
 
-        n = pkt["n_imus"]
-        if not announced:
-            sensor_names = _sensor_names_for(n)
-            print(f"[CONNECTED] Receiving live IMU packets.")
-            print(f"[SENSORS] Detected {n} IMU sensors: {', '.join(sensor_names)}")
-            for idx, name in enumerate(sensor_names):
-                print(f"[MAP] sensor{idx} → {name}")
-            announced       = True
-            detected_n_imus = n
-            imu_accels      = [[] for _ in range(n)]
-            imu_gyros       = [[] for _ in range(n)]
+        if pkt.get("format") == "quat_v2":
+            n = pkt["n_imus"]
+            if not announced:
+                sensor_names = _sensor_names_for(n)
+                print(f"[CONNECTED] Receiving OpenSim UDP v2 quaternion packets.")
+                print(f"[SENSORS] Detected {n} sensor(s): {', '.join(sensor_names)}")
+                announced = True
+                detected_n_imus = n
+                quat_stream = [[] for _ in range(n)]
+            quats = pkt["quats"]
+            for i in range(min(n, detected_n_imus)):
+                base = i * 4
+                quat_stream[i].append(list(quats[base:base + 4]))
+        else:
+            n = pkt["n_imus"]
+            if not announced:
+                sensor_names = _sensor_names_for(n)
+                print(f"[CONNECTED] Receiving live IMU packets.")
+                print(f"[SENSORS] Detected {n} IMU sensors: {', '.join(sensor_names)}")
+                for idx, name in enumerate(sensor_names):
+                    print(f"[MAP] sensor{idx} → {name}")
+                announced       = True
+                detected_n_imus = n
+                imu_accels      = [[] for _ in range(n)]
+                imu_gyros       = [[] for _ in range(n)]
 
-        for i in range(min(n, detected_n_imus)):
-            imu_accels[i].append(pkt["accels"][i])
-            imu_gyros[i].append(pkt["gyros"][i])
+            for i in range(min(n, detected_n_imus)):
+                imu_accels[i].append(pkt["accels"][i])
+                imu_gyros[i].append(pkt["gyros"][i])
 
         sample_count    += 1
         last_packet_time = time.monotonic()
@@ -351,7 +396,7 @@ def _collect_loop(sock, deadline_fn, max_samples):
     if imu_accels is None:
         imu_accels, imu_gyros = [], []
 
-    return imu_accels, imu_gyros, sample_count
+    return imu_accels, imu_gyros, sample_count, quat_stream
 
 
 # ── UDP listener modes ─────────────────────────────────────────────────────────
@@ -364,14 +409,14 @@ def listen_udp(duration_s=3.0, max_samples=None):
     print(f"Listening on UDP {UDP_HOST}:{UDP_PORT} for {duration_s} seconds...")
 
     deadline = time.monotonic() + duration_s
-    imu_accels, imu_gyros, n = _collect_loop(
+    imu_accels, imu_gyros, n, quat_stream = _collect_loop(
         sock,
         deadline_fn=lambda _: time.monotonic() < deadline,
         max_samples=max_samples,
     )
     sock.close()
     print(f"\nCollected {n} samples.")
-    _process_and_run_ik(imu_accels, imu_gyros, n)
+    _process_and_run_ik(imu_accels, imu_gyros, n, quat_stream=quat_stream)
 
 
 def listen_udp_until_idle(idle_s=2.0):
@@ -402,7 +447,7 @@ def listen_udp_until_idle(idle_s=2.0):
             first_pkt_clock[0] = time.monotonic()
         return time.monotonic() - lpt < idle_s
 
-    imu_accels, imu_gyros, n = _collect_loop(sock, deadline_fn=not_idle, max_samples=None)
+    imu_accels, imu_gyros, n, quat_stream = _collect_loop(sock, deadline_fn=not_idle, max_samples=None)
     stream_end = time.monotonic()
     sock.close()
 
@@ -418,7 +463,7 @@ def listen_udp_until_idle(idle_s=2.0):
     if first_pkt_clock[0] is not None:
         receive_duration_s = max(0.0, stream_end - first_pkt_clock[0] - idle_s)
 
-    _process_and_run_ik(imu_accels, imu_gyros, n, receive_duration_s=receive_duration_s)
+    _process_and_run_ik(imu_accels, imu_gyros, n, receive_duration_s=receive_duration_s, quat_stream=quat_stream)
 
 
 # ── Setup XML ──────────────────────────────────────────────────────────────────

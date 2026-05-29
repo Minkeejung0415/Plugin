@@ -18,6 +18,51 @@ namespace
     constexpr int kNumRedPitayaHosts = 2;
 
     const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
+
+    int rawChannelCountForSensorName (const String& sensorName)
+    {
+        if (sensorName == "MPU6050")
+            return 6;
+
+        return 9;
+    }
+
+    int channelsPerSensorSlot (const String& sensorName)
+    {
+        return rawChannelCountForSensorName (sensorName) + 4;
+    }
+
+    int channelOffsetForSensorIndex (const Array<String>& sensorNames, int sensorIndex)
+    {
+        int offset = 0;
+
+        for (int i = 0; i < sensorIndex && i < sensorNames.size(); ++i)
+            offset += channelsPerSensorSlot (sensorNames.getReference (i));
+
+        return offset;
+    }
+
+    void quaternionFromScaledQ15 (float qwScaled, float qxScaled, float qyScaled, float qzScaled,
+                                  float& qw, float& qx, float& qy, float& qz)
+    {
+        constexpr float kQ15 = 1.0f / 32767.0f;
+        qw = qwScaled * kQ15;
+        qx = qxScaled * kQ15;
+        qy = qyScaled * kQ15;
+        qz = qzScaled * kQ15;
+
+        const float n2 = qw * qw + qx * qx + qy * qy + qz * qz;
+
+        if (n2 > 1.0e-8f)
+        {
+            const float inv = 1.0f / std::sqrt (n2);
+            qw *= inv;
+            qx *= inv;
+            qy *= inv;
+            qz *= inv;
+        }
+    }
+
 }
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
@@ -874,17 +919,19 @@ void AcqBoardRedPitaya::launchOpenSimLive()
     std::cout << "Red Pitaya: OpenSim UDP forwarding enabled -> 127.0.0.1:5000" << std::endl;
 }
 
-void AcqBoardRedPitaya::sendOpenSimImuPacket (float timestamp, const float* data, int numImus)
+void AcqBoardRedPitaya::sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors)
 {
-    if (! openSimEnabled || openSimSocket == nullptr || data == nullptr || numImus < 1)
+    if (! openSimEnabled || openSimSocket == nullptr || quats == nullptr || numSensors < 1)
         return;
 
-    const int totalFloats = 1 + numImus * 6;
+    const int totalFloats = 3 + numSensors * 4;
     juce::HeapBlock<float> pkt (totalFloats);
     pkt[0] = timestamp;
+    pkt[1] = 2.0f;
+    pkt[2] = (float) numSensors;
 
-    for (int i = 0; i < numImus * 6; ++i)
-        pkt[1 + i] = data[i];
+    for (int i = 0; i < numSensors * 4; ++i)
+        pkt[3 + i] = quats[i];
 
     openSimSocket->write ("127.0.0.1", 5000, pkt, totalFloats * (int) sizeof (float));
 
@@ -893,11 +940,10 @@ void AcqBoardRedPitaya::sendOpenSimImuPacket (float timestamp, const float* data
 
     if (openSimUdpSendCount == 1 || (openSimUdpSendCount % 1000) == 0)
     {
-        const float imu2Gy = (numImus >= 3) ? data[2 * 6 + 4] : std::numeric_limits<float>::quiet_NaN();
-        std::cout << "OpenSim UDP sent #" << openSimUdpSendCount
+        std::cout << "OpenSim UDP v2 sent #" << openSimUdpSendCount
                   << " t=" << timestamp
-                  << " n_imus=" << numImus
-                  << " gy[2]=" << imu2Gy << std::endl;
+                  << " n_sensors=" << numSensors
+                  << " qw[0]=" << quats[0] << std::endl;
     }
 }
 
@@ -1019,24 +1065,48 @@ void AcqBoardRedPitaya::run()
                 samples[(adc * samplesPerBuffer) + sampleIndex] = raw * channelScale[adc];
             }
 
+            if (openSimEnabled)
             {
-                const int numImusLocal = numAdcChannelsLocal / 6;
+                const int numSensors = streamSensorNames.size();
 
-                if (numImusLocal >= 1)
+                if (numSensors >= 1)
                 {
-                    const int nCh = numImusLocal * 6;
-                    float imuPkt[MAX_CHANNELS];
+                    float quatPkt[MAX_CHANNELS];
+                    int   nQuat = 0;
 
-                    for (int ch = 0; ch < nCh; ++ch)
-                        imuPkt[ch] = samples[ch * samplesPerBuffer + sampleIndex];
+                    for (int si = 0; si < numSensors && si < 6; ++si)
+                    {
+                        const String& sname = streamSensorNames.getReference (si);
+                        const int     off     = channelOffsetForSensorIndex (streamSensorNames, si);
+                        const int     numRaw  = rawChannelCountForSensorName (sname);
+                        const int     q0      = off + numRaw;
+
+                        const auto qSample = [&](int qIdx) -> float {
+                            const int ch = q0 + qIdx;
+
+                            if (ch >= numAdcChannelsLocal)
+                                return 0.0f;
+
+                            return samples[(ch * samplesPerBuffer) + sampleIndex];
+                        };
+
+                        float qw, qx, qy, qz;
+                        quaternionFromScaledQ15 (qSample (0), qSample (1), qSample (2), qSample (3),
+                                                 qw, qx, qy, qz);
+
+                        quatPkt[nQuat++] = qw;
+                        quatPkt[nQuat++] = qx;
+                        quatPkt[nQuat++] = qy;
+                        quatPkt[nQuat++] = qz;
+                    }
 
                     if (sampleNumber == 0)
                     {
-                        std::cout << "Red Pitaya: real " << numImusLocal << "-IMU packet with "
-                                  << nCh << " floats — IMU0 ax=" << imuPkt[0] << std::endl;
+                        std::cout << "Red Pitaya: OpenSim UDP v2, " << numSensors
+                                  << " sensor(s), qw0=" << quatPkt[0] << std::endl;
                     }
 
-                    sendOpenSimImuPacket ((float) elapsedSeconds, imuPkt, numImusLocal);
+                    sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, numSensors);
                 }
             }
 
