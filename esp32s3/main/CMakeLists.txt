@@ -1,0 +1,30 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "imu_icm20948.c"
+        "camera_ar0234.c"
+        "espnow_sync.c"
+        "sdcard_log.c"
+        "network_stream.c"
+        "sensor_fusion_port.c"
+        "action_verify.c"
+        "dio.c"
+    INCLUDE_DIRS
+        "include"
+        "${CMAKE_SOURCE_DIR}/components/vqf"
+    REQUIRES
+        esp_wifi
+        esp_now
+        esp_netif
+        lwip
+        driver
+        spi_flash
+        nvs_flash
+        fatfs
+        sdmmc
+        esp_timer
+        esp_camera
+        freertos
+        log
+        heap
+)
