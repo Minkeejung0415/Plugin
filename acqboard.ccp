@@ -81,6 +81,82 @@ namespace
         }
     }
 
+    /** Madgwick 6-DOF (gyro + accel) AHRS update, in place on q = {qw,qx,qy,qz}.
+     *
+     *  The ESP32-S3 node streams only raw accelerometer and gyroscope (its firmware
+     *  does not read the ICM20948 magnetometer), so we fuse orientation here to feed
+     *  OpenSim, which needs quaternions. This is self-contained on purpose: it adds no
+     *  new compile unit to the plugin build. Without a magnetometer the heading (yaw)
+     *  is unobservable and will slowly drift — that is inherent to 6-DOF fusion.
+     *
+     *  @param gx,gy,gz  angular rate in rad/s
+     *  @param ax,ay,az  acceleration (any consistent unit; normalized internally)
+     *  @param dt        sample period in seconds
+     *  @param beta      filter gain (accel correction strength; ~0.1 is a good default)
+     */
+    void madgwickUpdate6DOF (float q[4],
+                             float gx, float gy, float gz,
+                             float ax, float ay, float az,
+                             float dt, float beta)
+    {
+        float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+
+        // Rate of change of quaternion from the gyroscope.
+        float qDot0 = 0.5f * (-qx * gx - qy * gy - qz * gz);
+        float qDot1 = 0.5f * (qw * gx + qy * gz - qz * gy);
+        float qDot2 = 0.5f * (qw * gy - qx * gz + qz * gx);
+        float qDot3 = 0.5f * (qw * gz + qx * gy - qy * gx);
+
+        const float aNorm = std::sqrt (ax * ax + ay * ay + az * az);
+
+        if (aNorm > 1.0e-9f)
+        {
+            ax /= aNorm;
+            ay /= aNorm;
+            az /= aNorm;
+
+            // Gradient descent corrective step (objective + Jacobian for gravity).
+            const float f1 = 2.0f * (qx * qz - qw * qy) - ax;
+            const float f2 = 2.0f * (qw * qx + qy * qz) - ay;
+            const float f3 = 2.0f * (0.5f - qx * qx - qy * qy) - az;
+
+            float s0 = -2.0f * qy * f1 + 2.0f * qx * f2;
+            float s1 = 2.0f * qz * f1 + 2.0f * qw * f2 - 4.0f * qx * f3;
+            float s2 = -2.0f * qw * f1 + 2.0f * qz * f2 - 4.0f * qy * f3;
+            float s3 = 2.0f * qx * f1 + 2.0f * qy * f2;
+
+            const float sNorm = std::sqrt (s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
+
+            if (sNorm > 1.0e-9f)
+            {
+                s0 /= sNorm;
+                s1 /= sNorm;
+                s2 /= sNorm;
+                s3 /= sNorm;
+
+                qDot0 -= beta * s0;
+                qDot1 -= beta * s1;
+                qDot2 -= beta * s2;
+                qDot3 -= beta * s3;
+            }
+        }
+
+        qw += qDot0 * dt;
+        qx += qDot1 * dt;
+        qy += qDot2 * dt;
+        qz += qDot3 * dt;
+
+        const float qNorm = std::sqrt (qw * qw + qx * qx + qy * qy + qz * qz);
+
+        if (qNorm > 1.0e-9f)
+        {
+            q[0] = qw / qNorm;
+            q[1] = qx / qNorm;
+            q[2] = qy / qNorm;
+            q[3] = qz / qNorm;
+        }
+    }
+
 }
 
 AcqBoardRedPitaya::AcqBoardRedPitaya()
@@ -1152,6 +1228,13 @@ void AcqBoardRedPitaya::run()
         const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
         Array<uint8> tcpRx;
 
+        // 6-DOF orientation fusion for OpenSim. The ESP32 sends raw acc/gyr only, so we
+        // fuse a quaternion here and forward it on the OpenSim UDP path (when enabled).
+        float fusionQuat[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+        constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+        constexpr float kMadgwickBeta = 0.1f;
+        const float fusionDt = 1.0f / jmax (1.0f, settings.boardSampleRate);
+
         while (! threadShouldExit())
         {
             DataBuffer* currentBuffer = buffer;
@@ -1214,6 +1297,22 @@ void AcqBoardRedPitaya::run()
                     }
 
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
+                }
+
+                // Fuse acc (ch0-2, in g) + gyro (ch3-5, in deg/s) into an orientation
+                // quaternion and forward it to OpenSim. Gyro must be rad/s; acc unit is
+                // irrelevant (the filter normalizes it). Only runs when OpenSim is active.
+                if (openSimEnabled)
+                {
+                    const float ax = samples[(0 * samplesPerBuffer) + sampleIndex];
+                    const float ay = samples[(1 * samplesPerBuffer) + sampleIndex];
+                    const float az = samples[(2 * samplesPerBuffer) + sampleIndex];
+                    const float gx = samples[(3 * samplesPerBuffer) + sampleIndex] * kDegToRad;
+                    const float gy = samples[(4 * samplesPerBuffer) + sampleIndex] * kDegToRad;
+                    const float gz = samples[(5 * samplesPerBuffer) + sampleIndex] * kDegToRad;
+
+                    madgwickUpdate6DOF (fusionQuat, gx, gy, gz, ax, ay, az, fusionDt, kMadgwickBeta);
+                    sendOpenSimQuaternionPacket ((float) elapsedSeconds, fusionQuat, 1);
                 }
 
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
