@@ -177,7 +177,25 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
     String response (buffer);
     std::cout << "Red Pitaya: handshake response: " << response << std::endl;
 
-    // Red Pitaya firmware: "OK CHANNELS:N"
+    // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino".
+    // Check this BEFORE the generic Red Pitaya "OK" branch: the ESP32 firmware and
+    // the USB bridge both follow the esp32 marker line with "OK CHANNELS:8", and over
+    // a localhost/TCP connection the two writes usually coalesce into a single read.
+    // If we tested for "OK" first, that "OK CHANNELS:8" would misclassify the ESP32 as
+    // a Red Pitaya, sending run() down the UDP:55001 path while the board streams
+    // binary over TCP — i.e. a successful "detect" that never produces any samples.
+    if (isEsp32HandshakeResponse (response))
+    {
+        isEsp32Node = true;
+        numAdcChannels = AcqBoardRedPitaya::ESP32_FIXED_CHANNELS;
+        settings.boardSampleRate = 100.0f;
+        deviceFound = true;
+        std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
+                  << numAdcChannels << " channels @ 100 Hz (TCP stream)." << std::endl;
+        return true;
+    }
+
+    // Red Pitaya firmware: "OK CHANNELS:N" (no esp32 markers)
     if (response.contains ("OK"))
     {
         isEsp32Node = false;
@@ -193,18 +211,6 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         deviceFound = true;
         std::cout << "Detected Red Pitaya at " << activeRedPitayaHost << " with "
                   << numAdcChannels << " channels." << std::endl;
-        return true;
-    }
-
-    // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino"
-    if (isEsp32HandshakeResponse (response))
-    {
-        isEsp32Node = true;
-        numAdcChannels = AcqBoardRedPitaya::ESP32_FIXED_CHANNELS;
-        settings.boardSampleRate = 100.0f;
-        deviceFound = true;
-        std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
-                  << numAdcChannels << " channels @ 100 Hz (TCP stream)." << std::endl;
         return true;
     }
 
@@ -288,10 +294,13 @@ bool AcqBoardRedPitaya::detectBoard()
         activeRedPitayaHost = {};
     }
 
-    // ESP32-S3: configurable host or ESP32_NODE_HOST env (after Red Pitaya rp-*.local)
-    const String esp32Candidates[2] = { configurableNodeHost.trim(), envEsp32NodeHost() };
+    // ESP32-S3: configurable host, ESP32_NODE_HOST env, then localhost (after rp-*.local).
+    // 127.0.0.1 is the USB serial->TCP bridge (serial_tcp_bridge.py / run_usb_plugin_bridge.ps1),
+    // so the bridge is found without manually setting a Node IP. Detection still requires a
+    // valid handshake reply, so an unrelated localhost:5000 service won't be mistaken for a board.
+    const String esp32Candidates[3] = { configurableNodeHost.trim(), envEsp32NodeHost(), "127.0.0.1" };
 
-    for (int h = 0; h < 2; ++h)
+    for (int h = 0; h < 3; ++h)
     {
         const String host = esp32Candidates[h];
 
@@ -473,18 +482,69 @@ bool AcqBoardRedPitaya::startAcquisition()
         return false;
     }
 
-    // ESP32-S3: fixed 100 Hz / 8 ch; no FREQ, STARTED, or SENSORS lines (see esp32_tcp_client.py).
+    // ESP32-S3: fixed 100 Hz / 8 ch on the same TCP socket as the commands.
     if (isEsp32Node)
     {
         const char* startMsg = "START\n";
         commandSocket->write (startMsg, (int) strlen (startMsg));
 
-        streamSensorNames.clear();
-        streamSensorNames.add ("ICM20948");
         numAdcChannels = ESP32_FIXED_CHANNELS;
         settings.boardSampleRate = 100.0f;
         lastRecordingPath = {};
         lastRecordingCsvPath = {};
+
+        // Both the Wi-Fi firmware (handleLine) and the USB bridge (--plugin) answer START
+        // with two ASCII lines — "STARTED ..." then "SENSORS:..." — before any binary frame.
+        // Drain them here so run()'s frame parser is byte-aligned from the first header;
+        // otherwise it has to resync one byte at a time and the first samples are lost.
+        streamSensorNames.clear();
+
+        for (int lineIdx = 0; lineIdx < 2; ++lineIdx)
+        {
+            if (! commandSocket->waitUntilReady (true, 1000))
+                break;
+
+            char first = 0;
+            if (commandSocket->read (&first, 1, false) <= 0)
+                break;
+
+            // A printable byte starts an ASCII reply line; a control/binary byte means
+            // the binary stream has already begun (no more lines to drain).
+            if ((unsigned char) first < 0x20 || (unsigned char) first > 0x7E)
+                break;
+
+            String line;
+            line += first;
+
+            while (commandSocket->waitUntilReady (true, 1000))
+            {
+                char c = 0;
+                if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+                    break;
+                line += c;
+            }
+
+            if (line.startsWith ("SENSORS:"))
+            {
+                const String body = line.fromFirstOccurrenceOf ("SENSORS:", false, false).trim();
+                StringArray segments;
+                segments.addTokens (body, ";", "");
+
+                for (int si = 0; si < segments.size(); ++si)
+                {
+                    const String seg = segments[si].trim();
+                    const int comma = seg.indexOfChar (',');
+
+                    if (comma > 0)
+                        streamSensorNames.add (seg.substring (comma + 1).trim());
+                    else if (seg.isNotEmpty())
+                        streamSensorNames.add (seg);
+                }
+            }
+        }
+
+        if (streamSensorNames.isEmpty())
+            streamSensorNames.add ("ICM20948");
 
         std::cout << "ESP32-S3: Streaming started (TCP binary, "
                   << numAdcChannels << " ch @ 100 Hz)." << std::endl;
