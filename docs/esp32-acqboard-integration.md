@@ -119,11 +119,25 @@ the ESP32 path sent only `START` on it. The bridge (`--plugin` mode) requires a
 it, the bridge logged `expected REDPITAYA, got START` and closed the socket, so
 the reader thread read nothing.
 
-**Fix:** re-handshake on the acquisition socket — send `REDPITAYA\nSTART\n`,
-then drain all ASCII reply lines up to and including the terminal `SENSORS:`
-line so the binary parser is byte-aligned from the first frame header. The
-Wi-Fi firmware also accepts `REDPITAYA` harmlessly, so this is safe for both
-transports.
+**Fix:** re-handshake on the acquisition socket — send `REDPITAYA`, read the
+handshake reply, **then** send `START`, then drain the `STARTED`/`SENSORS` reply
+up to and including the terminal `SENSORS:` line so the binary parser is
+byte-aligned from the first frame header. The Wi-Fi firmware also accepts
+`REDPITAYA` harmlessly, so this is safe for both transports.
+
+### Fix 5 — `REDPITAYA`+`START` swallowed by the bridge peek (commit pending)
+**Symptom:** still no data after Fix 2 — acquisition starts, nothing streams.
+
+**Root cause:** Fix 2 first sent `REDPITAYA\nSTART\n` in a **single** write. On
+connect the bridge does `reader.read(256)` to peek; on localhost both lines land
+in that one peek, so the bridge consumes `REDPITAYA` **and** `START` together,
+replies to `REDPITAYA`, then blocks in `read_line()` waiting for a `START` it has
+already swallowed → 120 s deadlock → no frames.
+
+**Fix:** send `REDPITAYA` and `START` as **separate** writes, reading the
+handshake reply in between (via a `readReplyLine` lambda). This forces `START`
+into its own `read()` on the bridge after the peek. Fixes the bridge's latent
+peek-coalescing bug from the plugin side without editing the bridge.
 
 ### Fix 3 — `127.0.0.1` detection fallback (commit `fbdd4ab`)
 **Symptom:** the USB bridge runs on `127.0.0.1:5000`, which was never tried
