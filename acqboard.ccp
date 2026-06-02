@@ -485,23 +485,28 @@ bool AcqBoardRedPitaya::startAcquisition()
     // ESP32-S3: fixed 100 Hz / 8 ch on the same TCP socket as the commands.
     if (isEsp32Node)
     {
-        const char* startMsg = "START\n";
-        commandSocket->write (startMsg, (int) strlen (startMsg));
-
         numAdcChannels = ESP32_FIXED_CHANNELS;
         settings.boardSampleRate = 100.0f;
         lastRecordingPath = {};
         lastRecordingCsvPath = {};
 
-        // Both the Wi-Fi firmware (handleLine) and the USB bridge (--plugin) answer START
-        // with two ASCII lines — "STARTED ..." then "SENSORS:..." — before any binary frame.
-        // Drain them here so run()'s frame parser is byte-aligned from the first header;
-        // otherwise it has to resync one byte at a time and the first samples are lost.
+        // This is a fresh TCP session (we always reconnect above), so re-do the
+        // handshake before START: the USB serial->TCP bridge (--plugin) requires a
+        // REDPITAYA line on every new connection or it rejects START and closes the
+        // socket — which looks like "acquisition starts but no data ever arrives".
+        // The Wi-Fi firmware also answers REDPITAYA harmlessly, so this is safe for both.
+        const char* handshake = "REDPITAYA\nSTART\n";
+        commandSocket->write (handshake, (int) strlen (handshake));
+
+        // Drain every ASCII reply line (handshake markers, "OK CHANNELS:8", "STARTED ...",
+        // "SENSORS:...") up to and including the terminal SENSORS line; the binary frames
+        // begin immediately after it. Stopping on SENSORS keeps run()'s frame parser
+        // byte-aligned from the first header instead of resyncing and dropping samples.
         streamSensorNames.clear();
 
-        for (int lineIdx = 0; lineIdx < 2; ++lineIdx)
+        for (int guard = 0; guard < 8; ++guard)
         {
-            if (! commandSocket->waitUntilReady (true, 1000))
+            if (! commandSocket->waitUntilReady (true, 2000))
                 break;
 
             char first = 0;
@@ -509,7 +514,8 @@ bool AcqBoardRedPitaya::startAcquisition()
                 break;
 
             // A printable byte starts an ASCII reply line; a control/binary byte means
-            // the binary stream has already begun (no more lines to drain).
+            // the binary stream has already begun (SENSORS was not sent) — stop here and
+            // let run()'s parser resync rather than consuming frame bytes as text.
             if ((unsigned char) first < 0x20 || (unsigned char) first > 0x7E)
                 break;
 
@@ -540,6 +546,8 @@ bool AcqBoardRedPitaya::startAcquisition()
                     else if (seg.isNotEmpty())
                         streamSensorNames.add (seg);
                 }
+
+                break; // SENSORS is the last line before binary frames
             }
         }
 
