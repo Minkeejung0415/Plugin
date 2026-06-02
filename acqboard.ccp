@@ -9,6 +9,7 @@
 #include "Acqboardredpitaya.h"
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -18,6 +19,21 @@ namespace
     constexpr int kNumRedPitayaHosts = 2;
 
     const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
+
+    String envEsp32NodeHost()
+    {
+        if (const char* val = std::getenv ("ESP32_NODE_HOST"))
+            return String (val).trim();
+
+        return {};
+    }
+
+    bool isEsp32HandshakeResponse (const String& response)
+    {
+        return response.containsIgnoreCase ("esp32s3")
+               || response.containsIgnoreCase ("node=esp32")
+               || (response.contains ("8 channels") && response.contains ("sample_rate"));
+    }
 
     int rawChannelCountForSensorName (const String& sensorName)
     {
@@ -159,35 +175,61 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
     String response (buffer);
     std::cout << "Red Pitaya: handshake response: " << response << std::endl;
 
-    if (! response.contains ("OK"))
-        return false;
-
-    if (response.contains ("CHANNELS:"))
+    // Red Pitaya firmware: "OK CHANNELS:N"
+    if (response.contains ("OK"))
     {
-        const int startIdx = response.indexOf ("CHANNELS:") + 9;
-        numAdcChannels = response.substring (startIdx).getIntValue();
-    }
-    else
-        numAdcChannels = 6;
+        isEsp32Node = false;
 
-    deviceFound = true;
-    std::cout << "Detected Red Pitaya at " << activeRedPitayaHost << " with "
-              << numAdcChannels << " channels." << std::endl;
-    return true;
+        if (response.contains ("CHANNELS:"))
+        {
+            const int startIdx = response.indexOf ("CHANNELS:") + 9;
+            numAdcChannels = response.substring (startIdx).getIntValue();
+        }
+        else
+            numAdcChannels = 6;
+
+        deviceFound = true;
+        std::cout << "Detected Red Pitaya at " << activeRedPitayaHost << " with "
+                  << numAdcChannels << " channels." << std::endl;
+        return true;
+    }
+
+    // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino"
+    if (isEsp32HandshakeResponse (response))
+    {
+        isEsp32Node = true;
+        numAdcChannels = AcqBoardRedPitaya::ESP32_FIXED_CHANNELS;
+        settings.boardSampleRate = 100.0f;
+        deviceFound = true;
+        std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
+                  << numAdcChannels << " channels @ 100 Hz (TCP stream)." << std::endl;
+        return true;
+    }
+
+    return false;
 }
 
 bool AcqBoardRedPitaya::connectCommandSocketToBoard()
 {
-    String hostsToTry[kNumRedPitayaHosts + 1];
+    String hostsToTry[kNumRedPitayaHosts + 2];
     int numTry = 0;
 
     if (activeRedPitayaHost.isNotEmpty())
         hostsToTry[numTry++] = activeRedPitayaHost;
 
+    const String envHost = envEsp32NodeHost();
+    const String cfgHost = configurableNodeHost.trim();
+
+    if (cfgHost.isNotEmpty() && cfgHost != activeRedPitayaHost)
+        hostsToTry[numTry++] = cfgHost;
+
+    if (envHost.isNotEmpty() && envHost != activeRedPitayaHost && envHost != cfgHost)
+        hostsToTry[numTry++] = envHost;
+
     for (int i = 0; i < kNumRedPitayaHosts; ++i)
     {
         const String candidate (kRedPitayaHosts[i]);
-        if (candidate != activeRedPitayaHost)
+        if (candidate != activeRedPitayaHost && candidate != cfgHost && candidate != envHost)
             hostsToTry[numTry++] = candidate;
     }
 
@@ -240,7 +282,43 @@ bool AcqBoardRedPitaya::detectBoard()
         activeRedPitayaHost = {};
     }
 
+    // ESP32-S3: configurable host or ESP32_NODE_HOST env (after Red Pitaya rp-*.local)
+    const String esp32Candidates[2] = { configurableNodeHost.trim(), envEsp32NodeHost() };
+
+    for (int h = 0; h < 2; ++h)
+    {
+        const String host = esp32Candidates[h];
+
+        if (host.isEmpty())
+            continue;
+
+        resetCommandSocket();
+
+        if (! connectCommandSocketToHost (host))
+        {
+            std::cout << "ESP32 node: connect failed: " << host << std::endl;
+            continue;
+        }
+
+        activeRedPitayaHost = host;
+
+        if (performDetectionHandshake())
+            return true;
+
+        resetCommandSocket();
+        activeRedPitayaHost = {};
+    }
+
     return false;
+}
+
+bool AcqBoardRedPitaya::retryDetection()
+{
+    deviceFound = false;
+    isEsp32Node = false;
+    activeRedPitayaHost = {};
+    resetCommandSocket();
+    return detectBoard();
 }
 
 bool AcqBoardRedPitaya::initializeBoard()
@@ -387,6 +465,26 @@ bool AcqBoardRedPitaya::startAcquisition()
     {
         std::cout << "Red Pitaya ERROR: Could not connect to board." << std::endl;
         return false;
+    }
+
+    // ESP32-S3: fixed 100 Hz / 8 ch; no FREQ, STARTED, or SENSORS lines (see esp32_tcp_client.py).
+    if (isEsp32Node)
+    {
+        const char* startMsg = "START\n";
+        commandSocket->write (startMsg, (int) strlen (startMsg));
+
+        streamSensorNames.clear();
+        streamSensorNames.add ("ICM20948");
+        numAdcChannels = ESP32_FIXED_CHANNELS;
+        settings.boardSampleRate = 100.0f;
+        lastRecordingPath = {};
+        lastRecordingCsvPath = {};
+
+        std::cout << "ESP32-S3: Streaming started (TCP binary, "
+                  << numAdcChannels << " ch @ 100 Hz)." << std::endl;
+
+        startThread();
+        return true;
     }
 
     {
@@ -596,6 +694,13 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
 {
     if (! deviceFound)
         return;
+
+    // ESP32 STEP node: sample rate fixed at 100 Hz in firmware.
+    if (isEsp32Node)
+    {
+        settings.boardSampleRate = 100.0f;
+        return;
+    }
 
     int targetHz = jlimit (1, 2000, newFreq);
     settings.boardSampleRate = static_cast<float> (targetHz);
@@ -965,6 +1070,103 @@ void AcqBoardRedPitaya::run()
     if (numAdcChannelsLocal <= 0 || numAdcChannelsLocal > MAX_CHANNELS || samplesPerBuffer <= 0)
         return;
 
+    // ESP32-S3: binary samples on the same TCP socket after START (not UDP 55001).
+    if (isEsp32Node)
+    {
+        constexpr int headerSize = 22;
+        const float accScale = 1.0f / kAccSensitivity[jlimit (0, 3, sensorAccPreset[0])];
+        const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
+        Array<uint8> tcpRx;
+
+        while (! threadShouldExit())
+        {
+            DataBuffer* currentBuffer = buffer;
+
+            if (currentBuffer == nullptr)
+            {
+                Thread::sleep (1);
+                continue;
+            }
+
+            if (commandSocket->waitUntilReady (true, 100))
+            {
+                char chunk[4096];
+                const int nRead = commandSocket->read (chunk, (int) sizeof (chunk), false);
+
+                if (nRead > 0)
+                    tcpRx.insertArray (tcpRx.size(), (const uint8*) chunk, nRead);
+            }
+
+            while (tcpRx.size() >= (size_t) headerSize && ! threadShouldExit())
+            {
+                int32_t numBytes = 0;
+                int32_t elemType = 0;
+                std::memcpy (&numBytes, tcpRx.getRawDataPointer() + 4, 4);
+                std::memcpy (&elemType, tcpRx.getRawDataPointer() + 10, 4);
+
+                if (elemType != 2 || numBytes < 2 || numBytes > 65507 - headerSize
+                    || (numBytes & 1) != 0)
+                {
+                    tcpRx.removeRange (0, 1);
+                    continue;
+                }
+
+                const int totalFrame = headerSize + (int) numBytes;
+
+                if (tcpRx.size() < (size_t) totalFrame)
+                    break;
+
+                const int16_t* channels = reinterpret_cast<const int16_t*> (
+                    tcpRx.getRawDataPointer() + headerSize);
+                const int channelsInPacket = (int) numBytes / 2;
+                const int sampleIndex = (int) (sampleNumber % samplesPerBuffer);
+
+                for (int adc = 0; adc < numAdcChannelsLocal; ++adc)
+                {
+                    float raw = 0.0f;
+
+                    if (adc < channelsInPacket)
+                    {
+                        if (adc <= 2)
+                            raw = float (channels[adc]) * accScale;
+                        else if (adc <= 5)
+                            raw = float (channels[adc]) * gyrScale;
+                        else if (adc == 6)
+                            raw = float (channels[adc] & 1); // DIO level bit0
+                        else
+                            raw = 0.0f; // ch7 reserved
+                    }
+
+                    samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
+                }
+
+                const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
+                sampleNumbers[sampleIndex] = sampleNumber;
+                timestamps[sampleIndex]    = elapsedSeconds;
+                event_codes[sampleIndex]   = eventCode;
+
+                ++sampleNumber;
+                elapsedSeconds += 1.0 / currentSampleRate;
+
+                if (sampleIndex == (int) samplesPerBuffer - 1)
+                {
+                    currentBuffer = buffer;
+                    if (currentBuffer != nullptr && ! threadShouldExit())
+                        currentBuffer->addToBuffer (samples,
+                                                    sampleNumbers,
+                                                    timestamps,
+                                                    event_codes,
+                                                    (int) samplesPerBuffer);
+                }
+
+                tcpRx.removeRange (0, totalFrame);
+            }
+        }
+
+        return;
+    }
+
+    // Red Pitaya: dedicated UDP socket on port 55001 (unchanged).
     // Open a dedicated UDP socket for the data stream.
     // The TCP commandSocket remains open exclusively for control commands
     // (STOP signalled by TCP close in stopAcquisition()).

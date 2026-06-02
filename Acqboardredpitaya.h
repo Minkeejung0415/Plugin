@@ -235,10 +235,26 @@ public:
     /** Host that answered the last successful REDPITAYA handshake (e.g. rp-f0f85a.local). */
     String activeRedPitayaHost;
 
+    /** Optional ESP32-S3 node host (editor or ESP32_NODE_HOST env). Tried after rp-*.local. */
+    String configurableNodeHost;
+
+    /** True when handshake matched ESP32 STEP firmware (TCP stream, fixed 8 ch @ 100 Hz). */
+    bool isEsp32Node = false;
+
+    void setNodeHost (const String& host) { configurableNodeHost = host.trim(); }
+
+    String getNodeHost() const { return configurableNodeHost; }
+
+    bool getIsEsp32Node() const { return isEsp32Node; }
+
+    static constexpr int ESP32_FIXED_CHANNELS = 8;
+
     void resetCommandSocket();
     bool connectCommandSocketToHost (const String& host);
     bool connectCommandSocketToBoard();
     bool performDetectionHandshake();
+
+    bool retryDetection();
 
     String lastRecordingPath;
     String lastRecordingCsvPath;

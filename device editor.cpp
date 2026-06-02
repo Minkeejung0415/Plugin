@@ -27,6 +27,8 @@
 #include "devices/redpitaya/AcqBoardRedPitaya.h"
 #include "devices/oni/AcqBoardONI.h"
 
+#include <cstdlib>
+
 #include "UI/ChannelCanvas.h"
 
 #include <cmath>
@@ -124,6 +126,34 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     sampleRateLabel->setTooltip (isRedPitaya ? "Hardware tick rate 1–2000 Hz (per-sensor SRATE decimates from this)"
                                              : "Set streaming frequency (100 - 2000 Hz)");
     addAndMakeVisible (sampleRateLabel.get());
+
+    if (isRedPitaya)
+    {
+        nodeHostTitle = std::make_unique<Label> ("nodeHostTitle", "Node IP");
+        nodeHostTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+        nodeHostTitle->setBounds (col1, 68, 110, 12);
+        addAndMakeVisible (nodeHostTitle.get());
+
+        nodeHostLabel = std::make_unique<Label> ("nodeHostLabel", "");
+        nodeHostLabel->setEditable (true);
+        nodeHostLabel->setColour (Label::backgroundColourId, Colours::black);
+        nodeHostLabel->setColour (Label::textColourId, Colours::white);
+        nodeHostLabel->setBounds (col1, 82, 118, 20);
+        nodeHostLabel->addListener (this);
+        nodeHostLabel->setTooltip ("ESP32-S3 IP or hostname (or set ESP32_NODE_HOST env). Red Pitaya uses rp-*.local.");
+        addAndMakeVisible (nodeHostLabel.get());
+
+        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+        {
+            const String envHost = String (std::getenv ("ESP32_NODE_HOST") != nullptr
+                                               ? std::getenv ("ESP32_NODE_HOST")
+                                               : "");
+            const String initial = rp->getNodeHost().isNotEmpty() ? rp->getNodeHost() : envHost.trim();
+            nodeHostLabel->setText (initial, dontSendNotification);
+            if (initial.isNotEmpty())
+                rp->setNodeHost (initial);
+        }
+    }
 
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
@@ -991,6 +1021,30 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
         if (board != nullptr)
             board->setAnalogOutVoltage (newVoltage);
     }
+    else if (labelThatHasChanged == nodeHostLabel.get())
+    {
+        if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+            return;
+
+        auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+        const String host = nodeHostLabel->getText().trim();
+        rp->setNodeHost (host);
+
+        if (! acquisitionIsActive && host.isNotEmpty())
+        {
+            if (rp->retryDetection())
+            {
+                CoreServices::sendStatusMessage ("Node detected at " + host
+                                                 + (rp->getIsEsp32Node() ? " (ESP32-S3)" : " (Red Pitaya)"));
+                if (! acquisitionIsActive)
+                    CoreServices::updateSignalChain (this);
+            }
+            else
+            {
+                CoreServices::sendStatusMessage ("Could not handshake with " + host);
+            }
+        }
+    }
 }
 
 void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
@@ -1076,6 +1130,9 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
     xml->setAttribute ("FilterEnabled", filterButton->getToggleState());
     xml->setAttribute ("AnalogInGain", analogInLabel->getText().getFloatValue());
     xml->setAttribute ("AnalogOutVoltage", analogOutLabel->getText().getFloatValue());
+
+    if (nodeHostLabel != nullptr)
+        xml->setAttribute ("NodeHost", nodeHostLabel->getText().trim());
 }
 
 void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
@@ -1161,6 +1218,15 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
     float aoutVoltage = jlimit (0.0f, 1.8f, (float) xml->getDoubleAttribute ("AnalogOutVoltage", 0.0));
     analogOutLabel->setText (String (aoutVoltage, 2), dontSendNotification);
     board->setAnalogOutVoltage (aoutVoltage);
+
+    if (nodeHostLabel != nullptr)
+    {
+        const String nodeHost = xml->getStringAttribute ("NodeHost", "");
+        nodeHostLabel->setText (nodeHost, dontSendNotification);
+
+        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+            rp->setNodeHost (nodeHost);
+    }
 
     // load channel naming scheme
     board->setNamingScheme ((ChannelNamingScheme) xml->getIntAttribute ("Channel_Naming_Scheme", 0));

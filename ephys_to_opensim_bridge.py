@@ -76,6 +76,10 @@ SENSOR_NAMES = {
     8: list(SENSOR_CHAIN_UP),
 }
 
+# ESP32-S3 STEP node: single ICM20948, no on-board quaternion tail (set OPENSIM_ESP32_8CH=1).
+if os.environ.get("OPENSIM_ESP32_8CH", "").strip().lower() in ("1", "true", "yes"):
+    SENSOR_NAMES[1] = ["torso_imu"]
+
 def _sensor_names_for(n_imus):
     """Return the list of OpenSim frame names for n_imus sensors (distal → proximal)."""
     n = int(n_imus)

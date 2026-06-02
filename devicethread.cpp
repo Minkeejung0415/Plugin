@@ -240,12 +240,27 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
             && acquisitionBoard->areAdcChannelsEnabled())
         {
             const int numadcchannels = acquisitionBoard->getNumDataOutputs (ContinuousChannel::ADC);
+            auto* rpBoard = dynamic_cast<AcqBoardRedPitaya*> (acquisitionBoard.get());
+            const bool esp32Layout = (rpBoard != nullptr && rpBoard->getIsEsp32Node());
+
             for (int ch = 0; ch < numadcchannels; ch++)
             {
-                const int analogStartChannel = jmax (0, numadcchannels - AcqBoardRedPitaya::ANALOG_WAVEFORM_CHANNELS);
-                String name = ch >= analogStartChannel
-                                  ? "AnalogInput" + String (ch - analogStartChannel + 1)
-                                  : "Channel" + String (ch + 1);
+                String name;
+
+                if (esp32Layout)
+                {
+                    static const char* esp32Names[] = {
+                        "AccX", "AccY", "AccZ", "GyrX", "GyrY", "GyrZ", "DIO", "Reserved"
+                    };
+                    name = esp32Names[jmin (ch, 7)];
+                }
+                else
+                {
+                    const int analogStartChannel = jmax (0, numadcchannels - AcqBoardRedPitaya::ANALOG_WAVEFORM_CHANNELS);
+                    name = ch >= analogStartChannel
+                               ? "AnalogInput" + String (ch - analogStartChannel + 1)
+                               : "Channel" + String (ch + 1);
+                }
 
                 ContinuousChannel::Settings channelSettings {
                     ContinuousChannel::ELECTRODE,

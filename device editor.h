@@ -147,6 +147,9 @@ private:
     std::unique_ptr<Label> sampleRateTitle;
     std::unique_ptr<Label> sampleRateLabel;
 
+    std::unique_ptr<Label> nodeHostTitle;
+    std::unique_ptr<Label> nodeHostLabel;
+
     std::unique_ptr<UtilityButton> filterButton;
     std::unique_ptr<Label> filterTitle;
 
