@@ -17,6 +17,8 @@ namespace
 {
     const char* kRedPitayaHosts[] = { "rp-f0f85a.local", "rp-f0cd35.local" };
     constexpr int kNumRedPitayaHosts = 2;
+    // active + editor Node IP + ESP32_NODE_HOST + both rp-*.local (deduped)
+    constexpr int kMaxHostsToTry = kNumRedPitayaHosts + 4;
 
     const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
 
@@ -211,27 +213,31 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
 
 bool AcqBoardRedPitaya::connectCommandSocketToBoard()
 {
-    String hostsToTry[kNumRedPitayaHosts + 2];
+    String hostsToTry[kMaxHostsToTry];
     int numTry = 0;
 
-    if (activeRedPitayaHost.isNotEmpty())
-        hostsToTry[numTry++] = activeRedPitayaHost;
+    auto tryPushHost = [&](const String& host)
+    {
+        if (host.isEmpty() || numTry >= kMaxHostsToTry)
+            return;
+
+        for (int j = 0; j < numTry; ++j)
+            if (hostsToTry[j] == host)
+                return;
+
+        hostsToTry[numTry++] = host;
+    };
+
+    tryPushHost (activeRedPitayaHost);
 
     const String envHost = envEsp32NodeHost();
     const String cfgHost = configurableNodeHost.trim();
 
-    if (cfgHost.isNotEmpty() && cfgHost != activeRedPitayaHost)
-        hostsToTry[numTry++] = cfgHost;
-
-    if (envHost.isNotEmpty() && envHost != activeRedPitayaHost && envHost != cfgHost)
-        hostsToTry[numTry++] = envHost;
+    tryPushHost (cfgHost);
+    tryPushHost (envHost);
 
     for (int i = 0; i < kNumRedPitayaHosts; ++i)
-    {
-        const String candidate (kRedPitayaHosts[i]);
-        if (candidate != activeRedPitayaHost && candidate != cfgHost && candidate != envHost)
-            hostsToTry[numTry++] = candidate;
-    }
+        tryPushHost (String (kRedPitayaHosts[i]));
 
     for (int i = 0; i < numTry; ++i)
     {
@@ -1093,8 +1099,10 @@ void AcqBoardRedPitaya::run()
                 char chunk[4096];
                 const int nRead = commandSocket->read (chunk, (int) sizeof (chunk), false);
 
-                if (nRead > 0)
-                    tcpRx.insertArray (tcpRx.size(), (const uint8*) chunk, nRead);
+                if (nRead <= 0)
+                    break; // peer closed or socket error — exit acquisition loop
+
+                tcpRx.insertArray (tcpRx.size(), (const uint8*) chunk, nRead);
             }
 
             while (tcpRx.size() >= (size_t) headerSize && ! threadShouldExit())
