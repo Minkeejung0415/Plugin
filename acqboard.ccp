@@ -566,49 +566,77 @@ bool AcqBoardRedPitaya::startAcquisition()
         lastRecordingPath = {};
         lastRecordingCsvPath = {};
 
-        // This is a fresh TCP session (we always reconnect above), so re-do the
-        // handshake before START: the USB serial->TCP bridge (--plugin) requires a
-        // REDPITAYA line on every new connection or it rejects START and closes the
-        // socket — which looks like "acquisition starts but no data ever arrives".
-        // The Wi-Fi firmware also answers REDPITAYA harmlessly, so this is safe for both.
-        const char* handshake = "REDPITAYA\nSTART\n";
-        commandSocket->write (handshake, (int) strlen (handshake));
-
-        // Drain every ASCII reply line (handshake markers, "OK CHANNELS:8", "STARTED ...",
-        // "SENSORS:...") up to and including the terminal SENSORS line; the binary frames
-        // begin immediately after it. Stopping on SENSORS keeps run()'s frame parser
-        // byte-aligned from the first header instead of resyncing and dropping samples.
         streamSensorNames.clear();
 
-        for (int guard = 0; guard < 8; ++guard)
+        // Helper: read one '\n'-terminated ASCII line from the command socket.
+        // Returns false if no line arrived (timeout) or the next byte is binary
+        // (frame data has started — the leading OeHeader byte is 0x00).
+        auto readReplyLine = [this] (String& out, int firstByteTimeoutMs) -> bool
         {
-            if (! commandSocket->waitUntilReady (true, 2000))
-                break;
+            out.clear();
+
+            if (! commandSocket->waitUntilReady (true, firstByteTimeoutMs))
+                return false;
 
             char first = 0;
             if (commandSocket->read (&first, 1, false) <= 0)
-                break;
+                return false;
 
-            // A printable byte starts an ASCII reply line; a control/binary byte means
-            // the binary stream has already begun (SENSORS was not sent) — stop here and
-            // let run()'s parser resync rather than consuming frame bytes as text.
             if ((unsigned char) first < 0x20 || (unsigned char) first > 0x7E)
-                break;
+                return false; // binary stream has begun
 
-            String line;
-            line += first;
+            out += first;
 
             while (commandSocket->waitUntilReady (true, 1000))
             {
                 char c = 0;
                 if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
                     break;
-                line += c;
+                out += c;
             }
 
-            if (line.startsWith ("SENSORS:"))
+            return true;
+        };
+
+        // This is a fresh TCP session (we always reconnect above), so re-do the
+        // handshake before START: the USB serial->TCP bridge (--plugin) requires a
+        // REDPITAYA line on every new connection or it rejects START and closes the
+        // socket — which looks like "acquisition starts but no data ever arrives".
+        //
+        // Send REDPITAYA and START as SEPARATE writes, reading the handshake reply in
+        // between: the bridge peeks up to 256 bytes on connect, and if REDPITAYA and
+        // START arrive together it consumes both in that peek and then waits forever for
+        // a START it already swallowed. Reading the reply first forces START into its own
+        // read on the bridge. The Wi-Fi firmware handles either ordering fine.
+        const char* hello = "REDPITAYA\n";
+        commandSocket->write (hello, (int) strlen (hello));
+
+        // Drain the handshake reply ("8 channels…" + "OK CHANNELS:N"); stop after the
+        // terminal line so START is sent only once the reply is consumed.
+        String replyLine;
+        for (int guard = 0; guard < 4; ++guard)
+        {
+            if (! readReplyLine (replyLine, 2000))
+                break;
+
+            if (replyLine.containsIgnoreCase ("CHANNELS") || replyLine.startsWith ("OK"))
+                break; // last handshake line before START is expected
+        }
+
+        const char* startMsg = "START\n";
+        commandSocket->write (startMsg, (int) strlen (startMsg));
+
+        // Drain START reply lines ("STARTED …" then "SENSORS:…") up to and including the
+        // terminal SENSORS line; binary frames begin immediately after it, so stopping
+        // there keeps run()'s parser byte-aligned from the first header.
+        for (int guard = 0; guard < 4; ++guard)
+        {
+            if (! readReplyLine (replyLine, 2000))
+                break;
+
+            if (replyLine.startsWith ("SENSORS:"))
             {
-                const String body = line.fromFirstOccurrenceOf ("SENSORS:", false, false).trim();
+                const String body = replyLine.fromFirstOccurrenceOf ("SENSORS:", false, false).trim();
                 StringArray segments;
                 segments.addTokens (body, ";", "");
 
