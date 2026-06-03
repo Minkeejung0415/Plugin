@@ -37,8 +37,9 @@ ICM20948 (acc+gyro, I2C)
 ```
 
 The ESP32 path **reuses the Red Pitaya board class** (`AcqBoardRedPitaya`); an
-`isEsp32Node` flag selects ESP32-specific behavior (TCP binary stream, fixed
-8 ch @ 100 Hz) versus the Red Pitaya behavior (UDP :55001 stream).
+`isEsp32Node` flag selects ESP32-specific behavior (TCP binary stream, default
+11 ch @ 100 Hz: raw IMU + DIO + filter quat slots) versus the Red Pitaya
+behavior (UDP :55001 stream).
 
 ### Wire formats
 
@@ -47,7 +48,7 @@ The ESP32 path **reuses the Red Pitaya board class** (`AcqBoardRedPitaya`); an
 | Direction | Message |
 |---|---|
 | plugin → node | `REDPITAYA\n` |
-| node → plugin | `8 channels; sample_rate=100; node=esp32s3_arduino\n` then `OK CHANNELS:8\n` |
+| node → plugin | `11 channels; sample_rate=100; node=esp32s3_arduino\n` then `OK CHANNELS:11\n` |
 | plugin → node | `START\n` |
 | node → plugin | `STARTED BIN:...\n` then `SENSORS:0,ICM20948\n` |
 | node → plugin | *(binary frames follow immediately)* |
@@ -57,18 +58,18 @@ The ESP32 path **reuses the Red Pitaya board class** (`AcqBoardRedPitaya`); an
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0  | 4 | `offset` | 0 |
-| 4  | 4 | `num_bytes` | 16 (= 8 ch × int16) |
+| 4  | 4 | `num_bytes` | 22 (= 11 ch × int16) |
 | 8  | 2 | `bit_depth` | 3 (OpenCV S16 enum) |
 | 10 | 4 | `element_size` | 2 |
-| 14 | 4 | `num_channels` | 8 |
+| 14 | 4 | `num_channels` | 11 |
 | 18 | 4 | `samples_per_channel` | 1 |
-| 22 | 16 | payload | 8 × int16, little-endian |
+| 22 | 22 | payload | 11 × int16, little-endian |
 
 The plugin's TCP parser validates `element_size == 2` at offset 10 and
 `num_bytes` at offset 4, then reads `num_bytes/2` int16 channels. Full frame =
-**38 bytes**.
+**44 bytes** (11 ch).
 
-**8-channel layout:**
+**11-channel layout (Red Pitaya–like: raw + filter slots):**
 
 | ch | meaning | scaling in plugin |
 |---|---|---|
@@ -79,7 +80,9 @@ The plugin's TCP parser validates `element_size == 2` at offset 10 and
 | 4 | GyrY | ÷ 131.072 |
 | 5 | GyrZ | ÷ 131.072 |
 | 6 | DIO | bit0 = level |
-| 7 | Reserved | 0 |
+| 7–10 | Filter quat qw,qx,qy,qz | Q15 (×1/32767); **0 when FILTER OFF** |
+
+Legacy 8-ch firmware (quat overwrote gyro) is still decoded if `channelsInPacket < 11`.
 
 ---
 

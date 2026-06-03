@@ -238,7 +238,7 @@ public:
     /** Optional ESP32-S3 node host (editor or ESP32_NODE_HOST env). Tried after rp-*.local. */
     String configurableNodeHost;
 
-    /** True when handshake matched ESP32 STEP firmware (TCP stream, fixed 8 ch @ 100 Hz). */
+    /** True when handshake matched ESP32 STEP firmware (TCP stream, 11 ch default @ 100 Hz). */
     bool isEsp32Node = false;
 
     void setNodeHost (const String& host) { configurableNodeHost = host.trim(); }
@@ -247,7 +247,7 @@ public:
 
     bool getIsEsp32Node() const { return isEsp32Node; }
 
-    static constexpr int ESP32_FIXED_CHANNELS = 8;
+    static constexpr int ESP32_DEFAULT_CHANNELS = 11;
 
     void resetCommandSocket();
     bool connectCommandSocketToHost (const String& host);

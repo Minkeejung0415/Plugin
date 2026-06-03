@@ -30,11 +30,36 @@ namespace
         return {};
     }
 
+    int parseEsp32ChannelCountFromHandshake (const String& response, int defaultChannels)
+    {
+        const int idx = response.indexOf (" channels");
+
+        if (idx > 0)
+        {
+            const int n = response.substring (0, idx).trim().getIntValue();
+
+            if (n >= 8 && n <= AcqBoardRedPitaya::MAX_CHANNELS)
+                return n;
+        }
+
+        const int okIdx = response.indexOf ("CHANNELS:");
+
+        if (okIdx >= 0)
+        {
+            const int n = response.substring (okIdx + 9).trim().getIntValue();
+
+            if (n >= 8 && n <= AcqBoardRedPitaya::MAX_CHANNELS)
+                return n;
+        }
+
+        return defaultChannels;
+    }
+
     bool isEsp32HandshakeResponse (const String& response)
     {
         return response.containsIgnoreCase ("esp32s3")
                || response.containsIgnoreCase ("node=esp32")
-               || (response.contains ("8 channels") && response.contains ("sample_rate"));
+               || (response.contains (" channels") && response.contains ("sample_rate"));
     }
 
     int rawChannelCountForSensorName (const String& sensorName)
@@ -263,7 +288,8 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
     if (isEsp32HandshakeResponse (response))
     {
         isEsp32Node = true;
-        numAdcChannels = AcqBoardRedPitaya::ESP32_FIXED_CHANNELS;
+        numAdcChannels = parseEsp32ChannelCountFromHandshake (
+            response, AcqBoardRedPitaya::ESP32_DEFAULT_CHANNELS);
         settings.boardSampleRate = 100.0f;
 
         const int srIdx = response.indexOf ("sample_rate=");
@@ -579,7 +605,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     {
         int targetHz = jlimit (50, 200, (int) settings.boardSampleRate);
 
-        numAdcChannels = ESP32_FIXED_CHANNELS;
+        numAdcChannels = jmax (ESP32_DEFAULT_CHANNELS, numAdcChannels);
         settings.boardSampleRate = static_cast<float> (targetHz);
         lastRecordingPath = {};
         lastRecordingCsvPath = {};
@@ -1289,13 +1315,6 @@ void AcqBoardRedPitaya::run()
         const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
         Array<uint8> tcpRx;
 
-        // 6-DOF orientation fusion for OpenSim. The ESP32 sends raw acc/gyr only, so we
-        // fuse a quaternion here and forward it on the OpenSim UDP path (when enabled).
-        float fusionQuat[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-        constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
-        constexpr float kMadgwickBeta = 0.1f;
-        const float fusionDt = 1.0f / jmax (1.0f, settings.boardSampleRate);
-
         while (! threadShouldExit())
         {
             DataBuffer* currentBuffer = buffer;
@@ -1349,48 +1368,45 @@ void AcqBoardRedPitaya::run()
                     {
                         if (adc <= 2)
                             raw = float (channels[adc]) * accScale;
-                        else if (adc <= 5 && ! filterEnabled)
+                        else if (adc <= 5)
                             raw = float (channels[adc]) * gyrScale;
-                        else if (adc <= 5 && filterEnabled)
-                            raw = float (channels[adc]); // Q15 quaternion components
                         else if (adc == 6)
                             raw = float (channels[adc] & 1); // DIO level bit0
-                        else if (adc == 7 && filterEnabled)
-                            raw = float (channels[adc]); // qw Q15
                         else
-                            raw = 0.0f;
+                            raw = float (channels[adc]); // filter quat Q15 (ch7–10)
                     }
 
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
                 }
 
-                if (openSimEnabled && filterEnabled && channelsInPacket >= 8)
+                if (openSimEnabled && channelsInPacket >= 8)
                 {
                     float qw = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
-                    quaternionFromScaledQ15 (float (channels[7]), float (channels[3]),
-                                             float (channels[4]), float (channels[5]),
-                                             qw, qx, qy, qz);
+
+                    if (channelsInPacket >= 11)
+                    {
+                        quaternionFromScaledQ15 (float (channels[7]), float (channels[8]),
+                                                 float (channels[9]), float (channels[10]),
+                                                 qw, qx, qy, qz);
+                    }
+                    else
+                    {
+                        // Legacy 8-ch layout (pre-1.5.0): quat overwrote gyro + ch7 qw
+                        quaternionFromScaledQ15 (float (channels[7]), float (channels[3]),
+                                                 float (channels[4]), float (channels[5]),
+                                                 qw, qx, qy, qz);
+                    }
 
                     const float quatPkt[4] = { qw, qx, qy, qz };
 
                     if (sampleNumber == 0)
                     {
-                        std::cout << "ESP32-S3: OpenSim UDP v2 (firmware quat), qw0=" << qw << std::endl;
+                        std::cout << "ESP32-S3: OpenSim UDP (filter "
+                                  << (filterEnabled ? "on" : "off") << "), qw0=" << qw
+                                  << std::endl;
                     }
 
                     sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
-                }
-                else if (openSimEnabled)
-                {
-                    const float ax = samples[(0 * samplesPerBuffer) + sampleIndex];
-                    const float ay = samples[(1 * samplesPerBuffer) + sampleIndex];
-                    const float az = samples[(2 * samplesPerBuffer) + sampleIndex];
-                    const float gx = samples[(3 * samplesPerBuffer) + sampleIndex] * kDegToRad;
-                    const float gy = samples[(4 * samplesPerBuffer) + sampleIndex] * kDegToRad;
-                    const float gz = samples[(5 * samplesPerBuffer) + sampleIndex] * kDegToRad;
-
-                    madgwickUpdate6DOF (fusionQuat, gx, gy, gz, ax, ay, az, fusionDt, kMadgwickBeta);
-                    sendOpenSimQuaternionPacket ((float) elapsedSeconds, fusionQuat, 1);
                 }
 
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
