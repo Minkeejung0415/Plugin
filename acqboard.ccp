@@ -85,6 +85,27 @@ namespace
         return offset;
     }
 
+    // Firmware >=1.7.0: header offset = low 32 bits of esp_timer_get_time() (µs since boot).
+    // Returns inter-frame seconds, or -1.0 to use wall-clock / nominal fallback.
+    double deltaSecFromHwOffsetUs (int32_t offsetUs, uint32_t& lastHwUs32, bool& haveLastHw)
+    {
+        if (offsetUs == 0)
+            return -1.0;
+
+        const uint32_t hwUs = static_cast<uint32_t> (offsetUs);
+
+        if (! haveLastHw)
+        {
+            haveLastHw = true;
+            lastHwUs32 = hwUs;
+            return -1.0;
+        }
+
+        const uint32_t deltaUs = hwUs - lastHwUs32;
+        lastHwUs32 = hwUs;
+        return static_cast<double> (deltaUs) * 1.0e-6;
+    }
+
     void quaternionFromScaledQ15 (float qwScaled, float qxScaled, float qyScaled, float qzScaled,
                                   float& qw, float& qx, float& qy, float& qz)
     {
@@ -1362,6 +1383,8 @@ void AcqBoardRedPitaya::run()
         const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
         Array<uint8> tcpRx;
         double lastFrameWallSec = 0.0;
+        uint32_t lastHwUs32 = 0;
+        bool haveLastHw = false;
 
         while (! threadShouldExit())
         {
@@ -1478,7 +1501,13 @@ void AcqBoardRedPitaya::run()
                 const double wallSec = Time::getMillisecondCounterHiRes() * 0.001;
                 double dt = 1.0 / currentSampleRate;
 
-                if (lastFrameWallSec > 0.0)
+                int32_t frameOffsetUs = 0;
+                std::memcpy (&frameOffsetUs, tcpRx.getRawDataPointer(), 4);
+                const double hwDt = deltaSecFromHwOffsetUs (frameOffsetUs, lastHwUs32, haveLastHw);
+
+                if (hwDt > 0.0)
+                    dt = jlimit (1.0 / 5000.0, 0.5, hwDt);
+                else if (lastFrameWallSec > 0.0)
                     dt = jlimit (1.0 / 500.0, 0.5, wallSec - lastFrameWallSec);
 
                 lastFrameWallSec = wallSec;
