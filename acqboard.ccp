@@ -708,6 +708,14 @@ bool AcqBoardRedPitaya::startAcquisition()
         if (streamSensorNames.isEmpty())
             streamSensorNames.add ("ICM20948");
 
+        // Relay is active after START; re-send FREQ so USB bridge → serial always applies
+        // the rate matching settings.boardSampleRate (pre-START FREQ is also forwarded).
+        {
+            char freqMsg[32];
+            snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
+            commandSocket->write (freqMsg, (int) strlen (freqMsg));
+        }
+
         {
             const char* filterMsg = filterEnabled ? "FILTER ON\n" : "FILTER OFF\n";
             commandSocket->write (filterMsg, (int) strlen (filterMsg));

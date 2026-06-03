@@ -926,12 +926,13 @@ void DeviceEditor::startAcquisition()
             openSimLiveButton->toFront (false);
     }
 
+    syncRedPitayaBoardSampleRateFromLabel();
+
     if (memoryUsage != nullptr)
         memoryUsage->startAcquisition();
 
     acquisitionIsActive = true;
 
-    syncRedPitayaBoardSampleRateFromLabel();
     refreshRedPitayaSensorCombosFromBoard();
 }
 
