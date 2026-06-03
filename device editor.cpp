@@ -524,10 +524,12 @@ void DeviceEditor::syncRedPitayaBoardSampleRateFromLabel()
 
     auto* rp = static_cast<AcqBoardRedPitaya*> (board);
     const int rawHz = sampleRateLabel->getText().getIntValue();
-    int hz = jlimit (1, 2000, rawHz > 0 ? rawHz : 100);
+    int hz = rawHz > 0 ? rawHz : 100;
 
     if (rp->getIsEsp32Node())
-        hz = jlimit (50, 200, hz);
+        hz = jmax (1, hz);
+    else
+        hz = jlimit (1, 2000, hz);
 
     board->setSampleRate (hz);
 }
@@ -992,15 +994,19 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
         {
-            int clamped = jlimit (1, 2000, newFreq > 0 ? newFreq : 100);
+            int clamped = newFreq > 0 ? newFreq : 100;
 
             if (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
             {
                 auto* rp = static_cast<AcqBoardRedPitaya*> (board);
 
                 if (rp->getIsEsp32Node())
-                    clamped = jlimit (50, 200, clamped);
+                    clamped = jmax (1, clamped);
+                else
+                    clamped = jlimit (1, 2000, clamped);
             }
+            else
+                clamped = jlimit (1, 2000, clamped);
 
             board->setSampleRate (clamped);
 

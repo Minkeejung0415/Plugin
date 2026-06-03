@@ -333,7 +333,7 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
 
             const int hz = srText.getIntValue();
 
-            if (hz >= 50 && hz <= 200)
+            if (hz >= 1)
                 settings.boardSampleRate = static_cast<float> (hz);
         }
 
@@ -633,7 +633,9 @@ bool AcqBoardRedPitaya::startAcquisition()
 
     if (isEsp32Node)
     {
-        int targetHz = jlimit (50, 200, (int) settings.boardSampleRate);
+        int targetHz = (int) settings.boardSampleRate;
+        if (targetHz < 1)
+            targetHz = 100;
 
         numAdcChannels = jmax (ESP32_DEFAULT_CHANNELS, numAdcChannels);
         settings.boardSampleRate = static_cast<float> (targetHz);
@@ -968,13 +970,15 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
 
     if (isEsp32Node)
     {
-        const int targetHz = jlimit (50, 200, newFreq);
-        settings.boardSampleRate = static_cast<float> (targetHz);
+        if (newFreq < 1)
+            return;
+
+        settings.boardSampleRate = static_cast<float> (newFreq);
 
         if (commandSocket != nullptr && commandSocket->isConnected())
         {
             char msg[32];
-            snprintf (msg, sizeof (msg), "FREQ:%d\n", targetHz);
+            snprintf (msg, sizeof (msg), "FREQ:%d\n", newFreq);
             commandSocket->write (msg, (int) strlen (msg));
             std::cout << "ESP32-S3: Sent command -> " << msg;
         }

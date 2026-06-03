@@ -86,6 +86,13 @@ Open Ephys channel names for ESP32 are set in `devicethread.cpp` (`ax`…`qz`). 
 
 Legacy 8-ch firmware (quat overwrote gyro) is still decoded if `channelsInPacket < 11`.
 
+### Sample rate (no firmware/plugin cap)
+
+ESP32 nodes accept any **Hz ≥ 1** (`FREQ:<Hz>`, `CFG 0 SRATE`, Plugin HW rate label). Values **≤ 0** are ignored/rejected. Red Pitaya boards keep the existing **1–2000 Hz** clamp in the editor. There is no 50–200 Hz limit — tune by testing:
+
+- **Rate too high:** duplicate samples (repeated seq / frozen values) — firmware or USB/TCP cannot sustain the interval.
+- **Rate too low or bus-limited:** missing samples (sequence gaps, uneven spacing).
+
 ---
 
 ## 2. Problems found and fixed
