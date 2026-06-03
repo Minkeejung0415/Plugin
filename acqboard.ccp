@@ -268,14 +268,44 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         return false;
     }
 
-    char buffer[64] = { 0 };
-    const int n = commandSocket->read (buffer, sizeof (buffer) - 1, false);
+    String response;
+    String line;
 
-    if (n <= 0)
+    for (int guard = 0; guard < 4; ++guard)
+    {
+        line.clear();
+
+        if (! commandSocket->waitUntilReady (true, 500))
+            break;
+
+        char c = 0;
+
+        while (commandSocket->waitUntilReady (true, 200))
+        {
+            if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+                break;
+
+            if ((unsigned char) c < 0x20 || (unsigned char) c > 0x7E)
+                return false;
+
+            line += c;
+        }
+
+        if (line.isEmpty())
+            break;
+
+        if (response.isEmpty())
+            response = line;
+        else
+            response += " " + line;
+
+        if (line.containsIgnoreCase ("CHANNELS") || line.startsWith ("OK"))
+            break;
+    }
+
+    if (response.isEmpty())
         return false;
 
-    buffer[n] = '\0';
-    String response (buffer);
     std::cout << "Red Pitaya: handshake response: " << response << std::endl;
 
     // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino".
@@ -1327,6 +1357,7 @@ void AcqBoardRedPitaya::run()
         const float accScale = 1.0f / kAccSensitivity[jlimit (0, 3, sensorAccPreset[0])];
         const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
         Array<uint8> tcpRx;
+        double lastFrameWallSec = 0.0;
 
         while (! threadShouldExit())
         {
@@ -1440,12 +1471,20 @@ void AcqBoardRedPitaya::run()
                 }
 
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
+                const double wallSec = Time::getMillisecondCounterHiRes() * 0.001;
+                double dt = 1.0 / currentSampleRate;
+
+                if (lastFrameWallSec > 0.0)
+                    dt = jlimit (1.0 / 500.0, 0.5, wallSec - lastFrameWallSec);
+
+                lastFrameWallSec = wallSec;
+
                 sampleNumbers[sampleIndex] = sampleNumber;
                 timestamps[sampleIndex]    = elapsedSeconds;
                 event_codes[sampleIndex]   = eventCode;
 
                 ++sampleNumber;
-                elapsedSeconds += 1.0 / currentSampleRate;
+                elapsedSeconds += dt;
 
                 if (sampleIndex == (int) samplesPerBuffer - 1)
                 {
