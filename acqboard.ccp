@@ -1393,8 +1393,6 @@ void AcqBoardRedPitaya::run()
                     sendOpenSimQuaternionPacket ((float) elapsedSeconds, fusionQuat, 1);
                 }
 
-                }
-
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
                 sampleNumbers[sampleIndex] = sampleNumber;
                 timestamps[sampleIndex]    = elapsedSeconds;
