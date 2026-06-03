@@ -80,7 +80,9 @@ The plugin's TCP parser validates `element_size == 2` at offset 10 and
 | 4 | GyrY | ÷ 131.072 |
 | 5 | GyrZ | ÷ 131.072 |
 | 6 | DIO | bit0 = level |
-| 7–10 | Filter quat qw,qx,qy,qz | Q15 (×1/32767); **0 when FILTER OFF** |
+| 7–10 | `qw`, `qx`, `qy`, `qz` (OE labels) | Q15 (×1/32767); **0 when FILTER OFF** |
+
+Open Ephys channel names for ESP32 are set in `devicethread.cpp` (`ax`…`qz`). OpenSim UDP uses **`n_sensors=1`** per board; enable **Filter ON** so ch7–10 carry orientation (plugin skips OpenSim when filter is off).
 
 Legacy 8-ch firmware (quat overwrote gyro) is still decoded if `channelsInPacket < 11`.
 

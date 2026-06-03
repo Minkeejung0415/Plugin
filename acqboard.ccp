@@ -708,6 +708,11 @@ bool AcqBoardRedPitaya::startAcquisition()
         if (streamSensorNames.isEmpty())
             streamSensorNames.add ("ICM20948");
 
+        {
+            const char* filterMsg = filterEnabled ? "FILTER ON\n" : "FILTER OFF\n";
+            commandSocket->write (filterMsg, (int) strlen (filterMsg));
+        }
+
         std::cout << "ESP32-S3: Streaming started (TCP binary, "
                   << numAdcChannels << " ch @ " << targetHz << " Hz)." << std::endl;
 
@@ -1379,7 +1384,10 @@ void AcqBoardRedPitaya::run()
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
                 }
 
-                if (openSimEnabled && channelsInPacket >= 8)
+                // One physical IMU → one quaternion in UDP v2 (numSensors=1). Do not map
+                // gyro raw counts into quat slots (legacy 8-ch layout); that drove multiple
+                // OpenSim segments from a single bad orientation.
+                if (openSimEnabled && filterEnabled && channelsInPacket >= 6)
                 {
                     float qw = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
 
@@ -1391,22 +1399,36 @@ void AcqBoardRedPitaya::run()
                     }
                     else
                     {
-                        // Legacy 8-ch layout (pre-1.5.0): quat overwrote gyro + ch7 qw
-                        quaternionFromScaledQ15 (float (channels[7]), float (channels[3]),
-                                                 float (channels[4]), float (channels[5]),
-                                                 qw, qx, qy, qz);
+                        const float dt = 1.0f / jmax (1.0f, settings.boardSampleRate);
+                        float q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+                        constexpr float kDegToRad = 0.017453292519943295f;
+                        const float gx = float (channels[3]) * gyrScale * kDegToRad;
+                        const float gy = float (channels[4]) * gyrScale * kDegToRad;
+                        const float gz = float (channels[5]) * gyrScale * kDegToRad;
+                        const float ax = float (channels[0]) * accScale;
+                        const float ay = float (channels[1]) * accScale;
+                        const float az = float (channels[2]) * accScale;
+                        madgwickUpdate6DOF (q, gx, gy, gz, ax, ay, az, dt, 0.1f);
+                        qw = q[0];
+                        qx = q[1];
+                        qy = q[2];
+                        qz = q[3];
                     }
 
-                    const float quatPkt[4] = { qw, qx, qy, qz };
+                    const float n2 = qw * qw + qx * qx + qy * qy + qz * qz;
 
-                    if (sampleNumber == 0)
+                    if (n2 > 1.0e-6f)
                     {
-                        std::cout << "ESP32-S3: OpenSim UDP (filter "
-                                  << (filterEnabled ? "on" : "off") << "), qw0=" << qw
-                                  << std::endl;
-                    }
+                        const float quatPkt[4] = { qw, qx, qy, qz };
 
-                    sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
+                        if (sampleNumber == 0)
+                        {
+                            std::cout << "ESP32-S3: OpenSim UDP v2 n_sensors=1 (filter on), qw="
+                                      << qw << std::endl;
+                        }
+
+                        sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
+                    }
                 }
 
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
