@@ -265,9 +265,26 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         isEsp32Node = true;
         numAdcChannels = AcqBoardRedPitaya::ESP32_FIXED_CHANNELS;
         settings.boardSampleRate = 100.0f;
+
+        const int srIdx = response.indexOf ("sample_rate=");
+
+        if (srIdx >= 0)
+        {
+            String srText = response.substring (srIdx + 12).trim();
+
+            if (srText.contains (";"))
+                srText = srText.upToFirstOccurrenceOf (";", false, false).trim();
+
+            const int hz = srText.getIntValue();
+
+            if (hz >= 50 && hz <= 200)
+                settings.boardSampleRate = static_cast<float> (hz);
+        }
+
         deviceFound = true;
         std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
-                  << numAdcChannels << " channels @ 100 Hz (TCP stream)." << std::endl;
+                  << numAdcChannels << " channels @ "
+                  << (int) settings.boardSampleRate << " Hz (TCP stream)." << std::endl;
         return true;
     }
 
@@ -558,11 +575,12 @@ bool AcqBoardRedPitaya::startAcquisition()
         return false;
     }
 
-    // ESP32-S3: fixed 100 Hz / 8 ch on the same TCP socket as the commands.
     if (isEsp32Node)
     {
+        int targetHz = jlimit (50, 200, (int) settings.boardSampleRate);
+
         numAdcChannels = ESP32_FIXED_CHANNELS;
-        settings.boardSampleRate = 100.0f;
+        settings.boardSampleRate = static_cast<float> (targetHz);
         lastRecordingPath = {};
         lastRecordingCsvPath = {};
 
@@ -623,6 +641,12 @@ bool AcqBoardRedPitaya::startAcquisition()
                 break; // last handshake line before START is expected
         }
 
+        {
+            char freqMsg[32];
+            snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
+            commandSocket->write (freqMsg, (int) strlen (freqMsg));
+        }
+
         const char* startMsg = "START\n";
         commandSocket->write (startMsg, (int) strlen (startMsg));
 
@@ -659,7 +683,7 @@ bool AcqBoardRedPitaya::startAcquisition()
             streamSensorNames.add ("ICM20948");
 
         std::cout << "ESP32-S3: Streaming started (TCP binary, "
-                  << numAdcChannels << " ch @ 100 Hz)." << std::endl;
+                  << numAdcChannels << " ch @ " << targetHz << " Hz)." << std::endl;
 
         startThread();
         return true;
@@ -873,10 +897,19 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
     if (! deviceFound)
         return;
 
-    // ESP32 STEP node: sample rate fixed at 100 Hz in firmware.
     if (isEsp32Node)
     {
-        settings.boardSampleRate = 100.0f;
+        const int targetHz = jlimit (50, 200, newFreq);
+        settings.boardSampleRate = static_cast<float> (targetHz);
+
+        if (commandSocket != nullptr && commandSocket->isConnected())
+        {
+            char msg[32];
+            snprintf (msg, sizeof (msg), "FREQ:%d\n", targetHz);
+            commandSocket->write (msg, (int) strlen (msg));
+            std::cout << "ESP32-S3: Sent command -> " << msg;
+        }
+
         return;
     }
 
@@ -1316,21 +1349,38 @@ void AcqBoardRedPitaya::run()
                     {
                         if (adc <= 2)
                             raw = float (channels[adc]) * accScale;
-                        else if (adc <= 5)
+                        else if (adc <= 5 && ! filterEnabled)
                             raw = float (channels[adc]) * gyrScale;
+                        else if (adc <= 5 && filterEnabled)
+                            raw = float (channels[adc]); // Q15 quaternion components
                         else if (adc == 6)
                             raw = float (channels[adc] & 1); // DIO level bit0
+                        else if (adc == 7 && filterEnabled)
+                            raw = float (channels[adc]); // qw Q15
                         else
-                            raw = 0.0f; // ch7 reserved
+                            raw = 0.0f;
                     }
 
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
                 }
 
-                // Fuse acc (ch0-2, in g) + gyro (ch3-5, in deg/s) into an orientation
-                // quaternion and forward it to OpenSim. Gyro must be rad/s; acc unit is
-                // irrelevant (the filter normalizes it). Only runs when OpenSim is active.
-                if (openSimEnabled)
+                if (openSimEnabled && filterEnabled && channelsInPacket >= 8)
+                {
+                    float qw = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+                    quaternionFromScaledQ15 (float (channels[7]), float (channels[3]),
+                                             float (channels[4]), float (channels[5]),
+                                             qw, qx, qy, qz);
+
+                    const float quatPkt[4] = { qw, qx, qy, qz };
+
+                    if (sampleNumber == 0)
+                    {
+                        std::cout << "ESP32-S3: OpenSim UDP v2 (firmware quat), qw0=" << qw << std::endl;
+                    }
+
+                    sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
+                }
+                else if (openSimEnabled)
                 {
                     const float ax = samples[(0 * samplesPerBuffer) + sampleIndex];
                     const float ay = samples[(1 * samplesPerBuffer) + sampleIndex];
@@ -1341,6 +1391,8 @@ void AcqBoardRedPitaya::run()
 
                     madgwickUpdate6DOF (fusionQuat, gx, gy, gz, ax, ay, az, fusionDt, kMadgwickBeta);
                     sendOpenSimQuaternionPacket ((float) elapsedSeconds, fusionQuat, 1);
+                }
+
                 }
 
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
