@@ -30,11 +30,36 @@ namespace
         return {};
     }
 
+    int parseEsp32ChannelCountFromHandshake (const String& response, int defaultChannels)
+    {
+        const int idx = response.indexOf (" channels");
+
+        if (idx > 0)
+        {
+            const int n = response.substring (0, idx).trim().getIntValue();
+
+            if (n >= 8 && n <= AcqBoardRedPitaya::MAX_CHANNELS)
+                return n;
+        }
+
+        const int okIdx = response.indexOf ("CHANNELS:");
+
+        if (okIdx >= 0)
+        {
+            const int n = response.substring (okIdx + 9).trim().getIntValue();
+
+            if (n >= 8 && n <= AcqBoardRedPitaya::MAX_CHANNELS)
+                return n;
+        }
+
+        return defaultChannels;
+    }
+
     bool isEsp32HandshakeResponse (const String& response)
     {
         return response.containsIgnoreCase ("esp32s3")
                || response.containsIgnoreCase ("node=esp32")
-               || (response.contains ("8 channels") && response.contains ("sample_rate"));
+               || (response.contains (" channels") && response.contains ("sample_rate"));
     }
 
     int rawChannelCountForSensorName (const String& sensorName)
@@ -60,6 +85,27 @@ namespace
         return offset;
     }
 
+    // Firmware >=1.7.0: header offset = low 32 bits of esp_timer_get_time() (µs since boot).
+    // Returns inter-frame seconds, or -1.0 to use wall-clock / nominal fallback.
+    double deltaSecFromHwOffsetUs (int32_t offsetUs, uint32_t& lastHwUs32, bool& haveLastHw)
+    {
+        if (offsetUs == 0)
+            return -1.0;
+
+        const uint32_t hwUs = static_cast<uint32_t> (offsetUs);
+
+        if (! haveLastHw)
+        {
+            haveLastHw = true;
+            lastHwUs32 = hwUs;
+            return -1.0;
+        }
+
+        const uint32_t deltaUs = hwUs - lastHwUs32;
+        lastHwUs32 = hwUs;
+        return static_cast<double> (deltaUs) * 1.0e-6;
+    }
+
     void quaternionFromScaledQ15 (float qwScaled, float qxScaled, float qyScaled, float qzScaled,
                                   float& qw, float& qx, float& qy, float& qz)
     {
@@ -78,6 +124,82 @@ namespace
             qx *= inv;
             qy *= inv;
             qz *= inv;
+        }
+    }
+
+    /** Madgwick 6-DOF (gyro + accel) AHRS update, in place on q = {qw,qx,qy,qz}.
+     *
+     *  The ESP32-S3 node streams only raw accelerometer and gyroscope (its firmware
+     *  does not read the ICM20948 magnetometer), so we fuse orientation here to feed
+     *  OpenSim, which needs quaternions. This is self-contained on purpose: it adds no
+     *  new compile unit to the plugin build. Without a magnetometer the heading (yaw)
+     *  is unobservable and will slowly drift — that is inherent to 6-DOF fusion.
+     *
+     *  @param gx,gy,gz  angular rate in rad/s
+     *  @param ax,ay,az  acceleration (any consistent unit; normalized internally)
+     *  @param dt        sample period in seconds
+     *  @param beta      filter gain (accel correction strength; ~0.1 is a good default)
+     */
+    void madgwickUpdate6DOF (float q[4],
+                             float gx, float gy, float gz,
+                             float ax, float ay, float az,
+                             float dt, float beta)
+    {
+        float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+
+        // Rate of change of quaternion from the gyroscope.
+        float qDot0 = 0.5f * (-qx * gx - qy * gy - qz * gz);
+        float qDot1 = 0.5f * (qw * gx + qy * gz - qz * gy);
+        float qDot2 = 0.5f * (qw * gy - qx * gz + qz * gx);
+        float qDot3 = 0.5f * (qw * gz + qx * gy - qy * gx);
+
+        const float aNorm = std::sqrt (ax * ax + ay * ay + az * az);
+
+        if (aNorm > 1.0e-9f)
+        {
+            ax /= aNorm;
+            ay /= aNorm;
+            az /= aNorm;
+
+            // Gradient descent corrective step (objective + Jacobian for gravity).
+            const float f1 = 2.0f * (qx * qz - qw * qy) - ax;
+            const float f2 = 2.0f * (qw * qx + qy * qz) - ay;
+            const float f3 = 2.0f * (0.5f - qx * qx - qy * qy) - az;
+
+            float s0 = -2.0f * qy * f1 + 2.0f * qx * f2;
+            float s1 = 2.0f * qz * f1 + 2.0f * qw * f2 - 4.0f * qx * f3;
+            float s2 = -2.0f * qw * f1 + 2.0f * qz * f2 - 4.0f * qy * f3;
+            float s3 = 2.0f * qx * f1 + 2.0f * qy * f2;
+
+            const float sNorm = std::sqrt (s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
+
+            if (sNorm > 1.0e-9f)
+            {
+                s0 /= sNorm;
+                s1 /= sNorm;
+                s2 /= sNorm;
+                s3 /= sNorm;
+
+                qDot0 -= beta * s0;
+                qDot1 -= beta * s1;
+                qDot2 -= beta * s2;
+                qDot3 -= beta * s3;
+            }
+        }
+
+        qw += qDot0 * dt;
+        qx += qDot1 * dt;
+        qy += qDot2 * dt;
+        qz += qDot3 * dt;
+
+        const float qNorm = std::sqrt (qw * qw + qx * qx + qy * qy + qz * qz);
+
+        if (qNorm > 1.0e-9f)
+        {
+            q[0] = qw / qNorm;
+            q[1] = qx / qNorm;
+            q[2] = qy / qNorm;
+            q[3] = qz / qNorm;
         }
     }
 
@@ -167,17 +289,83 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         return false;
     }
 
-    char buffer[64] = { 0 };
-    const int n = commandSocket->read (buffer, sizeof (buffer) - 1, false);
+    String response;
+    String line;
 
-    if (n <= 0)
+    for (int guard = 0; guard < 4; ++guard)
+    {
+        line.clear();
+
+        if (! commandSocket->waitUntilReady (true, 500))
+            break;
+
+        char c = 0;
+
+        while (commandSocket->waitUntilReady (true, 200))
+        {
+            if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+                break;
+
+            if ((unsigned char) c < 0x20 || (unsigned char) c > 0x7E)
+                return false;
+
+            line += c;
+        }
+
+        if (line.isEmpty())
+            break;
+
+        if (response.isEmpty())
+            response = line;
+        else
+            response += " " + line;
+
+        if (line.containsIgnoreCase ("CHANNELS") || line.startsWith ("OK"))
+            break;
+    }
+
+    if (response.isEmpty())
         return false;
 
-    buffer[n] = '\0';
-    String response (buffer);
     std::cout << "Red Pitaya: handshake response: " << response << std::endl;
 
-    // Red Pitaya firmware: "OK CHANNELS:N"
+    // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino".
+    // Check this BEFORE the generic Red Pitaya "OK" branch: the ESP32 firmware and
+    // the USB bridge both follow the esp32 marker line with "OK CHANNELS:8", and over
+    // a localhost/TCP connection the two writes usually coalesce into a single read.
+    // If we tested for "OK" first, that "OK CHANNELS:8" would misclassify the ESP32 as
+    // a Red Pitaya, sending run() down the UDP:55001 path while the board streams
+    // binary over TCP — i.e. a successful "detect" that never produces any samples.
+    if (isEsp32HandshakeResponse (response))
+    {
+        isEsp32Node = true;
+        numAdcChannels = parseEsp32ChannelCountFromHandshake (
+            response, AcqBoardRedPitaya::ESP32_DEFAULT_CHANNELS);
+        settings.boardSampleRate = 100.0f;
+
+        const int srIdx = response.indexOf ("sample_rate=");
+
+        if (srIdx >= 0)
+        {
+            String srText = response.substring (srIdx + 12).trim();
+
+            if (srText.contains (";"))
+                srText = srText.upToFirstOccurrenceOf (";", false, false).trim();
+
+            const int hz = srText.getIntValue();
+
+            if (hz >= 1)
+                settings.boardSampleRate = static_cast<float> (hz);
+        }
+
+        deviceFound = true;
+        std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
+                  << numAdcChannels << " channels @ "
+                  << (int) settings.boardSampleRate << " Hz (TCP stream)." << std::endl;
+        return true;
+    }
+
+    // Red Pitaya firmware: "OK CHANNELS:N" (no esp32 markers)
     if (response.contains ("OK"))
     {
         isEsp32Node = false;
@@ -193,18 +381,6 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         deviceFound = true;
         std::cout << "Detected Red Pitaya at " << activeRedPitayaHost << " with "
                   << numAdcChannels << " channels." << std::endl;
-        return true;
-    }
-
-    // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino"
-    if (isEsp32HandshakeResponse (response))
-    {
-        isEsp32Node = true;
-        numAdcChannels = AcqBoardRedPitaya::ESP32_FIXED_CHANNELS;
-        settings.boardSampleRate = 100.0f;
-        deviceFound = true;
-        std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
-                  << numAdcChannels << " channels @ 100 Hz (TCP stream)." << std::endl;
         return true;
     }
 
@@ -288,10 +464,13 @@ bool AcqBoardRedPitaya::detectBoard()
         activeRedPitayaHost = {};
     }
 
-    // ESP32-S3: configurable host or ESP32_NODE_HOST env (after Red Pitaya rp-*.local)
-    const String esp32Candidates[2] = { configurableNodeHost.trim(), envEsp32NodeHost() };
+    // ESP32-S3: configurable host, ESP32_NODE_HOST env, then localhost (after rp-*.local).
+    // 127.0.0.1 is the USB serial->TCP bridge (serial_tcp_bridge.py / run_usb_plugin_bridge.ps1),
+    // so the bridge is found without manually setting a Node IP. Detection still requires a
+    // valid handshake reply, so an unrelated localhost:5000 service won't be mistaken for a board.
+    const String esp32Candidates[3] = { configurableNodeHost.trim(), envEsp32NodeHost(), "127.0.0.1" };
 
-    for (int h = 0; h < 2; ++h)
+    for (int h = 0; h < 3; ++h)
     {
         const String host = esp32Candidates[h];
 
@@ -473,21 +652,130 @@ bool AcqBoardRedPitaya::startAcquisition()
         return false;
     }
 
-    // ESP32-S3: fixed 100 Hz / 8 ch; no FREQ, STARTED, or SENSORS lines (see esp32_tcp_client.py).
     if (isEsp32Node)
     {
-        const char* startMsg = "START\n";
-        commandSocket->write (startMsg, (int) strlen (startMsg));
+        int targetHz = (int) settings.boardSampleRate;
+        if (targetHz < 1)
+            targetHz = 100;
 
-        streamSensorNames.clear();
-        streamSensorNames.add ("ICM20948");
-        numAdcChannels = ESP32_FIXED_CHANNELS;
-        settings.boardSampleRate = 100.0f;
+        numAdcChannels = jmax (ESP32_DEFAULT_CHANNELS, numAdcChannels);
+        settings.boardSampleRate = static_cast<float> (targetHz);
         lastRecordingPath = {};
         lastRecordingCsvPath = {};
 
+        streamSensorNames.clear();
+
+        // Helper: read one '\n'-terminated ASCII line from the command socket.
+        // Returns false if no line arrived (timeout) or the next byte is binary
+        // (frame data has started — the leading OeHeader byte is 0x00).
+        auto readReplyLine = [this] (String& out, int firstByteTimeoutMs) -> bool
+        {
+            out.clear();
+
+            if (! commandSocket->waitUntilReady (true, firstByteTimeoutMs))
+                return false;
+
+            char first = 0;
+            if (commandSocket->read (&first, 1, false) <= 0)
+                return false;
+
+            if ((unsigned char) first < 0x20 || (unsigned char) first > 0x7E)
+                return false; // binary stream has begun
+
+            out += first;
+
+            while (commandSocket->waitUntilReady (true, 1000))
+            {
+                char c = 0;
+                if (commandSocket->read (&c, 1, false) <= 0 || c == '\n')
+                    break;
+                out += c;
+            }
+
+            return true;
+        };
+
+        // This is a fresh TCP session (we always reconnect above), so re-do the
+        // handshake before START: the USB serial->TCP bridge (--plugin) requires a
+        // REDPITAYA line on every new connection or it rejects START and closes the
+        // socket — which looks like "acquisition starts but no data ever arrives".
+        //
+        // Send REDPITAYA and START as SEPARATE writes, reading the handshake reply in
+        // between: the bridge peeks up to 256 bytes on connect, and if REDPITAYA and
+        // START arrive together it consumes both in that peek and then waits forever for
+        // a START it already swallowed. Reading the reply first forces START into its own
+        // read on the bridge. The Wi-Fi firmware handles either ordering fine.
+        const char* hello = "REDPITAYA\n";
+        commandSocket->write (hello, (int) strlen (hello));
+
+        // Drain the handshake reply ("8 channels…" + "OK CHANNELS:N"); stop after the
+        // terminal line so START is sent only once the reply is consumed.
+        String replyLine;
+        for (int guard = 0; guard < 4; ++guard)
+        {
+            if (! readReplyLine (replyLine, 2000))
+                break;
+
+            if (replyLine.containsIgnoreCase ("CHANNELS") || replyLine.startsWith ("OK"))
+                break; // last handshake line before START is expected
+        }
+
+        {
+            char freqMsg[32];
+            snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
+            commandSocket->write (freqMsg, (int) strlen (freqMsg));
+        }
+
+        const char* startMsg = "START\n";
+        commandSocket->write (startMsg, (int) strlen (startMsg));
+
+        // Drain START reply lines ("STARTED …" then "SENSORS:…") up to and including the
+        // terminal SENSORS line; binary frames begin immediately after it, so stopping
+        // there keeps run()'s parser byte-aligned from the first header.
+        for (int guard = 0; guard < 4; ++guard)
+        {
+            if (! readReplyLine (replyLine, 2000))
+                break;
+
+            if (replyLine.startsWith ("SENSORS:"))
+            {
+                const String body = replyLine.fromFirstOccurrenceOf ("SENSORS:", false, false).trim();
+                StringArray segments;
+                segments.addTokens (body, ";", "");
+
+                for (int si = 0; si < segments.size(); ++si)
+                {
+                    const String seg = segments[si].trim();
+                    const int comma = seg.indexOfChar (',');
+
+                    if (comma > 0)
+                        streamSensorNames.add (seg.substring (comma + 1).trim());
+                    else if (seg.isNotEmpty())
+                        streamSensorNames.add (seg);
+                }
+
+                break; // SENSORS is the last line before binary frames
+            }
+        }
+
+        if (streamSensorNames.isEmpty())
+            streamSensorNames.add ("ICM20948");
+
+        // Relay is active after START; re-send FREQ so USB bridge → serial always applies
+        // the rate matching settings.boardSampleRate (pre-START FREQ is also forwarded).
+        {
+            char freqMsg[32];
+            snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
+            commandSocket->write (freqMsg, (int) strlen (freqMsg));
+        }
+
+        {
+            const char* filterMsg = filterEnabled ? "FILTER ON\n" : "FILTER OFF\n";
+            commandSocket->write (filterMsg, (int) strlen (filterMsg));
+        }
+
         std::cout << "ESP32-S3: Streaming started (TCP binary, "
-                  << numAdcChannels << " ch @ 100 Hz)." << std::endl;
+                  << numAdcChannels << " ch @ " << targetHz << " Hz)." << std::endl;
 
         startThread();
         return true;
@@ -701,10 +989,21 @@ void AcqBoardRedPitaya::updateSampleFrequency (int newFreq)
     if (! deviceFound)
         return;
 
-    // ESP32 STEP node: sample rate fixed at 100 Hz in firmware.
     if (isEsp32Node)
     {
-        settings.boardSampleRate = 100.0f;
+        if (newFreq < 1)
+            return;
+
+        settings.boardSampleRate = static_cast<float> (newFreq);
+
+        if (commandSocket != nullptr && commandSocket->isConnected())
+        {
+            char msg[32];
+            snprintf (msg, sizeof (msg), "FREQ:%d\n", newFreq);
+            commandSocket->write (msg, (int) strlen (msg));
+            std::cout << "ESP32-S3: Sent command -> " << msg;
+        }
+
         return;
     }
 
@@ -1083,6 +1382,9 @@ void AcqBoardRedPitaya::run()
         const float accScale = 1.0f / kAccSensitivity[jlimit (0, 3, sensorAccPreset[0])];
         const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
         Array<uint8> tcpRx;
+        double lastFrameWallSec = 0.0;
+        uint32_t lastHwUs32 = 0;
+        bool haveLastHw = false;
 
         while (! threadShouldExit())
         {
@@ -1142,19 +1444,80 @@ void AcqBoardRedPitaya::run()
                         else if (adc == 6)
                             raw = float (channels[adc] & 1); // DIO level bit0
                         else
-                            raw = 0.0f; // ch7 reserved
+                            raw = float (channels[adc]); // filter quat Q15 (ch7–10)
                     }
 
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
                 }
 
+                // One physical IMU → one quaternion in UDP v2 (numSensors=1). Do not map
+                // gyro raw counts into quat slots (legacy 8-ch layout); that drove multiple
+                // OpenSim segments from a single bad orientation.
+                if (openSimEnabled && filterEnabled && channelsInPacket >= 6)
+                {
+                    float qw = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+
+                    if (channelsInPacket >= 11)
+                    {
+                        quaternionFromScaledQ15 (float (channels[7]), float (channels[8]),
+                                                 float (channels[9]), float (channels[10]),
+                                                 qw, qx, qy, qz);
+                    }
+                    else
+                    {
+                        const float dt = 1.0f / jmax (1.0f, settings.boardSampleRate);
+                        float q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+                        constexpr float kDegToRad = 0.017453292519943295f;
+                        const float gx = float (channels[3]) * gyrScale * kDegToRad;
+                        const float gy = float (channels[4]) * gyrScale * kDegToRad;
+                        const float gz = float (channels[5]) * gyrScale * kDegToRad;
+                        const float ax = float (channels[0]) * accScale;
+                        const float ay = float (channels[1]) * accScale;
+                        const float az = float (channels[2]) * accScale;
+                        madgwickUpdate6DOF (q, gx, gy, gz, ax, ay, az, dt, 0.1f);
+                        qw = q[0];
+                        qx = q[1];
+                        qy = q[2];
+                        qz = q[3];
+                    }
+
+                    const float n2 = qw * qw + qx * qx + qy * qy + qz * qz;
+
+                    if (n2 > 1.0e-6f)
+                    {
+                        const float quatPkt[4] = { qw, qx, qy, qz };
+
+                        if (sampleNumber == 0)
+                        {
+                            std::cout << "ESP32-S3: OpenSim UDP v2 n_sensors=1 (filter on), qw="
+                                      << qw << std::endl;
+                        }
+
+                        sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
+                    }
+                }
+
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
+                const double wallSec = Time::getMillisecondCounterHiRes() * 0.001;
+                double dt = 1.0 / currentSampleRate;
+
+                int32_t frameOffsetUs = 0;
+                std::memcpy (&frameOffsetUs, tcpRx.getRawDataPointer(), 4);
+                const double hwDt = deltaSecFromHwOffsetUs (frameOffsetUs, lastHwUs32, haveLastHw);
+
+                if (hwDt > 0.0)
+                    dt = jlimit (1.0 / 5000.0, 0.5, hwDt);
+                else if (lastFrameWallSec > 0.0)
+                    dt = jlimit (1.0 / 500.0, 0.5, wallSec - lastFrameWallSec);
+
+                lastFrameWallSec = wallSec;
+
                 sampleNumbers[sampleIndex] = sampleNumber;
                 timestamps[sampleIndex]    = elapsedSeconds;
                 event_codes[sampleIndex]   = eventCode;
 
                 ++sampleNumber;
-                elapsedSeconds += 1.0 / currentSampleRate;
+                elapsedSeconds += dt;
 
                 if (sampleIndex == (int) samplesPerBuffer - 1)
                 {

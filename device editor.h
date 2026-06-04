@@ -111,6 +111,9 @@ public:
         hardware Hz label so Open Ephys stream metadata and buffer sizing match the TCP stream. */
     void syncRedPitayaBoardSampleRateFromLabel();
 
+    /** Updates the editable HW rate label from boardSampleRate (e.g. after ESP32 detect). */
+    void syncRedPitayaSampleRateLabelFromBoard();
+
 private:
     /** Pointer to acquisition board device */
     class AcquisitionBoard* board;

@@ -117,7 +117,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
                                 isRedPitaya ? 110 : 100, isRedPitaya ? 12 : 15);
     addAndMakeVisible (sampleRateTitle.get());
 
-    sampleRateLabel = std::make_unique<Label> ("sampleRateLabel", "1000");
+    sampleRateLabel = std::make_unique<Label> ("sampleRateLabel", isRedPitaya ? "100" : "1000");
     sampleRateLabel->setEditable (true);
     sampleRateLabel->setColour (Label::backgroundColourId, Colours::black);
     sampleRateLabel->setColour (Label::textColourId, Colours::white);
@@ -506,14 +506,31 @@ int DeviceEditor::getSelectedStreamSensorIndex() const
     return jmax (0, id - 1);
 }
 
+void DeviceEditor::syncRedPitayaSampleRateLabelFromBoard()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya
+        || sampleRateLabel == nullptr)
+        return;
+
+    const int hz = jmax (1, (int) std::lround (board->getSampleRate()));
+    sampleRateLabel->setText (String (hz), dontSendNotification);
+}
+
 void DeviceEditor::syncRedPitayaBoardSampleRateFromLabel()
 {
     if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya
         || sampleRateLabel == nullptr)
         return;
 
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
     const int rawHz = sampleRateLabel->getText().getIntValue();
-    const int hz = jlimit (1, 2000, rawHz > 0 ? rawHz : 100);
+    int hz = rawHz > 0 ? rawHz : 100;
+
+    if (rp->getIsEsp32Node())
+        hz = jmax (1, hz);
+    else
+        hz = jlimit (1, 2000, hz);
+
     board->setSampleRate (hz);
 }
 
@@ -926,12 +943,13 @@ void DeviceEditor::startAcquisition()
             openSimLiveButton->toFront (false);
     }
 
+    syncRedPitayaBoardSampleRateFromLabel();
+
     if (memoryUsage != nullptr)
         memoryUsage->startAcquisition();
 
     acquisitionIsActive = true;
 
-    syncRedPitayaBoardSampleRateFromLabel();
     refreshRedPitayaSensorCombosFromBoard();
 }
 
@@ -976,7 +994,20 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
         {
-            const int clamped = jlimit (1, 2000, newFreq > 0 ? newFreq : 100);
+            int clamped = newFreq > 0 ? newFreq : 100;
+
+            if (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+            {
+                auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+                if (rp->getIsEsp32Node())
+                    clamped = jmax (1, clamped);
+                else
+                    clamped = jlimit (1, 2000, clamped);
+            }
+            else
+                clamped = jlimit (1, 2000, clamped);
+
             board->setSampleRate (clamped);
 
             // Red Pitaya overrides this to send FREQ; other boards keep the default no-op.
@@ -1036,6 +1067,9 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
             {
                 CoreServices::sendStatusMessage ("Node detected at " + host
                                                  + (rp->getIsEsp32Node() ? " (ESP32-S3)" : " (Red Pitaya)"));
+                syncRedPitayaSampleRateLabelFromBoard();
+                syncRedPitayaBoardSampleRateFromLabel();
+
                 if (! acquisitionIsActive)
                     CoreServices::updateSignalChain (this);
             }

@@ -250,9 +250,11 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
                 if (esp32Layout)
                 {
                     static const char* esp32Names[] = {
-                        "AccX", "AccY", "AccZ", "GyrX", "GyrY", "GyrZ", "DIO", "Reserved"
+                        "ax", "ay", "az", "gx", "gy", "gz", "dio", "qw", "qx", "qy", "qz"
                     };
-                    name = esp32Names[jmin (ch, 7)];
+                    name = (ch < (int) (sizeof (esp32Names) / sizeof (esp32Names[0])))
+                               ? esp32Names[ch]
+                               : ("ch" + String (ch + 1));
                 }
                 else
                 {
