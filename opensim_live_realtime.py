@@ -394,8 +394,7 @@ def _udp_ahrs_thread():
                 print(f"[PKT v2 {_pkt_n}] t={t_stream:.3f}s sensors={n_sensors} slots={slot_map}")
             with _frame_lock:
                 _frame_queue.clear()
-                full_quats = _merge_live_quats_with_neutral(active_quats, active_sensors)
-                _frame_queue.append((t_stream, full_quats, list(SENSORS), session_id, now, False, 0.0, 0.0))
+                _frame_queue.append((t_stream, active_quats, active_sensors, session_id, now, False, 0.0, 0.0))
             continue
 
         # Disambiguate packet format:
@@ -558,8 +557,7 @@ def _udp_ahrs_thread():
             print(f"[DBG t={t_stream:.2f}s] active_sensors={active_sensors} n={len(active_quats)}")
         with _frame_lock:
             _frame_queue.clear()
-            full_quats = _merge_live_quats_with_neutral(active_quats, active_sensors)
-            _frame_queue.append((t_stream, full_quats, list(SENSORS), session_id, now, active_static, active_gyro_norm, active_change))
+            _frame_queue.append((t_stream, active_quats, active_sensors, session_id, now, active_static, active_gyro_norm, active_change))
 
     sock.close()
 
@@ -590,6 +588,50 @@ def _quats_to_rot_table(t, quats, active_sensors):
     return table
 
 
+def _is_tibia_only_mode(active_sensors):
+    return len(active_sensors) == 1 and active_sensors[0] == "tibia_r_imu"
+
+
+def _set_coord_locked(coord, state, locked):
+    try:
+        coord.setLocked(state, locked)
+        return
+    except (AttributeError, TypeError):
+        pass
+    coord.set_locked(locked)
+
+
+def _get_coord_locked(coord, state):
+    try:
+        return bool(coord.getLocked(state))
+    except (AttributeError, TypeError):
+        pass
+    return bool(coord.get_locked())
+
+
+def _capture_coordinate_locks(coord_set, state):
+    locks = {}
+    for i in range(coord_set.getSize()):
+        coord = coord_set.get(i)
+        locks[coord.getName()] = _get_coord_locked(coord, state)
+    return locks
+
+
+def _apply_tibia_only_locks(coord_set, state, enabled, default_locks):
+    for i in range(coord_set.getSize()):
+        coord = coord_set.get(i)
+        name = coord.getName()
+        should_lock = (name != "knee_angle_r") if enabled else default_locks.get(name, False)
+
+        if enabled and should_lock:
+            try:
+                coord.setValue(state, coord.getDefaultValue())
+            except Exception:
+                pass
+
+        _set_coord_locked(coord, state, should_lock)
+
+
 def run_live():
     for _stale in ("ephys_live_orientations.sto", "ephys_live_motion.sto", "_neutral_frame.sto"):
         _p = os.path.join(WORK_DIR, _stale)
@@ -613,6 +655,7 @@ def run_live():
     oRefs = osim.OrientationsReference(neutral_rt)
     ikSolver = osim.InverseKinematicsSolver(model, mRefs, oRefs, coordRefs, CONSTRAINT)
     ikSolver.setAccuracy(1e-4)
+    default_coord_locks = _capture_coordinate_locks(model.getCoordinateSet(), state)
 
     viz = model.updVisualizer().updSimbodyVisualizer()
     try:
@@ -691,6 +734,8 @@ def run_live():
                 last_t = -1.0
                 t_last_solve = 0.0
                 last_coord_values = None
+                mode = "tibia-only knee lock" if _is_tibia_only_mode(active_sensors) else "full active-sensor IK"
+                print(f"[IK-MODE] {mode}")
 
             if t_imu <= last_t:
                 time.sleep(0.005)
@@ -721,6 +766,7 @@ def run_live():
             ikSolver = osim.InverseKinematicsSolver(model, mRefs, oRefs, coordRefs, CONSTRAINT)
             ikSolver.setAccuracy(1e-4)
             state.setTime(0.0)
+            _apply_tibia_only_locks(coord_set, state, _is_tibia_only_mode(active_sensors), default_coord_locks)
             if live_frame <= 5 or live_frame % 1000 == 0:
                 q_dbg = quats[0] if quats else []
                 print(f"[IK] calling assemble frame={live_frame} t={t_imu:.3f}s sensors={active_sensors} q0={[round(v,3) for v in q_dbg]}")

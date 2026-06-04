@@ -23,6 +23,7 @@ import time
 import argparse
 import math
 import datetime
+import xml.etree.ElementTree as ET
 import numpy as np
 import imufusion
 
@@ -30,6 +31,7 @@ WORK_DIR          = r"C:\Users\KIN Student\Open-Sim--Bio-Mech"
 OPENSIM_SDK_PYTHON = r"C:\OpenSim 4.5\sdk\Python"
 OPENSIM_BIN_DIR   = r"C:\OpenSim 4.5\bin"
 MODEL_FILE        = "Rajagopal2015_opensense_calibrated.osim"
+TIBIA_ONLY_MODEL_FILE = "Rajagopal2015_tibia_only_locked.osim"
 
 OPENSIM_CMD_CANDIDATES = [
     r"C:\OpenSim 4.5\bin\opensim-cmd.exe",
@@ -111,6 +113,27 @@ def run_opensim_ik(setup_xml):
     return True
 
 
+def _is_tibia_only_mode(sensor_names):
+    return len(sensor_names) == 1 and sensor_names[0] == "tibia_r_imu"
+
+
+def _write_tibia_only_model():
+    src = os.path.join(WORK_DIR, MODEL_FILE)
+    dst = os.path.join(WORK_DIR, TIBIA_ONLY_MODEL_FILE)
+
+    tree = ET.parse(src)
+    root = tree.getroot()
+
+    for coord in root.iter("Coordinate"):
+        locked = coord.find("locked")
+        if locked is None:
+            continue
+        locked.text = "false" if coord.attrib.get("name") == "knee_angle_r" else "true"
+
+    tree.write(dst, encoding="UTF-8", xml_declaration=True)
+    return TIBIA_ONLY_MODEL_FILE
+
+
 def _find_opensim_cmd():
     """Return the best available OpenSim command-line executable."""
     for candidate in OPENSIM_CMD_CANDIDATES:
@@ -174,10 +197,10 @@ def samples_to_sto(timestamps, quats_per_sensor, sensor_names, path):
 
 # ── Post-collection pipeline ───────────────────────────────────────────────────
 
-def _launch_opensim_gui(motion_path, run_timestamp=None):
+def _launch_opensim_gui(motion_path, run_timestamp=None, model_file=MODEL_FILE):
     """Launch OpenSim GUI.  run_timestamp is a datetime marking when IK started,
     used to warn if the motion file was not updated during this run."""
-    model_path = os.path.join(WORK_DIR, MODEL_FILE)
+    model_path = os.path.join(WORK_DIR, model_file)
     gui_path   = _find_opensim_gui()
 
     # Resolve motion file mtime
@@ -232,7 +255,7 @@ def _launch_opensim_gui(motion_path, run_timestamp=None):
 
 
 def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=None, quat_stream=None):
-    n_imus = len(imu_accels)
+    n_imus = len(quat_stream) if quat_stream is not None else len(imu_accels)
     if sample_count < 2 or n_imus == 0:
         print("[ERROR] No live IMU data received.")
         print("  Reason: LFP Viewer/Open Ephys is not sending packets, or wrong port is used.")
@@ -257,8 +280,12 @@ def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=
             print(f"[AHRS] Running fusion on sensor {i} ({sensor_names[i]})...")
             quats_per_sensor.append(ahrs_to_quaternions(imu_accels[i], imu_gyros[i]))
 
+    model_file = _write_tibia_only_model() if _is_tibia_only_mode(sensor_names) else MODEL_FILE
+    if _is_tibia_only_mode(sensor_names):
+        print("[IK-MODE] tibia-only: locked all model coordinates except knee_angle_r.")
+
     samples_to_sto(timestamps, quats_per_sensor, sensor_names, sto_path)
-    ensure_ephys_xml(sensor_names)
+    ensure_ephys_xml(sensor_names, model_file=model_file)
     print("\n[IK] Running OpenSim IMU IK...")
     os.chdir(WORK_DIR)
     ik_ok = run_opensim_ik(EPHYS_SETUP_XML)
@@ -270,7 +297,7 @@ def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=
         return
 
     if AUTO_OPEN_GUI:
-        _launch_opensim_gui(motion_path, run_timestamp=run_start)
+        _launch_opensim_gui(motion_path, run_timestamp=run_start, model_file=model_file)
 
 
 # ── UDP packet reader ──────────────────────────────────────────────────────────
@@ -481,14 +508,12 @@ def listen_udp_until_idle(idle_s=2.0):
 
 # ── Setup XML ──────────────────────────────────────────────────────────────────
 
-def ensure_ephys_xml(sensor_names):
+def ensure_ephys_xml(sensor_names, model_file=MODEL_FILE):
     path = os.path.join(WORK_DIR, EPHYS_SETUP_XML)
-    if os.path.exists(path):
-        return
     content = f"""<?xml version="1.0" encoding="UTF-8" ?>
 <OpenSimDocument Version="40000">
 \t<IMUInverseKinematicsTool>
-\t\t<model_file>Rajagopal2015_opensense_calibrated.osim</model_file>
+\t\t<model_file>{model_file}</model_file>
 \t\t<results_directory>.</results_directory>
 \t\t<time_range>0 999</time_range>
 \t\t<output_motion_file>{EPHYS_OUTPUT}</output_motion_file>
