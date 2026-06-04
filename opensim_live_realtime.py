@@ -592,6 +592,9 @@ def _is_tibia_only_mode(active_sensors):
     return len(active_sensors) == 1 and active_sensors[0] == "tibia_r_imu"
 
 
+TIBIA_ONLY_UNLOCKED_COORDS = {"knee_angle_r", "knee_angle_r_beta"}
+
+
 def _set_coord_locked(coord, state, locked):
     try:
         coord.setLocked(state, locked)
@@ -621,7 +624,7 @@ def _apply_tibia_only_locks(coord_set, state, enabled, default_locks):
     for i in range(coord_set.getSize()):
         coord = coord_set.get(i)
         name = coord.getName()
-        should_lock = (name != "knee_angle_r") if enabled else default_locks.get(name, False)
+        should_lock = (name not in TIBIA_ONLY_UNLOCKED_COORDS) if enabled else default_locks.get(name, False)
 
         if enabled and should_lock:
             try:
@@ -754,8 +757,13 @@ def run_live():
                 skipped_by_throttle = 0
 
             t_convert0 = time.perf_counter()
-            ik_quats = quats if active_sensors == SENSORS else _merge_live_quats_with_neutral(quats, active_sensors)
-            rot_table = _quats_to_rot_table(0.0, ik_quats, SENSORS)
+            if _is_tibia_only_mode(active_sensors):
+                ik_quats = quats
+                ik_sensors = active_sensors
+            else:
+                ik_quats = quats if active_sensors == SENSORS else _merge_live_quats_with_neutral(quats, active_sensors)
+                ik_sensors = SENSORS
+            rot_table = _quats_to_rot_table(0.0, ik_quats, ik_sensors)
             convert_times.append(time.perf_counter() - t_convert0)
 
             # BufferedOrientationsReference receives the changing rows, but on

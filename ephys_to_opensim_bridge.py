@@ -32,6 +32,7 @@ OPENSIM_SDK_PYTHON = r"C:\OpenSim 4.5\sdk\Python"
 OPENSIM_BIN_DIR   = r"C:\OpenSim 4.5\bin"
 MODEL_FILE        = "Rajagopal2015_opensense_calibrated.osim"
 TIBIA_ONLY_MODEL_FILE = "Rajagopal2015_tibia_only_locked.osim"
+TIBIA_ONLY_UNLOCKED_COORDS = {"knee_angle_r", "knee_angle_r_beta"}
 
 OPENSIM_CMD_CANDIDATES = [
     r"C:\OpenSim 4.5\bin\opensim-cmd.exe",
@@ -128,7 +129,7 @@ def _write_tibia_only_model():
         locked = coord.find("locked")
         if locked is None:
             continue
-        locked.text = "false" if coord.attrib.get("name") == "knee_angle_r" else "true"
+        locked.text = "false" if coord.attrib.get("name") in TIBIA_ONLY_UNLOCKED_COORDS else "true"
 
     tree.write(dst, encoding="UTF-8", xml_declaration=True)
     return TIBIA_ONLY_MODEL_FILE
@@ -282,7 +283,7 @@ def _process_and_run_ik(imu_accels, imu_gyros, sample_count, receive_duration_s=
 
     model_file = _write_tibia_only_model() if _is_tibia_only_mode(sensor_names) else MODEL_FILE
     if _is_tibia_only_mode(sensor_names):
-        print("[IK-MODE] tibia-only: locked all model coordinates except knee_angle_r.")
+        print("[IK-MODE] tibia-only: locked all model coordinates except knee_angle_r and knee_angle_r_beta.")
 
     samples_to_sto(timestamps, quats_per_sensor, sensor_names, sto_path)
     ensure_ephys_xml(sensor_names, model_file=model_file)
