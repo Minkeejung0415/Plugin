@@ -1558,7 +1558,11 @@ void AcqBoardRedPitaya::run()
                 }
 
                 // PC-side CSV recording for ESP32 WiFi mode.
-                // elapsedSeconds here is the timestamp of the current sample (before dt is added).
+                // Use a counter-based timestamp (sample index / nominal rate) rather than
+                // elapsedSeconds: TCP delivers frames in bursts so wall-clock dt is unreliable —
+                // consecutive frames in the same burst all arrive at nearly the same instant and
+                // get clamped to the 2 ms minimum, producing uneven timestamps. The counter gives
+                // perfectly even spacing at the configured sample rate.
                 {
                     const juce::ScopedLock sl (esp32RecordLock);
                     if (esp32RecordStream != nullptr)
@@ -1581,10 +1585,13 @@ void AcqBoardRedPitaya::run()
                             rqz = float (channels[10]) * kQ15inv;
                         }
 
+                        const double nominalRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
+                        const double csvTimestamp = static_cast<double> (esp32RecordSampleCount) / nominalRate;
+
                         char row[192];
                         const int len = snprintf (row, sizeof (row),
                             "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.0f,%.6f,%.6f,%.6f,%.6f\n",
-                            elapsedSeconds, rax, ray, raz, rgx, rgy, rgz, rdio,
+                            csvTimestamp, rax, ray, raz, rgx, rgy, rgz, rdio,
                             rqw, rqx, rqy, rqz);
 
                         if (len > 0 && len < (int) sizeof (row))
