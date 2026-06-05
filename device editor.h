@@ -114,6 +114,10 @@ public:
     /** Updates the editable HW rate label from boardSampleRate (e.g. after ESP32 detect). */
     void syncRedPitayaSampleRateLabelFromBoard();
 
+    /** Disables the board-side RECORD button for ESP32 nodes (no device storage) and
+        re-enables it for Red Pitaya. Call after any detection that sets isEsp32Node. */
+    void syncRecordButtonForBoardType();
+
 private:
     /** Pointer to acquisition board device */
     class AcquisitionBoard* board;

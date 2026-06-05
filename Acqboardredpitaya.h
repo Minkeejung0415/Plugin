@@ -275,6 +275,11 @@ public:
     std::unique_ptr<juce::ChildProcess> openSimProcess;
     std::unique_ptr<juce::ChildProcess> openSimLiveProcess;
 
+    // PC-side CSV recording for ESP32 WiFi mode (written by run(), opened/closed by UI thread).
+    std::unique_ptr<juce::FileOutputStream> esp32RecordStream;
+    juce::CriticalSection esp32RecordLock;
+    int esp32RecordSampleCount = 0;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
 };
 

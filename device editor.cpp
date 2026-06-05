@@ -110,6 +110,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     recordButton->setClickingTogglesState (true);
     recordButton->setTooltip ("Record streaming data");
     addAndMakeVisible (recordButton.get());
+    syncRecordButtonForBoardType();
 
     sampleRateTitle = std::make_unique<Label> ("sampleRateTitle", isRedPitaya ? "Sample Rate" : "Sample Rate (Hz)");
     sampleRateTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
@@ -504,6 +505,30 @@ int DeviceEditor::getSelectedStreamSensorIndex() const
 
     const int id = sensorSelectCombo->getSelectedId();
     return jmax (0, id - 1);
+}
+
+void DeviceEditor::syncRecordButtonForBoardType()
+{
+    if (recordButton == nullptr
+        || board == nullptr
+        || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    if (rp->getIsEsp32Node())
+    {
+        recordButton->setEnabled (true);
+        recordButton->setTooltip ("Record IMU data to a CSV file in:\n"
+                                  "Documents\\Arduino\\ESP32-S3-1\\results\\\n"
+                                  "Columns: timestamp_s, ax_g, ay_g, az_g, "
+                                  "gx_dps, gy_dps, gz_dps, dio, qw, qx, qy, qz");
+    }
+    else
+    {
+        recordButton->setEnabled (true);
+        recordButton->setTooltip ("Record streaming data to the board's local storage.");
+    }
 }
 
 void DeviceEditor::syncRedPitayaSampleRateLabelFromBoard()
@@ -1069,6 +1094,7 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
                                                  + (rp->getIsEsp32Node() ? " (ESP32-S3)" : " (Red Pitaya)"));
                 syncRedPitayaSampleRateLabelFromBoard();
                 syncRedPitayaBoardSampleRateFromLabel();
+                syncRecordButtonForBoardType();
 
                 if (! acquisitionIsActive)
                     CoreServices::updateSignalChain (this);
