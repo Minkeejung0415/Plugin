@@ -22,6 +22,8 @@ namespace
 
     const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
 
+    const char* kEsp32RecordDir = "C:\\Users\\KIN Student\\Documents\\Arduino\\ESP32-S3-1\\results";
+
     String envEsp32NodeHost()
     {
         if (const char* val = std::getenv ("ESP32_NODE_HOST"))
@@ -948,12 +950,52 @@ bool AcqBoardRedPitaya::stopAcquisition()
         openSimLiveProcess.reset();
     }
 
+    // Flush and close any in-progress PC-side recording so no data is lost.
+    {
+        const juce::ScopedLock sl (esp32RecordLock);
+        if (esp32RecordStream != nullptr)
+        {
+            esp32RecordStream->flush();
+            esp32RecordStream.reset();
+        }
+    }
+
     streamSensorNames.clear();
 
     return true;
 }
 bool AcqBoardRedPitaya::sendRecordOnCommand()
 {
+    if (isEsp32Node)
+    {
+        // ESP32 WiFi nodes have no board-side storage — record to a CSV on the PC instead.
+        const juce::File dir (kEsp32RecordDir);
+        dir.createDirectory();
+
+        const String stamp = Time::getCurrentTime().formatted ("%Y%m%d_%H%M%S");
+        const juce::File file = dir.getChildFile ("recording_" + stamp + ".csv");
+
+        auto stream = std::make_unique<juce::FileOutputStream> (file);
+        if (! stream->openedOk())
+        {
+            std::cout << "ESP32 record: could not open " << file.getFullPathName() << std::endl;
+            return false;
+        }
+
+        stream->writeText ("timestamp_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,dio,qw,qx,qy,qz\n",
+                           false, false, nullptr);
+
+        lastRecordingPath = file.getFullPathName();
+        lastRecordingCsvPath = {};
+
+        const juce::ScopedLock sl (esp32RecordLock);
+        esp32RecordStream     = std::move (stream);
+        esp32RecordSampleCount = 0;
+        std::cout << "ESP32 record: writing to " << lastRecordingPath << std::endl;
+        return true;
+    }
+
+    // Red Pitaya: tell the board to save locally.
     if (commandSocket == nullptr)
         return false;
 
@@ -972,15 +1014,23 @@ bool AcqBoardRedPitaya::sendRecordOnCommand()
     }
 
     int written = commandSocket->write (msg.toRawUTF8(), (int) msg.getNumBytesAsUTF8());
-
-    if (written <= 0)
-        return false;
-
-    return true;
+    return written > 0;
 }
 
 bool AcqBoardRedPitaya::sendRecordOffCommand()
 {
+    if (isEsp32Node)
+    {
+        const juce::ScopedLock sl (esp32RecordLock);
+        if (esp32RecordStream != nullptr)
+        {
+            esp32RecordStream->flush();
+            esp32RecordStream.reset();
+            std::cout << "ESP32 record: closed " << lastRecordingPath << std::endl;
+        }
+        return true;
+    }
+
     if (commandSocket == nullptr)
         return false;
 
@@ -1504,6 +1554,45 @@ void AcqBoardRedPitaya::run()
                         }
 
                         sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
+                    }
+                }
+
+                // PC-side CSV recording for ESP32 WiFi mode.
+                // elapsedSeconds here is the timestamp of the current sample (before dt is added).
+                {
+                    const juce::ScopedLock sl (esp32RecordLock);
+                    if (esp32RecordStream != nullptr)
+                    {
+                        const float rax  = channelsInPacket > 0 ? float (channels[0]) * accScale : 0.0f;
+                        const float ray  = channelsInPacket > 1 ? float (channels[1]) * accScale : 0.0f;
+                        const float raz  = channelsInPacket > 2 ? float (channels[2]) * accScale : 0.0f;
+                        const float rgx  = channelsInPacket > 3 ? float (channels[3]) * gyrScale : 0.0f;
+                        const float rgy  = channelsInPacket > 4 ? float (channels[4]) * gyrScale : 0.0f;
+                        const float rgz  = channelsInPacket > 5 ? float (channels[5]) * gyrScale : 0.0f;
+                        const float rdio = channelsInPacket > 6 ? float (channels[6] & 1) : 0.0f;
+
+                        float rqw = 0.0f, rqx = 0.0f, rqy = 0.0f, rqz = 0.0f;
+                        if (filterEnabled && channelsInPacket >= 11)
+                        {
+                            constexpr float kQ15inv = 1.0f / 32767.0f;
+                            rqw = float (channels[7])  * kQ15inv;
+                            rqx = float (channels[8])  * kQ15inv;
+                            rqy = float (channels[9])  * kQ15inv;
+                            rqz = float (channels[10]) * kQ15inv;
+                        }
+
+                        char row[192];
+                        const int len = snprintf (row, sizeof (row),
+                            "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.0f,%.6f,%.6f,%.6f,%.6f\n",
+                            elapsedSeconds, rax, ray, raz, rgx, rgy, rgz, rdio,
+                            rqw, rqx, rqy, rqz);
+
+                        if (len > 0 && len < (int) sizeof (row))
+                            esp32RecordStream->write (row, (size_t) len);
+
+                        // Flush every 100 samples (~1 s at 100 Hz) so data survives a crash.
+                        if (++esp32RecordSampleCount % 100 == 0)
+                            esp32RecordStream->flush();
                     }
                 }
 
