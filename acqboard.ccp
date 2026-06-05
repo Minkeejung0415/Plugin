@@ -468,9 +468,11 @@ bool AcqBoardRedPitaya::detectBoard()
     // 127.0.0.1 is the USB serial->TCP bridge (serial_tcp_bridge.py / run_usb_plugin_bridge.ps1),
     // so the bridge is found without manually setting a Node IP. Detection still requires a
     // valid handshake reply, so an unrelated localhost:5000 service won't be mistaken for a board.
-    const String esp32Candidates[3] = { configurableNodeHost.trim(), envEsp32NodeHost(), "127.0.0.1" };
+    // 192.168.4.1 is the fixed Soft AP IP the firmware starts when STA join times out — no manual
+    // Node IP entry needed when the PC joins the STEP_ESP32 hotspot.
+    const String esp32Candidates[4] = { configurableNodeHost.trim(), envEsp32NodeHost(), "192.168.4.1", "127.0.0.1" };
 
-    for (int h = 0; h < 3; ++h)
+    for (int h = 0; h < 4; ++h)
     {
         const String host = esp32Candidates[h];
 
@@ -763,15 +765,23 @@ bool AcqBoardRedPitaya::startAcquisition()
 
         // Relay is active after START; re-send FREQ so USB bridge → serial always applies
         // the rate matching settings.boardSampleRate (pre-START FREQ is also forwarded).
+        // In WiFi mode the firmware replies "OK FREQ:N\n" / "OK FILTER ON\n"; drain those
+        // replies here so run()'s frame parser never sees ASCII bytes at the start of the
+        // stream. readReplyLine returns false immediately if a binary frame already arrived
+        // (first byte < 0x20), so this is a no-op in that case.
         {
             char freqMsg[32];
             snprintf (freqMsg, sizeof (freqMsg), "FREQ:%d\n", targetHz);
             commandSocket->write (freqMsg, (int) strlen (freqMsg));
+            String okFreq;
+            readReplyLine (okFreq, 200);
         }
 
         {
             const char* filterMsg = filterEnabled ? "FILTER ON\n" : "FILTER OFF\n";
             commandSocket->write (filterMsg, (int) strlen (filterMsg));
+            String okFilter;
+            readReplyLine (okFilter, 200);
         }
 
         std::cout << "ESP32-S3: Streaming started (TCP binary, "
