@@ -74,6 +74,11 @@ SENSOR_CHAIN_UP = [
     "femur_l_imu",
     "tibia_l_imu",
     "calcn_l_imu",
+    "humerus_r_imu",
+    "radius_r_imu",
+    "humerus_l_imu",
+    "radius_l_imu",
+    "head_imu",
 ]
 
 SENSOR_NAMES = {
