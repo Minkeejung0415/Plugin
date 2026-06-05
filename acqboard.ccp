@@ -26,12 +26,14 @@ namespace
 
     // OpenSim PhysicalOffsetFrame names for the Rajagopal2015 model (distal to proximal, right then left).
     const char* kBodySegmentNames[] = {
-        "tibia_r_imu",  "femur_r_imu", "pelvis_imu",  "torso_imu",
-        "calcn_r_imu",  "femur_l_imu", "tibia_l_imu", "calcn_l_imu"
+        "tibia_r_imu",   "femur_r_imu",  "pelvis_imu",    "torso_imu",
+        "calcn_r_imu",   "femur_l_imu",  "tibia_l_imu",   "calcn_l_imu",
+        "humerus_r_imu", "radius_r_imu", "humerus_l_imu", "radius_l_imu"
     };
     const char* kBodySegmentLabels[] = {
-        "Right Tibia",  "Right Femur", "Pelvis",       "Torso",
-        "Right Foot",   "Left Femur",  "Left Tibia",   "Left Foot"
+        "Right Tibia",     "Right Femur",   "Pelvis",         "Torso",
+        "Right Foot",      "Left Femur",    "Left Tibia",     "Left Foot",
+        "Right Upper Arm", "Right Forearm", "Left Upper Arm", "Left Forearm"
     };
 
     String envEsp32NodeHost()
