@@ -267,6 +267,20 @@ public:
     int sensorAccPreset[6] = {};   /* 0=±2g, 1=±4g, 2=±8g,  3=±16g       */
     int sensorGyrPreset[6] = {};   /* 0=±250°/s, 1=±500, 2=±1000, 3=±2000 */
 
+    /** Per-sensor OpenSim body segment assignment — index into getBodySegmentName().
+     *  Written to opensim_sensor_map.json when changed or just before launching the bridge. */
+    int sensorBodySegment[6] = {};  /* default 0 = tibia_r_imu for every sensor */
+
+    static constexpr int NUM_BODY_SEGMENTS = 8;
+    static const char* getBodySegmentName (int idx);   // e.g. "tibia_r_imu"
+    static const char* getBodySegmentLabel (int idx);  // e.g. "Right Tibia"
+
+    void setSensorBodySegment (int sensorIndex, int segmentIndex);
+    int  getSensorBodySegment (int sensorIndex) const;
+
+    /** Writes opensim_sensor_map.json so the Python bridge picks up the current mapping. */
+    bool writeOpenSimSensorMap() const;
+
     /** UDP v2: quats is numSensors×4 floats (qw,qx,qy,qz per sensor, unit quaternion). */
     void sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors);
 

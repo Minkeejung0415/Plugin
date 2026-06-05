@@ -176,6 +176,9 @@ private:
     std::unique_ptr<Label> sensorSelectTitle;
     std::unique_ptr<ComboBox> sensorSelectCombo;
 
+    std::unique_ptr<Label>    sensorBodySegmentTitle;
+    std::unique_ptr<ComboBox> sensorBodySegmentCombo;
+
     std::unique_ptr<UtilityButton> openSimMotionButton;
     std::unique_ptr<UtilityButton> openSimLiveButton;
 

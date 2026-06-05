@@ -23,6 +23,7 @@ import time
 import argparse
 import math
 import datetime
+import json
 import xml.etree.ElementTree as ET
 import numpy as np
 import imufusion
@@ -83,11 +84,36 @@ SENSOR_NAMES = {
 if os.environ.get("OPENSIM_ESP32_8CH", "").strip().lower() in ("1", "true", "yes"):
     SENSOR_NAMES[1] = ["torso_imu"]
 
+# Path written by the plugin just before launching this bridge.
+SENSOR_MAP_FILE = os.path.join(WORK_DIR, "opensim_sensor_map.json")
+
+
+def _load_sensor_map():
+    """Read sensor_slots from opensim_sensor_map.json; return list or None."""
+    if not os.path.isfile(SENSOR_MAP_FILE):
+        return None
+    try:
+        with open(SENSOR_MAP_FILE, "r") as f:
+            data = json.load(f)
+        slots = data.get("sensor_slots", [])
+        if slots and isinstance(slots, list):
+            return [str(s) for s in slots if s]
+    except Exception as e:
+        print(f"[WARN] Could not read {SENSOR_MAP_FILE}: {e}")
+    return None
+
+
 def _sensor_names_for(n_imus):
-    """Return the list of OpenSim frame names for n_imus sensors (distal → proximal)."""
+    """Return the list of OpenSim frame names for n_imus sensors.
+
+    Priority: hardcoded SENSOR_NAMES dict → opensim_sensor_map.json → SENSOR_CHAIN_UP fallback.
+    """
     n = int(n_imus)
     if n in SENSOR_NAMES:
         return SENSOR_NAMES[n]
+    mapped = _load_sensor_map()
+    if mapped and 1 <= n <= len(mapped):
+        return list(mapped[:n])
     if 1 <= n <= len(SENSOR_CHAIN_UP):
         return list(SENSOR_CHAIN_UP[:n])
     return [f"sensor_{i}_imu" for i in range(n)]

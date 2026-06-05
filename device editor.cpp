@@ -257,16 +257,32 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         sensorSelectCombo->setSelectedId (1, dontSendNotification);
         addAndMakeVisible (sensorSelectCombo.get());
 
+        sensorBodySegmentTitle = std::make_unique<Label> ("sensorBodySegmentTitle", "Body Segment");
+        sensorBodySegmentTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        sensorBodySegmentTitle->setBounds (col4, 62, 110, 12);
+        addAndMakeVisible (sensorBodySegmentTitle.get());
+
+        sensorBodySegmentCombo = std::make_unique<ComboBox> ("sensorBodySegment");
+        sensorBodySegmentCombo->setBounds (col4, 74, comboW, 20);
+        sensorBodySegmentCombo->addListener (this);
+        for (int i = 0; i < AcqBoardRedPitaya::NUM_BODY_SEGMENTS; ++i)
+            sensorBodySegmentCombo->addItem (AcqBoardRedPitaya::getBodySegmentLabel (i), i + 1);
+        sensorBodySegmentCombo->setSelectedId (1, dontSendNotification);
+        sensorBodySegmentCombo->setTooltip ("OpenSim body segment this sensor is attached to. "
+                                             "Written to opensim_sensor_map.json before the bridge launches.");
+        addAndMakeVisible (sensorBodySegmentCombo.get());
+
+        // Shifted down 32 px to make room for Body Segment combo above.
         openSimMotionButton = std::make_unique<UtilityButton> ("Gen Motion");
         openSimMotionButton->setRadius (3.0f);
-        openSimMotionButton->setBounds (col4, 68, comboW, 20);
+        openSimMotionButton->setBounds (col4, 100, comboW, 20);
         openSimMotionButton->addListener (this);
         openSimMotionButton->setTooltip ("Collect IMU data, run OpenSim IK, and open result in OpenSim 4.5 GUI");
         addAndMakeVisible (openSimMotionButton.get());
 
         openSimLiveButton = std::make_unique<UtilityButton> ("OpenSim Live");
         openSimLiveButton->setRadius (3.0f);
-        openSimLiveButton->setBounds (col4, 92, comboW, 20);
+        openSimLiveButton->setBounds (col4, 122, comboW, 20);
         openSimLiveButton->addListener (this);
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
@@ -622,10 +638,24 @@ void DeviceEditor::refreshRedPitayaSensorCombosFromBoard()
 
     sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
     sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
+
+    if (sensorBodySegmentCombo != nullptr)
+        sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (0) + 1, dontSendNotification);
 }
 
 void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
 {
+    // Body segment mapping can be set at any time — not gated by acquisitionIsActive
+    if (redPitayaSensorUiBuilt && sensorBodySegmentCombo != nullptr
+        && comboBox == sensorBodySegmentCombo.get()
+        && board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+    {
+        auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+        rp->setSensorBodySegment (getSelectedStreamSensorIndex(),
+                                  sensorBodySegmentCombo->getSelectedId() - 1);
+        return;
+    }
+
     if (redPitayaSensorUiBuilt && board != nullptr
         && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya
         && acquisitionIsActive)
@@ -640,6 +670,10 @@ void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
 
             sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
             sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
+
+            // Sync body segment combo to the stored mapping for the newly selected sensor
+            if (sensorBodySegmentCombo != nullptr)
+                sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (si) + 1, dontSendNotification);
 
             if (acquisitionIsActive && board != nullptr
                 && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
@@ -962,6 +996,10 @@ void DeviceEditor::startAcquisition()
             sensorSelectTitle->toFront (false);
         if (sensorSelectCombo != nullptr)
             sensorSelectCombo->toFront (false);
+        if (sensorBodySegmentTitle != nullptr)
+            sensorBodySegmentTitle->toFront (false);
+        if (sensorBodySegmentCombo != nullptr)
+            sensorBodySegmentCombo->toFront (false);
         if (openSimMotionButton != nullptr)
             openSimMotionButton->toFront (false);
         if (openSimLiveButton != nullptr)
@@ -1193,6 +1231,12 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
 
     if (nodeHostLabel != nullptr)
         xml->setAttribute ("NodeHost", nodeHostLabel->getText().trim());
+
+    if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+    {
+        for (int i = 0; i < 6; ++i)
+            xml->setAttribute ("BodySegment" + String (i), rp->getSensorBodySegment (i));
+    }
 }
 
 void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
@@ -1290,6 +1334,18 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
 
     // load channel naming scheme
     board->setNamingScheme ((ChannelNamingScheme) xml->getIntAttribute ("Channel_Naming_Scheme", 0));
+
+    if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            const int seg = jlimit (0, AcqBoardRedPitaya::NUM_BODY_SEGMENTS - 1,
+                                    xml->getIntAttribute ("BodySegment" + String (i), 0));
+            rp->setSensorBodySegment (i, seg);
+        }
+        if (sensorBodySegmentCombo != nullptr)
+            sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (0) + 1, dontSendNotification);
+    }
 }
 
 Visualizer* DeviceEditor::createNewCanvas()
