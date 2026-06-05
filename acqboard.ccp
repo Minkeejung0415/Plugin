@@ -24,6 +24,16 @@ namespace
 
     const char* kEsp32RecordDir = "C:\\Users\\KIN Student\\Documents\\Arduino\\ESP32-S3-1\\results";
 
+    // OpenSim PhysicalOffsetFrame names for the Rajagopal2015 model (distal to proximal, right then left).
+    const char* kBodySegmentNames[] = {
+        "tibia_r_imu",  "femur_r_imu", "pelvis_imu",  "torso_imu",
+        "calcn_r_imu",  "femur_l_imu", "tibia_l_imu", "calcn_l_imu"
+    };
+    const char* kBodySegmentLabels[] = {
+        "Right Tibia",  "Right Femur", "Pelvis",       "Torso",
+        "Right Foot",   "Left Femur",  "Left Tibia",   "Left Foot"
+    };
+
     String envEsp32NodeHost()
     {
         if (const char* val = std::getenv ("ESP32_NODE_HOST"))
@@ -1312,8 +1322,67 @@ void AcqBoardRedPitaya::setNumHeadstageChannels (int /*headstageIndex*/, int /*c
 {
 }
 
+const char* AcqBoardRedPitaya::getBodySegmentName (int idx)
+{
+    if (idx < 0 || idx >= NUM_BODY_SEGMENTS) idx = 0;
+    return kBodySegmentNames[idx];
+}
+
+const char* AcqBoardRedPitaya::getBodySegmentLabel (int idx)
+{
+    if (idx < 0 || idx >= NUM_BODY_SEGMENTS) idx = 0;
+    return kBodySegmentLabels[idx];
+}
+
+void AcqBoardRedPitaya::setSensorBodySegment (int sensorIndex, int segmentIndex)
+{
+    if (sensorIndex >= 0 && sensorIndex < 6)
+        sensorBodySegment[sensorIndex] = jlimit (0, NUM_BODY_SEGMENTS - 1, segmentIndex);
+}
+
+int AcqBoardRedPitaya::getSensorBodySegment (int sensorIndex) const
+{
+    if (sensorIndex < 0 || sensorIndex >= 6) return 0;
+    return sensorBodySegment[sensorIndex];
+}
+
+bool AcqBoardRedPitaya::writeOpenSimSensorMap() const
+{
+    const juce::File mapFile (String (kOpenSimWorkDir) + "\\opensim_sensor_map.json");
+
+    juce::FileOutputStream out (mapFile);
+    if (! out.openedOk())
+    {
+        std::cout << "OpenSim sensor map: cannot write " << mapFile.getFullPathName() << std::endl;
+        return false;
+    }
+
+    out.setPosition (0);
+    out.truncate();
+
+    const int n = jmax (1, streamSensorNames.size());
+    out.writeText ("{\n"
+                   "  \"comment\": \"Written by Open Ephys plugin. sensor_slots[i] = OpenSim body frame for sensor i.\",\n"
+                   "  \"sensor_slots\": [\n",
+                   false, false, nullptr);
+
+    for (int i = 0; i < n; ++i)
+    {
+        const int seg  = jlimit (0, NUM_BODY_SEGMENTS - 1, sensorBodySegment[i]);
+        const bool last = (i == n - 1);
+        out.writeText (String ("    \"") + kBodySegmentNames[seg] + "\"" + (last ? "\n" : ",\n"),
+                       false, false, nullptr);
+    }
+
+    out.writeText ("  ]\n}\n", false, false, nullptr);
+
+    std::cout << "OpenSim sensor map: wrote " << n << " sensor(s) to " << mapFile.getFullPathName() << std::endl;
+    return true;
+}
+
 void AcqBoardRedPitaya::launchOpenSimMotion()
 {
+    writeOpenSimSensorMap();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String bridgePath = workDir + "\\ephys_to_opensim_bridge.py";
     const juce::String logPath = workDir + "\\ephys_bridge_run.log";
@@ -1354,6 +1423,7 @@ void AcqBoardRedPitaya::launchOpenSimMotion()
 
 void AcqBoardRedPitaya::launchOpenSimLive()
 {
+    writeOpenSimSensorMap();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String scriptPath = workDir + "\\opensim_live_realtime.py";
     juce::File batFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
