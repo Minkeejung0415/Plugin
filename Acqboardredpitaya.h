@@ -271,7 +271,7 @@ public:
      *  Written to opensim_sensor_map.json when changed or just before launching the bridge. */
     int sensorBodySegment[6] = {};  /* default 0 = tibia_r_imu for every sensor */
 
-    static constexpr int NUM_BODY_SEGMENTS = 12;
+    static constexpr int NUM_BODY_SEGMENTS = 13;
     static const char* getBodySegmentName (int idx);   // e.g. "tibia_r_imu"
     static const char* getBodySegmentLabel (int idx);  // e.g. "Right Tibia"
 
