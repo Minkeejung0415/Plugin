@@ -25,8 +25,6 @@
 #include "axi_header.h"
 #include "sensor_fusion.h"
 #include "vqf.h"
-#include "imu_registers.h"   /* centralised IMU register map */
-#include "noise_analysis.h"  /* sensor drift and noise characterisation */
 
 // --- Hardware Constants ---
 #define AXI_GPIO_ADDRESS  0x41200000
@@ -38,31 +36,24 @@
 #define HEADER_SIZE       22
 #define ANALOG_WAVEFORM_CHANNELS 2
 #define GYRO_BIAS_CALIBRATION_SAMPLES 200
+#define ICM20948_BANK_0 0x00
+#define ICM20948_BANK_2 0x02
+#define ICM20948_BANK_3 0x03
+#define ICM20948_EXT_SENS_DATA_00 0x3B
+#define ICM20948_I2C_MST_CTRL 0x01
+#define ICM20948_I2C_SLV0_ADDR 0x03
+#define ICM20948_I2C_SLV0_REG 0x04
+#define ICM20948_I2C_SLV0_CTRL 0x05
+#define ICM20948_I2C_SLV0_DO 0x06
+#define ICM20948_AK09916_ADDR 0x0C
+#define ICM20948_AK09916_ST1 0x10
+#define ICM20948_AK09916_HXL 0x11
+#define ICM20948_AK09916_CNTL2 0x31
 
-/* ICM-20948 bank and I²C-master aliases — canonical names live in imu_registers.h */
-#define ICM20948_BANK_0           ICM20948_B0_WHO_AM_I  /* bank index only; use ICM20948_BANK_x */
-#undef  ICM20948_BANK_0
-#define ICM20948_BANK_0           0x00u
-#define ICM20948_EXT_SENS_DATA_00 ICM20948_B0_EXT_SENS_DATA_00
-#define ICM20948_I2C_MST_CTRL     ICM20948_B3_I2C_MST_CTRL
-#define ICM20948_I2C_SLV0_ADDR    ICM20948_B3_I2C_SLV0_ADDR
-#define ICM20948_I2C_SLV0_REG     ICM20948_B3_I2C_SLV0_REG
-#define ICM20948_I2C_SLV0_CTRL    ICM20948_B3_I2C_SLV0_CTRL
-#define ICM20948_I2C_SLV0_DO      ICM20948_B3_I2C_SLV0_DO
-#define ICM20948_AK09916_ADDR     ICM20948_AK09916_I2C_ADDR
-#define ICM20948_AK09916_ST1      AK09916_REG_ST1
-#define ICM20948_AK09916_HXL      AK09916_REG_HXL
-#define ICM20948_AK09916_CNTL2    AK09916_REG_CNTL2
-
-#define BUF_SAMPLES 1000 /* flushes to SD card every 1,000 samples */
+#define BUF_SAMPLES 1000 // Flushes to SD card every 1,000 samples
 #define UDP_PORT       55001
-#define CHUNK_SAMPLES  1    /* 1 packet per UDP datagram keeps latency at ~1/sampleRate */
+#define CHUNK_SAMPLES  1    // 1 packet per UDP datagram keeps latency at ~1/sampleRate; increase only if network overhead becomes an issue
 #define MAX_STREAM_SENSORS 6
-
-/* One noise analyzer per sensor slot; populated during calibrate_gyro_biases(). */
-static NoiseAnalyzer g_noise[MAX_STREAM_SENSORS];
-/* Interval (seconds) between automatic noise reports printed to stderr during streaming. */
-#define NOISE_REPORT_INTERVAL_SEC 60
 
 /* Hardware tick rate for streaming (Hz); FREQ: command updates this before START. */
 static volatile int g_stream_hw_hz = DESIRED_SAMPLE_RATE_HZ;
@@ -124,7 +115,17 @@ static long long timespec_diff_ns(const struct timespec *start, const struct tim
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
            (long long)(end->tv_nsec - start->tv_nsec);
 }
-/* AXI IIC register offsets and bit masks are defined in imu_registers.h */
+/* --- AXI IIC bus recovery (Xilinx core register map) --- */
+#define XIIC_RESETR_OFFSET           0x40u
+#define XIIC_CR_REG_OFFSET           0x100u
+#define XIIC_SR_REG_OFFSET           0x104u
+#define XIIC_DRR_REG_OFFSET          0x10Cu
+#define XIIC_RESET_MASK              0x0Au
+#define XIIC_CR_ENABLE_DEVICE_MASK   0x01u
+#define XIIC_CR_TX_FIFO_RESET_MASK   0x02u
+#define XIIC_SR_BUS_BUSY_MASK        0x04u
+#define XIIC_SR_RX_FIFO_EMPTY_MASK   0x40u
+#define XIIC_SR_TX_FIFO_EMPTY_MASK   0x80u
 
 static uint32_t axi_iic_read_sr(void *axi_map)
 {
@@ -576,29 +577,6 @@ static void calibrate_gyro_biases(HardwareContext *ctx) {
            GYRO_BIAS_CALIBRATION_SAMPLES);
     fflush(stdout);
 
-    /* Initialise noise analyzers using the current hardware rate. */
-    for (int i = 0; i < ctx->active_sensor_count; i++) {
-        const SensorInstance *s = &ctx->sensors[i];
-        bool has_mag = (strcmp(s->name, "MPU9250")  == 0 ||
-                        strcmp(s->name, "ICM20948") == 0 ||
-                        strcmp(s->name, "BNO055")   == 0);
-
-        /* Pick physical-unit scales based on sensor type at default full-scale. */
-        float a_scale = 1.0f / MPU6050_ACCEL_LSB_PER_G * 9.80665f;  /* raw → m/s² */
-        float g_scale = 1.0f / MPU6050_GYRO_LSB_PER_DPS;             /* raw → °/s  */
-        if (strcmp(s->name, "ICM20948") == 0) {
-            a_scale = 1.0f / ICM20948_ACCEL_LSB_PER_G * 9.80665f;
-            g_scale = 1.0f / ICM20948_GYRO_LSB_PER_DPS;
-        } else if (strcmp(s->name, "BNO055") == 0) {
-            a_scale = 1.0f / BNO055_ACCEL_LSB_PER_MPS2;
-            g_scale = 1.0f / BNO055_GYRO_LSB_PER_DPS;
-        }
-
-        noise_analyzer_init(&g_noise[i],
-                            (float)DESIRED_SAMPLE_RATE_HZ,
-                            has_mag, a_scale, g_scale);
-    }
-
     for (int sample = 0; sample < GYRO_BIAS_CALIBRATION_SAMPLES; sample++) {
         for (int i = 0; i < ctx->active_sensor_count; i++) {
             SensorInstance *s = &ctx->sensors[i];
@@ -612,12 +590,6 @@ static void calibrate_gyro_biases(HardwareContext *ctx) {
             gyro_sums[i][0] += raw_gyr[0];
             gyro_sums[i][1] += raw_gyr[1];
             gyro_sums[i][2] += raw_gyr[2];
-
-            /* Feed into noise analyzer — build initial baseline statistics. */
-            int16_t noise_raw[NOISE_MAX_AXES] = {0};
-            noise_raw[0] = raw_channels[0]; noise_raw[1] = raw_channels[1]; noise_raw[2] = raw_channels[2];
-            noise_raw[3] = raw_gyr[0];       noise_raw[4] = raw_gyr[1];       noise_raw[5] = raw_gyr[2];
-            noise_analyzer_update(&g_noise[i], noise_raw, false);
         }
         usleep(10000);
     }
@@ -632,11 +604,6 @@ static void calibrate_gyro_biases(HardwareContext *ctx) {
 
         printf("Sensor %d (%s) gyro bias: [%d, %d, %d]\n",
                i, s->name, s->gyro_bias[0], s->gyro_bias[1], s->gyro_bias[2]);
-    }
-
-    /* Print calibration-pass noise summary so the operator can verify sensor quality. */
-    for (int i = 0; i < ctx->active_sensor_count; i++) {
-        noise_analyzer_report(&g_noise[i], ctx->sensors[i].name, stderr);
     }
 }
 
@@ -1800,45 +1767,6 @@ static int run_stream(int client_fd, int udp_fd, struct sockaddr_in *client_udp_
         clock_gettime(CLOCK_MONOTONIC, &t_end);
         warn_if_sample_loop_slow_us(&t_start, &t_end);
         maybe_report_vqf_stats(with_fusion, ns, &vqf_total_ns, &vqf_max_ns, &vqf_call_count);
-
-        /* Feed each sensor's raw channels into the live noise analyzers.
-         * frame_buffer layout: [sensor0_channels ... sensor1_channels ...].
-         * We re-read the individual raw int16 values from the packed frame. */
-        {
-            int frame_offset = 0;
-            for (int si = 0; si < ctx->active_sensor_count; si++) {
-                const SensorInstance *s = &ctx->sensors[si];
-                int16_t noise_raw[NOISE_MAX_AXES] = {0};
-                /* accel at indices 0,1,2; gyro at 3,4,5 in frame_buffer */
-                for (int j = 0; j < 6 && j < s->num_channels; j++)
-                    noise_raw[j] = frame_buffer[frame_offset + j];
-                /* mag at 6,7,8 when present */
-                if (s->num_channels >= 9) {
-                    noise_raw[6] = frame_buffer[frame_offset + 6];
-                    noise_raw[7] = frame_buffer[frame_offset + 7];
-                    noise_raw[8] = frame_buffer[frame_offset + 8];
-                }
-                noise_analyzer_update(&g_noise[si], noise_raw, s->mag_is_fresh);
-
-                /* Alert on gyro drift exceeding 3× noise floor */
-                if (noise_analyzer_gyro_drift_exceeded(&g_noise[si]))
-                    fprintf(stderr, "[noise] sensor %d (%s): gyro drift alert at sample %d\n",
-                            si, s->name, ns);
-
-                frame_offset += s->num_channels + 4; /* +4 for quaternion channels */
-            }
-        }
-
-        /* Periodic long-duration noise report every NOISE_REPORT_INTERVAL_SEC seconds. */
-        {
-            static time_t last_noise_report_sec = 0;
-            time_t now_sec = time(NULL);
-            if (now_sec - last_noise_report_sec >= NOISE_REPORT_INTERVAL_SEC) {
-                last_noise_report_sec = now_sec;
-                for (int si = 0; si < ctx->active_sensor_count; si++)
-                    noise_analyzer_report(&g_noise[si], ctx->sensors[si].name, stderr);
-            }
-        }
 
         // --- File Logging (The Unblocked Double-Buffer) ---
         if (record && bin_file != NULL) {
