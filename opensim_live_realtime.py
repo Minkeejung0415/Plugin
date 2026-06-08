@@ -780,6 +780,12 @@ def run_live():
     print("[Connect OpenSim] Loading model ...")
     model = osim.Model(MODEL_PATH)
     model.setUseVisualizer(True)
+    try:
+        model.getVisualizer().setShowGeometry(True)
+        model.getVisualizer().setShowMarkers(True)
+        print("[VIZ] Model geometry + markers enabled.")
+    except Exception as exc:
+        print(f"[VIZ] Could not force geometry on (use Show menu): {exc}")
 
     neutral_sto = os.path.join(WORK_DIR, "_neutral_frame.sto")
     _write_quat_sto(neutral_sto, 0.0, [_quat_mul(_Q_OPENSIM_FRAME, q) for q in _NEUTRAL_QUATS_8IMU])
