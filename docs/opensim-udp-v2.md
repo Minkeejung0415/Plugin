@@ -35,25 +35,22 @@ Uninstrumented segments stay at the **neutral standing pose** during live IK so 
 
 Override with `opensim_sensor_map.json` in the OpenSim work directory (`sensor_slots` list).
 
-## Angle feedback v3 (plugin display)
+## Angle feedback v3.1 (plugin display)
 
-`opensim_live_realtime.py` sends computed joint angles back to the Open Ephys plugin on **UDP port 5001** after each IK solve.
+`opensim_live_realtime.py` sends the selected joint angle back to the Open Ephys plugin on **UDP port 5001** after each IK solve.
 
 | Field | Description |
 |-------|-------------|
 | `t` | Stream time (seconds) |
-| `version` | `3.0` |
-| `hip_flexion_r` | Right hip flexion (degrees) |
-| `knee_angle_r` | Right knee angle (degrees) |
-| `pelvis_tilt` | Pelvis tilt (degrees) |
-| `pelvis_list` | Pelvis list (degrees) |
-| `pelvis_rotation` | Pelvis rotation (degrees) |
+| `version` | `3.1` |
+| `joint_index` | Index into the plugin **Display Joint** dropdown |
+| `angle_deg` | Selected joint angle (degrees) |
 
-Total: 7 little-endian `float32` values.
+Total: 4 little-endian `float32` values.
 
-## Target angles
+## Display joint
 
-Set target joint angles in the plugin UI (**Tgt Knee**, **Tgt Hip**) or edit `opensim_target_angles.json` in the OpenSim work directory. The live script shows **Current / Target / Error** in an on-screen overlay next to the Simbody visualizer.
+Choose which joint to monitor in the plugin **Display Joint** dropdown. The live script draws that joint's angle on the **OpenSim Simbody viewer** (screen text + window title). Selection is written to `opensim_display_joint.json` in the OpenSim work directory.
 
 ## Legacy v1 (acc/gyro)
 

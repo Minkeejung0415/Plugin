@@ -121,8 +121,8 @@ public:
         re-enables it for Red Pitaya. Call after any detection that sets isEsp32Node. */
     void syncRecordButtonForBoardType();
 
-    /** Pushes editable target knee/hip labels into the board before OpenSim launch. */
-    void syncOpenSimTargetAnglesToBoard();
+    /** Pushes the display-joint combo selection into the board before OpenSim launch. */
+    void syncOpenSimDisplayJointToBoard();
 
 private:
     /** Pointer to acquisition board device */
@@ -188,14 +188,10 @@ private:
     std::unique_ptr<UtilityButton> openSimMotionButton;
     std::unique_ptr<UtilityButton> openSimLiveButton;
 
-    std::unique_ptr<Label> targetKneeTitle;
-    std::unique_ptr<Label> targetKneeLabel;
-    std::unique_ptr<Label> targetHipTitle;
-    std::unique_ptr<Label> targetHipLabel;
-    std::unique_ptr<Label> liveKneeTitle;
-    std::unique_ptr<Label> liveKneeLabel;
-    std::unique_ptr<Label> liveHipTitle;
-    std::unique_ptr<Label> liveHipLabel;
+    std::unique_ptr<Label>    displayJointTitle;
+    std::unique_ptr<ComboBox> displayJointCombo;
+    std::unique_ptr<Label>    liveAngleTitle;
+    std::unique_ptr<Label>    liveAngleLabel;
 
     enum AudioChannel
     {

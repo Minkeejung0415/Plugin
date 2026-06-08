@@ -271,16 +271,14 @@ public:
      *  Written to opensim_sensor_map.json when changed or just before launching the bridge. */
     int sensorBodySegment[6] = {};  /* default 0 = tibia_r_imu for every sensor */
 
-    float targetKneeAngleDeg = 90.0f;
-    float targetHipAngleDeg = 0.0f;
-    float targetAngleToleranceDeg = 5.0f;
+    int displayJointIndex = 1;  /* default: knee_angle_r */
 
     mutable CriticalSection liveAngleLock;
-    float liveKneeAngleDeg = 0.0f;
-    float liveHipAngleDeg = 0.0f;
+    float liveDisplayAngleDeg = 0.0f;
     bool liveAnglesValid = false;
 
     static constexpr int NUM_BODY_SEGMENTS = 13;
+    static constexpr int NUM_DISPLAY_JOINTS = 10;
     static const char* getBodySegmentName (int idx);   // e.g. "tibia_r_imu"
     static const char* getBodySegmentLabel (int idx);  // e.g. "Right Tibia"
 
@@ -290,16 +288,17 @@ public:
     /** Writes opensim_sensor_map.json so the Python bridge picks up the current mapping. */
     bool writeOpenSimSensorMap() const;
 
-    /** Writes opensim_target_angles.json for live IK overlay / targeting. */
-    bool writeOpenSimTargetAngles() const;
+    /** Writes opensim_display_joint.json for the live Simbody angle HUD. */
+    bool writeOpenSimDisplayJoint() const;
 
-    void setTargetKneeAngleDeg (float degrees);
-    void setTargetHipAngleDeg (float degrees);
-    float getTargetKneeAngleDeg() const { return targetKneeAngleDeg; }
-    float getTargetHipAngleDeg() const { return targetHipAngleDeg; }
+    void setDisplayJointIndex (int index);
+    int  getDisplayJointIndex() const { return displayJointIndex; }
 
-    /** Latest joint angles received from opensim_live_realtime.py (UDP v3 feedback). */
-    bool getLiveJointAngles (float& kneeDeg, float& hipDeg) const;
+    static const char* getDisplayJointName (int idx);
+    static const char* getDisplayJointLabel (int idx);
+
+    /** Latest displayed-joint angle from opensim_live_realtime.py (UDP v3 feedback). */
+    bool getLiveDisplayAngle (float& angleDeg) const;
     bool hasLiveJointAngles() const { return liveAnglesValid; }
 
     /** Non-blocking read of angle feedback on UDP port 5001. */

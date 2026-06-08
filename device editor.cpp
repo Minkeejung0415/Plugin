@@ -287,59 +287,33 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
 
-        targetKneeTitle = std::make_unique<Label> ("targetKneeTitle", "Tgt Knee");
-        targetKneeTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        targetKneeTitle->setBounds (col1, 145, 52, 12);
-        addAndMakeVisible (targetKneeTitle.get());
+        displayJointTitle = std::make_unique<Label> ("displayJointTitle", "Display Joint");
+        displayJointTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        displayJointTitle->setBounds (col3, 145, 110, 12);
+        addAndMakeVisible (displayJointTitle.get());
 
-        targetKneeLabel = std::make_unique<Label> ("targetKneeLabel", "90");
-        targetKneeLabel->setEditable (true);
-        targetKneeLabel->setColour (Label::backgroundColourId, Colours::black);
-        targetKneeLabel->setColour (Label::textColourId, Colours::white);
-        targetKneeLabel->setBounds (col1, 158, 52, 18);
-        targetKneeLabel->addListener (this);
-        targetKneeLabel->setTooltip ("Target right knee angle (degrees) shown on OpenSim overlay.");
-        addAndMakeVisible (targetKneeLabel.get());
+        displayJointCombo = std::make_unique<ComboBox> ("displayJoint");
+        displayJointCombo->setBounds (col3, 158, comboW, 20);
+        displayJointCombo->addListener (this);
+        for (int i = 0; i < AcqBoardRedPitaya::NUM_DISPLAY_JOINTS; ++i)
+            displayJointCombo->addItem (AcqBoardRedPitaya::getDisplayJointLabel (i), i + 1);
+        displayJointCombo->setSelectedId (2, dontSendNotification);  // Right Knee
+        displayJointCombo->setTooltip ("Joint whose angle is drawn on the OpenSim 3D viewer.");
+        addAndMakeVisible (displayJointCombo.get());
 
-        liveKneeTitle = std::make_unique<Label> ("liveKneeTitle", "Knee");
-        liveKneeTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        liveKneeTitle->setBounds (col1, 180, 52, 12);
-        addAndMakeVisible (liveKneeTitle.get());
+        liveAngleTitle = std::make_unique<Label> ("liveAngleTitle", "Angle (deg)");
+        liveAngleTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        liveAngleTitle->setBounds (col4, 145, 110, 12);
+        addAndMakeVisible (liveAngleTitle.get());
 
-        liveKneeLabel = std::make_unique<Label> ("liveKneeLabel", "--");
-        liveKneeLabel->setColour (Label::backgroundColourId, Colours::darkgrey);
-        liveKneeLabel->setColour (Label::textColourId, Colours::white);
-        liveKneeLabel->setBounds (col1, 193, 52, 18);
-        liveKneeLabel->setJustificationType (Justification::centred);
-        addAndMakeVisible (liveKneeLabel.get());
+        liveAngleLabel = std::make_unique<Label> ("liveAngleLabel", "--");
+        liveAngleLabel->setColour (Label::backgroundColourId, Colours::darkgrey);
+        liveAngleLabel->setColour (Label::textColourId, Colours::white);
+        liveAngleLabel->setBounds (col4, 158, comboW, 20);
+        liveAngleLabel->setJustificationType (Justification::centred);
+        addAndMakeVisible (liveAngleLabel.get());
 
-        targetHipTitle = std::make_unique<Label> ("targetHipTitle", "Tgt Hip");
-        targetHipTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        targetHipTitle->setBounds (col2, 145, 52, 12);
-        addAndMakeVisible (targetHipTitle.get());
-
-        targetHipLabel = std::make_unique<Label> ("targetHipLabel", "0");
-        targetHipLabel->setEditable (true);
-        targetHipLabel->setColour (Label::backgroundColourId, Colours::black);
-        targetHipLabel->setColour (Label::textColourId, Colours::white);
-        targetHipLabel->setBounds (col2, 158, 52, 18);
-        targetHipLabel->addListener (this);
-        targetHipLabel->setTooltip ("Target right hip flexion (degrees) shown on OpenSim overlay.");
-        addAndMakeVisible (targetHipLabel.get());
-
-        liveHipTitle = std::make_unique<Label> ("liveHipTitle", "Hip");
-        liveHipTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        liveHipTitle->setBounds (col2, 180, 52, 12);
-        addAndMakeVisible (liveHipTitle.get());
-
-        liveHipLabel = std::make_unique<Label> ("liveHipLabel", "--");
-        liveHipLabel->setColour (Label::backgroundColourId, Colours::darkgrey);
-        liveHipLabel->setColour (Label::textColourId, Colours::white);
-        liveHipLabel->setBounds (col2, 193, 52, 18);
-        liveHipLabel->setJustificationType (Justification::centred);
-        addAndMakeVisible (liveHipLabel.get());
-
-        setSize (getWidth(), 220);
+        setSize (getWidth(), 185);
         redPitayaSensorUiBuilt = true;
     }
 
@@ -709,6 +683,16 @@ void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
         return;
     }
 
+    if (redPitayaSensorUiBuilt && displayJointCombo != nullptr
+        && comboBox == displayJointCombo.get()
+        && board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+    {
+        auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+        rp->setDisplayJointIndex (displayJointCombo->getSelectedId() - 1);
+        rp->writeOpenSimDisplayJoint();
+        return;
+    }
+
     if (redPitayaSensorUiBuilt && board != nullptr
         && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya
         && acquisitionIsActive)
@@ -944,7 +928,7 @@ void DeviceEditor::buttonClicked (Button* button)
         if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
         {
             auto* rp = static_cast<AcqBoardRedPitaya*> (board);
-            syncOpenSimTargetAnglesToBoard();
+            syncOpenSimDisplayJointToBoard();
             rp->launchOpenSimMotion();
             CoreServices::sendStatusMessage ("OpenSim Motion generation started — will open OpenSim GUI when done");
         }
@@ -954,10 +938,10 @@ void DeviceEditor::buttonClicked (Button* button)
         if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
         {
             auto* rp = static_cast<AcqBoardRedPitaya*> (board);
-            syncOpenSimTargetAnglesToBoard();
+            syncOpenSimDisplayJointToBoard();
             rp->launchOpenSimLive();
             startTimerHz (10);
-            CoreServices::sendStatusMessage ("OpenSim Live started — joint angles shown on OpenSim overlay");
+            CoreServices::sendStatusMessage ("OpenSim Live started — selected joint angle shown on OpenSim viewer");
         }
     }
     /*
@@ -1060,22 +1044,14 @@ void DeviceEditor::startAcquisition()
             openSimMotionButton->toFront (false);
         if (openSimLiveButton != nullptr)
             openSimLiveButton->toFront (false);
-        if (targetKneeTitle != nullptr)
-            targetKneeTitle->toFront (false);
-        if (targetKneeLabel != nullptr)
-            targetKneeLabel->toFront (false);
-        if (targetHipTitle != nullptr)
-            targetHipTitle->toFront (false);
-        if (targetHipLabel != nullptr)
-            targetHipLabel->toFront (false);
-        if (liveKneeTitle != nullptr)
-            liveKneeTitle->toFront (false);
-        if (liveKneeLabel != nullptr)
-            liveKneeLabel->toFront (false);
-        if (liveHipTitle != nullptr)
-            liveHipTitle->toFront (false);
-        if (liveHipLabel != nullptr)
-            liveHipLabel->toFront (false);
+        if (displayJointTitle != nullptr)
+            displayJointTitle->toFront (false);
+        if (displayJointCombo != nullptr)
+            displayJointCombo->toFront (false);
+        if (liveAngleTitle != nullptr)
+            liveAngleTitle->toFront (false);
+        if (liveAngleLabel != nullptr)
+            liveAngleLabel->toFront (false);
     }
 
     syncRedPitayaBoardSampleRateFromLabel();
@@ -1121,18 +1097,15 @@ void DeviceEditor::stopAcquisition()
     stopTimer();
 }
 
-void DeviceEditor::syncOpenSimTargetAnglesToBoard()
+void DeviceEditor::syncOpenSimDisplayJointToBoard()
 {
     if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
         return;
 
     auto* rp = static_cast<AcqBoardRedPitaya*> (board);
 
-    if (targetKneeLabel != nullptr)
-        rp->setTargetKneeAngleDeg (targetKneeLabel->getText().getFloatValue());
-
-    if (targetHipLabel != nullptr)
-        rp->setTargetHipAngleDeg (targetHipLabel->getText().getFloatValue());
+    if (displayJointCombo != nullptr)
+        rp->setDisplayJointIndex (displayJointCombo->getSelectedId() - 1);
 }
 
 void DeviceEditor::timerCallback()
@@ -1141,17 +1114,13 @@ void DeviceEditor::timerCallback()
         return;
 
     auto* rp = static_cast<AcqBoardRedPitaya*> (board);
-    float knee = 0.0f;
-    float hip  = 0.0f;
+    float angle = 0.0f;
 
-    if (! rp->getLiveJointAngles (knee, hip))
+    if (! rp->getLiveDisplayAngle (angle))
         return;
 
-    if (liveKneeLabel != nullptr)
-        liveKneeLabel->setText (String (knee, 1), dontSendNotification);
-
-    if (liveHipLabel != nullptr)
-        liveHipLabel->setText (String (hip, 1), dontSendNotification);
+    if (liveAngleLabel != nullptr)
+        liveAngleLabel->setText (String (angle, 1), dontSendNotification);
 }
 
 // --- ADD THIS METHOD TO HANDLE YOUR NEW TEXT BOX ---
@@ -1220,17 +1189,6 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
             board->setAnalogOutVoltage (newVoltage);
-    }
-    else if (labelThatHasChanged == targetKneeLabel.get()
-             || labelThatHasChanged == targetHipLabel.get())
-    {
-        syncOpenSimTargetAnglesToBoard();
-
-        if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
-        {
-            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
-            rp->writeOpenSimTargetAngles();
-        }
     }
     else if (labelThatHasChanged == nodeHostLabel.get())
     {
@@ -1354,8 +1312,7 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
         for (int i = 0; i < 6; ++i)
             xml->setAttribute ("BodySegment" + String (i), rp->getSensorBodySegment (i));
 
-        xml->setAttribute ("TargetKneeAngle", rp->getTargetKneeAngleDeg());
-        xml->setAttribute ("TargetHipAngle", rp->getTargetHipAngleDeg());
+        xml->setAttribute ("DisplayJoint", rp->getDisplayJointIndex());
     }
 }
 
@@ -1466,16 +1423,12 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
         if (sensorBodySegmentCombo != nullptr)
             sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (0) + 1, dontSendNotification);
 
-        const float tgtKnee = (float) xml->getDoubleAttribute ("TargetKneeAngle", 90.0);
-        const float tgtHip  = (float) xml->getDoubleAttribute ("TargetHipAngle", 0.0);
-        rp->setTargetKneeAngleDeg (tgtKnee);
-        rp->setTargetHipAngleDeg (tgtHip);
+        const int displayJoint = jlimit (0, AcqBoardRedPitaya::NUM_DISPLAY_JOINTS - 1,
+                                         xml->getIntAttribute ("DisplayJoint", 1));
+        rp->setDisplayJointIndex (displayJoint);
 
-        if (targetKneeLabel != nullptr)
-            targetKneeLabel->setText (String (tgtKnee, 0), dontSendNotification);
-
-        if (targetHipLabel != nullptr)
-            targetHipLabel->setText (String (tgtHip, 0), dontSendNotification);
+        if (displayJointCombo != nullptr)
+            displayJointCombo->setSelectedId (displayJoint + 1, dontSendNotification);
     }
 }
 

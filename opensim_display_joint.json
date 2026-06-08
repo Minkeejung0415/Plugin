@@ -1,0 +1,6 @@
+{
+  "comment": "Joint shown on the OpenSim 3D viewer. Plugin overwrites this on launch or when the dropdown changes.",
+  "joint_index": 1,
+  "joint": "knee_angle_r",
+  "label": "Right Knee"
+}

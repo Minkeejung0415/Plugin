@@ -38,6 +38,31 @@ namespace
         "Head"
     };
 
+    const char* kDisplayJointNames[] = {
+        "hip_flexion_r",
+        "knee_angle_r",
+        "ankle_angle_r",
+        "hip_flexion_l",
+        "knee_angle_l",
+        "ankle_angle_l",
+        "pelvis_tilt",
+        "pelvis_list",
+        "pelvis_rotation",
+        "lumbar_extension",
+    };
+    const char* kDisplayJointLabels[] = {
+        "Right Hip Flexion",
+        "Right Knee",
+        "Right Ankle",
+        "Left Hip Flexion",
+        "Left Knee",
+        "Left Ankle",
+        "Pelvis Tilt",
+        "Pelvis List",
+        "Pelvis Rotation",
+        "Lumbar Extension",
+    };
+
     String envEsp32NodeHost()
     {
         if (const char* val = std::getenv ("ESP32_NODE_HOST"))
@@ -1390,36 +1415,43 @@ bool AcqBoardRedPitaya::writeOpenSimSensorMap() const
     return true;
 }
 
-void AcqBoardRedPitaya::setTargetKneeAngleDeg (float degrees)
+const char* AcqBoardRedPitaya::getDisplayJointName (int idx)
 {
-    targetKneeAngleDeg = degrees;
+    if (idx < 0 || idx >= NUM_DISPLAY_JOINTS) idx = 0;
+    return kDisplayJointNames[idx];
 }
 
-void AcqBoardRedPitaya::setTargetHipAngleDeg (float degrees)
+const char* AcqBoardRedPitaya::getDisplayJointLabel (int idx)
 {
-    targetHipAngleDeg = degrees;
+    if (idx < 0 || idx >= NUM_DISPLAY_JOINTS) idx = 0;
+    return kDisplayJointLabels[idx];
 }
 
-bool AcqBoardRedPitaya::getLiveJointAngles (float& kneeDeg, float& hipDeg) const
+void AcqBoardRedPitaya::setDisplayJointIndex (int index)
+{
+    displayJointIndex = jlimit (0, NUM_DISPLAY_JOINTS - 1, index);
+}
+
+bool AcqBoardRedPitaya::getLiveDisplayAngle (float& angleDeg) const
 {
     const juce::ScopedLock sl (liveAngleLock);
 
     if (! liveAnglesValid)
         return false;
 
-    kneeDeg = liveKneeAngleDeg;
-    hipDeg  = liveHipAngleDeg;
+    angleDeg = liveDisplayAngleDeg;
     return true;
 }
 
-bool AcqBoardRedPitaya::writeOpenSimTargetAngles() const
+bool AcqBoardRedPitaya::writeOpenSimDisplayJoint() const
 {
-    const juce::File targetFile (String (kOpenSimWorkDir) + "\\opensim_target_angles.json");
+    const juce::File jointFile (String (kOpenSimWorkDir) + "\\opensim_display_joint.json");
+    const int idx = jlimit (0, NUM_DISPLAY_JOINTS - 1, displayJointIndex);
 
-    juce::FileOutputStream out (targetFile);
+    juce::FileOutputStream out (jointFile);
     if (! out.openedOk())
     {
-        std::cout << "OpenSim target angles: cannot write " << targetFile.getFullPathName() << std::endl;
+        std::cout << "OpenSim display joint: cannot write " << jointFile.getFullPathName() << std::endl;
         return false;
     }
 
@@ -1427,21 +1459,16 @@ bool AcqBoardRedPitaya::writeOpenSimTargetAngles() const
     out.truncate();
 
     out.writeText ("{\n"
-                   "  \"comment\": \"Written by Open Ephys plugin. Target joint angles in degrees.\",\n"
-                   "  \"tolerance_deg\": " + String (targetAngleToleranceDeg, 1) + ",\n"
-                   "  \"targets\": {\n"
-                   "    \"knee_angle_r\": " + String (targetKneeAngleDeg, 2) + ",\n"
-                   "    \"hip_flexion_r\": " + String (targetHipAngleDeg, 2) + ",\n"
-                   "    \"pelvis_tilt\": 0.0,\n"
-                   "    \"pelvis_list\": 0.0,\n"
-                   "    \"pelvis_rotation\": 0.0\n"
-                   "  }\n"
+                   "  \"comment\": \"Written by Open Ephys plugin. Joint shown on the OpenSim screen.\",\n"
+                   "  \"joint_index\": " + String (idx) + ",\n"
+                   "  \"joint\": \"" + String (kDisplayJointNames[idx]) + "\",\n"
+                   "  \"label\": \"" + String (kDisplayJointLabels[idx]) + "\"\n"
                    "}\n",
                    false, false, nullptr);
 
-    std::cout << "OpenSim target angles: knee=" << targetKneeAngleDeg
-              << " hip=" << targetHipAngleDeg
-              << " -> " << targetFile.getFullPathName() << std::endl;
+    std::cout << "OpenSim display joint: " << kDisplayJointLabels[idx]
+              << " (" << kDisplayJointNames[idx] << ") -> "
+              << jointFile.getFullPathName() << std::endl;
     return true;
 }
 
@@ -1450,8 +1477,8 @@ void AcqBoardRedPitaya::pollOpenSimAngleFeedback()
     if (openSimAngleSocket == nullptr)
         return;
 
-    constexpr int kPacketFloats = 7;
-    float buffer[kPacketFloats];
+    constexpr int kPacketFloatsV31 = 4;
+    float buffer[kPacketFloatsV31];
     String sender;
     int senderPort = 0;
 
@@ -1459,20 +1486,24 @@ void AcqBoardRedPitaya::pollOpenSimAngleFeedback()
     {
         const float version = buffer[1];
 
-        if (version < 2.99f || version > 3.01f)
+        if (version < 3.09f || version > 3.11f)
+            continue;
+
+        const int jointIndex = jlimit (0, NUM_DISPLAY_JOINTS - 1, (int) std::lround (buffer[2]));
+
+        if (jointIndex != displayJointIndex)
             continue;
 
         const juce::ScopedLock sl (liveAngleLock);
-        liveHipAngleDeg  = buffer[2];
-        liveKneeAngleDeg = buffer[3];
-        liveAnglesValid  = true;
+        liveDisplayAngleDeg = buffer[3];
+        liveAnglesValid     = true;
     }
 }
 
 void AcqBoardRedPitaya::launchOpenSimMotion()
 {
     writeOpenSimSensorMap();
-    writeOpenSimTargetAngles();
+    writeOpenSimDisplayJoint();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String bridgePath = workDir + "\\ephys_to_opensim_bridge.py";
     const juce::String logPath = workDir + "\\ephys_bridge_run.log";
@@ -1514,7 +1545,7 @@ void AcqBoardRedPitaya::launchOpenSimMotion()
 void AcqBoardRedPitaya::launchOpenSimLive()
 {
     writeOpenSimSensorMap();
-    writeOpenSimTargetAngles();
+    writeOpenSimDisplayJoint();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String scriptPath = workDir + "\\opensim_live_realtime.py";
     juce::File batFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
