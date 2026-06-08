@@ -400,12 +400,13 @@ if ($script:HwMode -like 'esp32*') {
 Write-Step 'Installing plugin sources into acquisition-board'
 $acqPlugin = Resolve-AcquisitionPluginSource $acqDir
 
+Copy-Item -Force (Join-Path $pluginDir 'Acqboard.h')          (Join-Path $acqPlugin 'devices\AcquisitionBoard.h')
 Copy-Item -Force (Join-Path $pluginDir 'acqboard.ccp')        (Join-Path $acqPlugin 'devices\redpitaya\AcqBoardRedPitaya.cpp')
 Copy-Item -Force (Join-Path $pluginDir 'Acqboardredpitaya.h') (Join-Path $acqPlugin 'devices\redpitaya\AcqBoardRedPitaya.h')
 Copy-Item -Force (Join-Path $pluginDir 'device editor.cpp')   (Join-Path $acqPlugin 'DeviceEditor.cpp')
-Copy-Item -Force (Join-Path $pluginDir 'device editor.h')       (Join-Path $acqPlugin 'DeviceEditor.h')
-Copy-Item -Force (Join-Path $pluginDir 'devicethread.cpp')     (Join-Path $acqPlugin 'DeviceThread.cpp')
-Write-Ok 'Plugin sources copied'
+Copy-Item -Force (Join-Path $pluginDir 'device editor.h')     (Join-Path $acqPlugin 'DeviceEditor.h')
+Copy-Item -Force (Join-Path $pluginDir 'devicethread.cpp')    (Join-Path $acqPlugin 'DeviceThread.cpp')
+Write-Ok 'Plugin sources copied (including RedPitaya AcquisitionBoard.h patch)'
 
 Write-Step 'Patching paths for your machine'
 $workEsc  = $script:WorkDir.Replace('\', '\\')
