@@ -29,6 +29,15 @@ git clone --branch cursor/opensim-target-angle-display-ad4a --single-branch http
 | Pull latest repos? | Yes | Update existing clones |
 | Build open-ephys? | Yes | Compile the GUI |
 
+## Repos cloned by setup
+
+| Folder | Repository |
+|--------|------------|
+| `dev\GUI` | [open-ephys/plugin-GUI](https://github.com/open-ephys/plugin-GUI) (not the archived `open-ephys/GUI`) |
+| `dev\acquisition-board` | [open-ephys-plugins/acquisition-board](https://github.com/open-ephys-plugins/acquisition-board) (not the PCB hardware repo) |
+
+If a previous run cloned the wrong repos, setup replaces them automatically.
+
 ## What gets installed automatically (via winget)
 
 - Git

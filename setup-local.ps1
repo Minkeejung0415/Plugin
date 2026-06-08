@@ -260,6 +260,46 @@ function Ensure-Prerequisites {
     }
 }
 
+function Get-GitRemoteUrl([string]$dir) {
+    if (-not (Test-Path (Join-Path $dir '.git'))) { return $null }
+    Push-Location $dir
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    $url = git remote get-url origin 2>$null
+    $ErrorActionPreference = $prev
+    Pop-Location
+    return $url
+}
+
+function Ensure-GuiRepo([string]$dir, [bool]$update) {
+    $url = 'https://github.com/open-ephys/plugin-GUI.git'
+    $remote = Get-GitRemoteUrl $dir
+    if ($remote -and $remote -notmatch 'plugin-GUI') {
+        Write-Warn 'Replacing archived GUI clone with open-ephys/plugin-GUI'
+        Remove-Item -Recurse -Force $dir
+    }
+    Ensure-Clone $url $dir 'main' $update
+}
+
+function Ensure-AcquisitionBoardRepo([string]$dir, [bool]$update) {
+    $url = 'https://github.com/open-ephys-plugins/acquisition-board.git'
+    $hasPluginSources = Test-Path (Join-Path $dir 'Source\DeviceEditor.cpp')
+    if ((Test-Path $dir) -and -not $hasPluginSources) {
+        Write-Warn 'Replacing hardware acquisition-board clone with open-ephys-plugins/acquisition-board'
+        Remove-Item -Recurse -Force $dir
+    }
+    Ensure-Clone $url $dir 'main' $update
+}
+
+function Resolve-AcquisitionPluginSource([string]$acqDir) {
+    $source = Join-Path $acqDir 'Source'
+    if (-not (Test-Path (Join-Path $source 'DeviceEditor.cpp'))) {
+        throw "Cannot find acquisition-board plugin sources under $source"
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $source 'devices\redpitaya') | Out-Null
+    return $source
+}
+
 function Ensure-Clone([string]$url, [string]$dir, [string]$branch = $null, [bool]$update = $false) {
     if (-not (Test-Path $dir)) {
         if ($branch) { git clone --branch $branch --single-branch $url $dir }
@@ -346,24 +386,19 @@ $acqDir    = Join-Path $script:DevRoot 'acquisition-board'
 $esp32Dir  = Join-Path $script:DevRoot 'ESP32-S3'
 
 Ensure-Clone 'https://github.com/Minkeejung0415/Plugin.git' $pluginDir $script:PluginBranch $updateRepos
-Ensure-Clone 'https://github.com/open-ephys/GUI.git' $guiDir $null $updateRepos
+Ensure-GuiRepo $guiDir $updateRepos
 if (Test-Path (Join-Path $guiDir '.git')) {
     Push-Location $guiDir
     Invoke-GitQuiet submodule update --init --recursive | Out-Null
     Pop-Location
 }
-Ensure-Clone 'https://github.com/open-ephys/acquisition-board.git' $acqDir $null $updateRepos
+Ensure-AcquisitionBoardRepo $acqDir $updateRepos
 if ($script:HwMode -like 'esp32*') {
     Ensure-Clone 'https://github.com/Minkeejung0415/ESP32-S3.git' $esp32Dir $null $updateRepos
 }
 
 Write-Step 'Installing plugin sources into acquisition-board'
-$acqPlugin = Join-Path $acqDir 'Source\Plugin'
-if (-not (Test-Path $acqPlugin)) {
-    $alt = Join-Path $acqDir 'Source'
-    if (Test-Path (Join-Path $alt 'DeviceEditor.cpp')) { $acqPlugin = $alt }
-    else { throw 'Cannot find acquisition-board plugin sources under Source\Plugin or Source' }
-}
+$acqPlugin = Resolve-AcquisitionPluginSource $acqDir
 
 Copy-Item -Force (Join-Path $pluginDir 'acqboard.ccp')        (Join-Path $acqPlugin 'devices\redpitaya\AcqBoardRedPitaya.cpp')
 Copy-Item -Force (Join-Path $pluginDir 'Acqboardredpitaya.h') (Join-Path $acqPlugin 'devices\redpitaya\AcqBoardRedPitaya.h')
@@ -409,18 +444,11 @@ Write-Step 'Installing Python packages (numpy, imufusion)'
 & $script:Py312 -m pip install --upgrade pip numpy imufusion
 Write-Ok 'Python packages'
 
-Write-Step 'Linking acquisition-board into Open Ephys GUI build'
-$guiPlugins = Join-Path $guiDir 'Build\plugins'
-New-Item -ItemType Directory -Force -Path $guiPlugins | Out-Null
-$acqLink = Join-Path $guiPlugins 'acquisition-board'
-if (Test-Path $acqLink) { cmd /c rmdir "$acqLink" 2>$null }
-cmd /c mklink /J "$acqLink" "$acqDir" | Out-Null
-Write-Ok "Junction: $acqLink -> $acqDir"
-
 $buildDir = Join-Path $guiDir 'Build'
 $oeExe = Join-Path $buildDir "$($script:BuildConfig)\open-ephys.exe"
+$pluginDll = Join-Path $buildDir "$($script:BuildConfig)\plugins\acquisition-board.dll"
 if ($runBuild) {
-    Write-Step "Building Open Ephys ($($script:BuildConfig))"
+    Write-Step "Building Open Ephys GUI ($($script:BuildConfig))"
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
     Push-Location $buildDir
     if (-not (Test-Path 'CMakeCache.txt')) {
@@ -429,9 +457,22 @@ if ($runBuild) {
     cmake --build . --config $script:BuildConfig --target open-ephys
     Pop-Location
     if (Test-Path $oeExe) { Write-Ok "Built: $oeExe" }
-    else { Write-Warn 'open-ephys.exe not found - check build output above' }
+    else { Write-Warn 'open-ephys.exe not found - check GUI build output above' }
+
+    Write-Step "Building acquisition-board plugin ($($script:BuildConfig))"
+    $acqBuildDir = Join-Path $acqDir 'Build'
+    New-Item -ItemType Directory -Force -Path $acqBuildDir | Out-Null
+    $guiBase = (Resolve-Path $guiDir).Path
+    Push-Location $acqBuildDir
+    if (-not (Test-Path 'CMakeCache.txt')) {
+        cmake .. -G 'Visual Studio 17 2022' -A x64 "-DGUI_BASE_DIR=$guiBase"
+    }
+    cmake --build . --config $script:BuildConfig
+    Pop-Location
+    if (Test-Path $pluginDll) { Write-Ok "Built plugin: $pluginDll" }
+    else { Write-Warn 'acquisition-board.dll not found - check plugin build output above' }
 } else {
-    Write-Warn "Skipped build (you can build later from $buildDir)"
+    Write-Warn "Skipped build (build GUI from $buildDir, plugin from $(Join-Path $acqDir 'Build'))"
 }
 
 Write-Step 'Writing launch scripts'
