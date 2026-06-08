@@ -20,9 +20,9 @@ namespace
     // active + editor Node IP + ESP32_NODE_HOST + both rp-*.local (deduped)
     constexpr int kMaxHostsToTry = kNumRedPitayaHosts + 4;
 
-    const char* kOpenSimWorkDir = "C:\\Users\\KIN Student\\Open-Sim--Bio-Mech";
+    const char* kOpenSimWorkDir = "C:\\Users\\justi\\Documents\\Plugin";
 
-    const char* kEsp32RecordDir = "C:\\Users\\KIN Student\\Documents\\Arduino\\ESP32-S3-1\\results";
+    const char* kEsp32RecordDir = "C:\\Users\\justi\\Documents\\Arduino\\ESP32-S3-1\\results";
 
     // OpenSim PhysicalOffsetFrame names for the Rajagopal2015 model (distal to proximal, right then left).
     const char* kBodySegmentNames[] = {

@@ -28,7 +28,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import imufusion
 
-WORK_DIR          = r"C:\Users\KIN Student\Open-Sim--Bio-Mech"
+WORK_DIR          = r"C:\Users\justi\Documents\Plugin"
 OPENSIM_SDK_PYTHON = r"C:\OpenSim 4.5\sdk\Python"
 OPENSIM_BIN_DIR   = r"C:\OpenSim 4.5\bin"
 MODEL_FILE        = "Rajagopal2015_opensense_calibrated.osim"

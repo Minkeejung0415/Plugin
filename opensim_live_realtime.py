@@ -64,8 +64,8 @@ try:
 except Exception:
     pass
 
-MODEL_PATH = r"C:\Users\KIN Student\Open-Sim--Bio-Mech\Rajagopal2015_opensense_calibrated.osim"
-WORK_DIR = r"C:\Users\KIN Student\Open-Sim--Bio-Mech"
+MODEL_PATH = r"C:\Users\justi\Documents\Plugin\Rajagopal2015_opensense_calibrated.osim"
+WORK_DIR = r"C:\Users\justi\Documents\Plugin"
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5000
 SAMPLE_RATE = 1000.0
