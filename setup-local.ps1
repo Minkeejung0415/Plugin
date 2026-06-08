@@ -33,6 +33,18 @@ function Refresh-Path {
     $env:Path = $machine + ';' + $user
 }
 
+function Invoke-GitQuiet {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & git @Args 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 function Install-Winget([string]$id, [string]$label) {
     if (-not (Test-Command 'winget')) {
         Write-Warn "winget not found - install '$label' manually: $id"
@@ -230,10 +242,18 @@ function Ensure-Prerequisites {
     Ensure-OpenSim
 
     if (-not $script:OpenSimMissing) {
-        $setupPy38 = Join-Path $script:OpenSimDir 'sdk\Python\setup_win_python38.py'
+        $setupPyDir = Join-Path $script:OpenSimDir 'sdk\Python'
+        $setupPy38 = Join-Path $setupPyDir 'setup_win_python38.py'
         if (Test-Path $setupPy38) {
             Write-Host 'Running OpenSim Python 3.8 setup...'
-            & $script:Py38 $setupPy38
+            Push-Location $setupPyDir
+            try {
+                & $script:Py38 $setupPy38
+                if ($LASTEXITCODE -eq 0) { Write-Ok 'OpenSim Python 3.8 bindings' }
+                else { Write-Warn 'OpenSim Python 3.8 setup returned an error; continuing setup.' }
+            } finally {
+                Pop-Location
+            }
         }
     } else {
         Write-Warn 'Skipped OpenSim Python setup (OpenSim not installed yet).'
@@ -247,9 +267,13 @@ function Ensure-Clone([string]$url, [string]$dir, [string]$branch = $null, [bool
         Write-Ok "Cloned $dir"
     } elseif ($update) {
         Push-Location $dir
-        git fetch origin
-        if ($branch) { git checkout $branch 2>$null; git pull origin $branch }
-        else         { git pull }
+        Invoke-GitQuiet fetch origin | Out-Null
+        if ($branch) {
+            Invoke-GitQuiet checkout $branch | Out-Null
+            Invoke-GitQuiet pull origin $branch | Out-Null
+        } else {
+            Invoke-GitQuiet pull | Out-Null
+        }
         Pop-Location
         Write-Ok "Updated $dir"
     } else {
@@ -325,7 +349,7 @@ Ensure-Clone 'https://github.com/Minkeejung0415/Plugin.git' $pluginDir $script:P
 Ensure-Clone 'https://github.com/open-ephys/GUI.git' $guiDir $null $updateRepos
 if (Test-Path (Join-Path $guiDir '.git')) {
     Push-Location $guiDir
-    git submodule update --init --recursive
+    Invoke-GitQuiet submodule update --init --recursive | Out-Null
     Pop-Location
 }
 Ensure-Clone 'https://github.com/open-ephys/acquisition-board.git' $acqDir $null $updateRepos
