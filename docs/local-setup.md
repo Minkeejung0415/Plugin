@@ -40,8 +40,10 @@ git clone --branch cursor/opensim-target-angle-display-ad4a --single-branch http
 
 ## What you install manually (script opens the page)
 
-- **OpenSim 4.5** — [opensim.stanford.edu/downloads](https://opensim.stanford.edu/downloads/default.html)
+- **OpenSim 4.5** — [opensim.stanford.edu/downloads](https://opensim.stanford.edu/downloads/default.html). Install to `C:\OpenSim 4.5`, then re-enter that path when the script asks. Do not press Enter until the installer has finished.
 - **ESP32 firmware** — flash from the cloned `ESP32-S3` repo (Arduino IDE)
+
+If CMake winget install fails, install from [cmake.org/download](https://cmake.org/download/) and choose **Add CMake to PATH**, then press Y when the script asks to retry detection.
 
 ## After setup — daily use
 

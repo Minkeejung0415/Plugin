@@ -105,18 +105,73 @@ function Ensure-Python([string]$version) {
     return $exe
 }
 
+function Find-CMake {
+    if (Test-Command 'cmake') { return 'cmake' }
+    $candidates = @(
+        "$env:ProgramFiles\CMake\bin\cmake.exe",
+        "${env:ProgramFiles(x86)}\CMake\bin\cmake.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+function Use-CMakeOnPath([string]$cmakePath) {
+    if ($cmakePath -and $cmakePath -ne 'cmake') {
+        $bin = Split-Path $cmakePath -Parent
+        if ($env:Path -notlike "*$bin*") { $env:Path = "$bin;$env:Path" }
+    }
+}
+
 function Find-OpenSim([string]$hintPath) {
     $candidates = @(
         $hintPath,
         'C:\OpenSim 4.5',
         'C:\Program Files\OpenSim 4.5',
-        "$env:ProgramFiles\OpenSim 4.5"
-    ) | Select-Object -Unique
+        "$env:ProgramFiles\OpenSim 4.5",
+        "$env:LOCALAPPDATA\OpenSim 4.5"
+    ) | Where-Object { $_ } | Select-Object -Unique
     foreach ($d in $candidates) {
-        if ($d -and (Test-Path (Join-Path $d 'bin\OpenSim64.exe'))) { return $d }
-        if ($d -and (Test-Path (Join-Path $d 'sdk\Python\opensim'))) { return $d }
+        if (Test-Path (Join-Path $d 'bin\OpenSim64.exe')) { return $d }
+        if (Test-Path (Join-Path $d 'sdk\Python\opensim')) { return $d }
     }
     return $null
+}
+
+function Ensure-OpenSim {
+    $script:OpenSimDir = Find-OpenSim $script:OpenSimDir
+    if ($script:OpenSimDir) {
+        Write-Ok "OpenSim: $script:OpenSimDir"
+        return
+    }
+
+    Write-Warn 'OpenSim 4.5 not found on this PC.'
+    Write-Host 'Install OpenSim 4.5 from https://opensim.stanford.edu/downloads/default.html'
+    Write-Host 'Typical install folder: C:\OpenSim 4.5'
+    Start-Process 'https://opensim.stanford.edu/downloads/default.html'
+
+    while (-not $script:OpenSimDir) {
+        $entered = Ask 'After installing OpenSim, enter its install folder' 'C:\OpenSim 4.5'
+        $found = Find-OpenSim $entered
+        if ($found) {
+            $script:OpenSimDir = $found
+            break
+        }
+
+        Write-Warn "OpenSim not found at '$entered'."
+        Write-Host 'Expected: bin\OpenSim64.exe or sdk\Python\opensim under that folder.'
+        if (-not (Ask-YesNo 'Try another folder?' $true)) {
+            if (Ask-YesNo 'Continue setup without OpenSim for now? (install later; live viewer will not work yet)' $false) {
+                $script:OpenSimDir = $entered
+                $script:OpenSimMissing = $true
+                Write-Warn "Continuing without verified OpenSim. Expected path: $script:OpenSimDir"
+                return
+            }
+            throw "OpenSim not found at '$entered'. Install OpenSim 4.5, then re-run setup-local.ps1."
+        }
+    }
+    Write-Ok "OpenSim: $script:OpenSimDir"
 }
 
 function Ensure-Prerequisites {
@@ -129,12 +184,26 @@ function Ensure-Prerequisites {
         } else { throw 'Git is required.' }
     } else { Write-Ok 'Git' }
 
-    if (-not (Test-Command 'cmake')) {
+    $cmake = Find-CMake
+    if (-not $cmake) {
         if (Ask-YesNo 'CMake not found. Install with winget?' $true) {
             Install-Winget 'Kitware.CMake' 'CMake' | Out-Null
             Refresh-Path
+            $cmake = Find-CMake
         } else { throw 'CMake is required to build Open Ephys.' }
-    } else { Write-Ok 'CMake' }
+    }
+    if (-not $cmake) {
+        Write-Warn 'CMake still not found after winget (install may have failed or PATH not refreshed).'
+        Write-Host 'Install manually: https://cmake.org/download/  (add CMake to PATH)'
+        if (-not (Ask-YesNo 'Press Y after CMake is installed, or to retry detection' $true)) {
+            throw 'CMake is required to build Open Ephys.'
+        }
+        Refresh-Path
+        $cmake = Find-CMake
+        if (-not $cmake) { throw 'CMake still not found. Restart PowerShell and re-run setup-local.ps1.' }
+    }
+    Use-CMakeOnPath $cmake
+    Write-Ok 'CMake'
 
     $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $hasVS = $false
@@ -158,21 +227,16 @@ function Ensure-Prerequisites {
     $script:Py38 = Ensure-Python '3.8'
     $script:Py312 = Ensure-Python '3.12'
 
-    $script:OpenSimDir = Find-OpenSim $script:OpenSimDir
-    if (-not $script:OpenSimDir) {
-        Write-Warn 'OpenSim 4.5 not found.'
-        Write-Host 'Download: https://opensim.stanford.edu/downloads/default.html'
-        Start-Process 'https://opensim.stanford.edu/downloads/default.html'
-        $script:OpenSimDir = Ask 'Enter your OpenSim install folder after installing' 'C:\OpenSim 4.5'
-        $script:OpenSimDir = Find-OpenSim $script:OpenSimDir
-        if (-not $script:OpenSimDir) { throw "OpenSim not found at '$($script:OpenSimDir)'." }
-    }
-    Write-Ok "OpenSim: $script:OpenSimDir"
+    Ensure-OpenSim
 
-    $setupPy38 = Join-Path $script:OpenSimDir 'sdk\Python\setup_win_python38.py'
-    if (Test-Path $setupPy38) {
-        Write-Host 'Running OpenSim Python 3.8 setup...'
-        & $script:Py38 $setupPy38
+    if (-not $script:OpenSimMissing) {
+        $setupPy38 = Join-Path $script:OpenSimDir 'sdk\Python\setup_win_python38.py'
+        if (Test-Path $setupPy38) {
+            Write-Host 'Running OpenSim Python 3.8 setup...'
+            & $script:Py38 $setupPy38
+        }
+    } else {
+        Write-Warn 'Skipped OpenSim Python setup (OpenSim not installed yet).'
     }
 }
 
@@ -244,6 +308,7 @@ if ($script:HwMode -eq 'esp32-wifi') { Write-Host "  ESP32 host:  $script:Esp32H
 Write-Host "  Build:       $script:BuildConfig"
 if (-not (Ask-YesNo 'Continue with setup?' $true)) { exit 0 }
 
+$script:OpenSimMissing = $false
 Ensure-Prerequisites
 
 Write-Step 'Creating folders'
