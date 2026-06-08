@@ -49,16 +49,30 @@ function Install-Winget([string]$id, [string]$label) {
 }
 
 function Find-Python([string]$version) {
-    if (Test-Command 'py') {
-        $out = & py "-$version" -c "import sys; print(sys.executable)" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
-    }
+    $tag = $version.Replace('.', '')
     $candidates = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python$($version.Replace('.',''))\python.exe",
-        "C:\Python$($version.Replace('.',''))\python.exe"
+        "$env:LOCALAPPDATA\Programs\Python\Python$tag\python.exe",
+        "$env:ProgramFiles\Python$tag\python.exe",
+        "${env:ProgramFiles(x86)}\Python$tag\python.exe",
+        "C:\Python$tag\python.exe"
     )
     foreach ($c in $candidates) {
         if (Test-Path $c) { return $c }
+    }
+
+    # py.exe writes launcher hints to stderr; avoid terminating on NativeCommandError.
+    if (Test-Command 'py') {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        try {
+            $out = cmd /c "py -$version -c `"import sys; print(sys.executable)`" 2>nul"
+            if ($LASTEXITCODE -eq 0 -and $out) {
+                $line = ($out -split "`r?`n" | Where-Object { $_ -match '\\python\.exe$' } | Select-Object -First 1)
+                if ($line) { return $line.Trim() }
+            }
+        } finally {
+            $ErrorActionPreference = $prev
+        }
     }
     return $null
 }
@@ -80,7 +94,14 @@ function Ensure-Python([string]$version) {
     Install-Winget $pkg "Python $version" | Out-Null
     Refresh-Path
     $exe = Find-Python $version
-    if (-not $exe) { throw "Python $version still not found after install. Restart PowerShell and re-run." }
+    if (-not $exe) {
+        Write-Warn "Python $version not visible yet; waiting for installer to finish registering..."
+        Start-Sleep -Seconds 5
+        Refresh-Path
+        $exe = Find-Python $version
+    }
+    if (-not $exe) { throw "Python $version still not found after install. Restart PowerShell and re-run setup-local.ps1." }
+    Write-Ok "Python $version found: $exe"
     return $exe
 }
 
