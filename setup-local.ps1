@@ -1,174 +1,439 @@
-# setup-local.ps1 — one-shot local integration for Open Ephys + OpenSim plugin
-# Run in PowerShell (as your user, not necessarily admin):
-#   Set-ExecutionPolicy -Scope Process Bypass; .\setup-local.ps1
-#
-# Edit these paths for YOUR machine before running:
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Interactive one-shot setup: installs prerequisites, asks questions, builds Open Ephys + OpenSim plugin.
 
-$WORK_DIR        = "$env:USERPROFILE\Open-Sim--Bio-Mech"
-$OPENSIM_DIR     = "C:\OpenSim 4.5"
-$DEV_ROOT        = "$env:USERPROFILE\dev"          # where GUI + plugins are cloned
-$ESP32_COM       = "COM5"                         # USB serial port for ESP32 bridge
-$ESP32_RECORD_DIR = "$env:USERPROFILE\Documents\Arduino\ESP32-S3-1\results"
-$PLUGIN_BRANCH   = "cursor/opensim-target-angle-display-ad4a"
-$BUILD_CONFIG    = "Debug"                        # Debug or Release — use ONE everywhere
+.USAGE
+  Set-ExecutionPolicy -Scope Process Bypass -Force
+  .\setup-local.ps1
 
-$GUI_REPO        = "https://github.com/open-ephys/GUI.git"
-$ACQ_REPO        = "https://github.com/open-ephys/acquisition-board.git"
-$PLUGIN_REPO     = "https://github.com/Minkeejung0415/Plugin.git"
-$ESP32_REPO      = "https://github.com/Minkeejung0415/ESP32-S3.git"
+  Or from anywhere (after cloning Plugin once):
+  powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\dev\Plugin\setup-local.ps1"
+#>
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Open Ephys + OpenSim local setup ===" -ForegroundColor Cyan
-Write-Host "WORK_DIR: $WORK_DIR"
-Write-Host "OPENSIM:  $OPENSIM_DIR"
-Write-Host "DEV_ROOT: $DEV_ROOT"
-Write-Host ""
+function Write-Step([string]$msg)  { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+function Write-Ok([string]$msg)    { Write-Host "OK  $msg" -ForegroundColor Green }
+function Write-Warn([string]$msg)  { Write-Host "WARN $msg" -ForegroundColor Yellow }
+function Write-Err([string]$msg)   { Write-Host "ERR $msg" -ForegroundColor Red }
 
-# --- 1. Folders ---
-New-Item -ItemType Directory -Force -Path $WORK_DIR, $DEV_ROOT | Out-Null
+function Ask([string]$prompt, [string]$default = "") {
+    if ($default) {
+        $r = Read-Host "$prompt [$default]"
+        if ([string]::IsNullOrWhiteSpace($r)) { return $default }
+        return $r.Trim()
+    }
+    return (Read-Host $prompt).Trim()
+}
 
-# --- 2. Clone repos ---
-function Ensure-Clone($url, $dir, $branch = $null) {
-    if (-not (Test-Path $dir)) {
-        if ($branch) { git clone --branch $branch --single-branch $url $dir }
-        else         { git clone $url $dir }
-    } else {
-        Write-Host "Already cloned: $dir"
+function Ask-YesNo([string]$prompt, [bool]$defaultYes = $true) {
+    $hint = if ($defaultYes) { "Y/n" } else { "y/N" }
+    $r = (Read-Host "$prompt ($hint)").Trim().ToLower()
+    if ([string]::IsNullOrWhiteSpace($r)) { return $defaultYes }
+    return $r -in @("y", "yes")
+}
+
+function Test-Command([string]$name) {
+    return [bool](Get-Command $name -ErrorAction SilentlyContinue)
+}
+
+function Test-Winget {
+    return Test-Command "winget"
+}
+
+function Install-Winget([string]$id, [string]$label) {
+    if (-not (Test-Winget)) {
+        Write-Warn "winget not found — install '$label' manually: $id"
+        return $false
+    }
+    Write-Host "Installing $label via winget..."
+    winget install --id $id -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "winget install failed for $label"
+        return $false
+    }
+    Write-Ok "$label installed"
+    return $true
+}
+
+function Find-Python([string]$version) {
+    # version like "3.8" or "3.12"
+    if (Test-Command "py") {
+        $out = & py "-$version" -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
+    }
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python$($version.Replace('.',''))\python.exe",
+        "C:\Python$($version.Replace('.',''))\python.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+function Ensure-Python([string]$version) {
+    $exe = Find-Python $version
+    if ($exe) {
+        Write-Ok "Python $version found: $exe"
+        return $exe
+    }
+    if (-not (Ask-YesNo "Python $version not found. Install it now with winget?" $true)) {
+        throw "Python $version is required."
+    }
+    $pkg = switch ($version) {
+        "3.8"  { "Python.Python.3.8" }
+        "3.12" { "Python.Python.3.12" }
+        default { throw "Unsupported Python version $version" }
+    }
+    Install-Winget $pkg "Python $version" | Out-Null
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $exe = Find-Python $version
+    if (-not $exe) { throw "Python $version still not found after install. Restart PowerShell and re-run." }
+    return $exe
+}
+
+function Find-OpenSim([string]$hintPath) {
+    $candidates = @(
+        $hintPath,
+        "C:\OpenSim 4.5",
+        "C:\Program Files\OpenSim 4.5",
+        "${env:ProgramFiles}\OpenSim 4.5",
+        "${env:ProgramFiles(x86)}\OpenSim 4.5"
+    ) | Select-Object -Unique
+    foreach ($d in $candidates) {
+        if ($d -and (Test-Path (Join-Path $d "bin\OpenSim64.exe"))) { return $d }
+        if ($d -and (Test-Path (Join-Path $d "sdk\Python\opensim"))) { return $d }
+    }
+    return $null
+}
+
+function Ensure-Prerequisites {
+    Write-Step "Checking / installing prerequisites"
+
+    # Git
+    if (-not (Test-Command "git")) {
+        if (Ask-YesNo "Git not found. Install with winget?" $true) {
+            Install-Winget "Git.Git" "Git" | Out-Null
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+        } else { throw "Git is required." }
+    } else { Write-Ok "Git" }
+
+    # CMake
+    if (-not (Test-Command "cmake")) {
+        if (Ask-YesNo "CMake not found. Install with winget?" $true) {
+            Install-Winget "Kitware.CMake" "CMake" | Out-Null
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+        } else { throw "CMake is required to build Open Ephys." }
+    } else { Write-Ok "CMake" }
+
+    # Visual Studio 2022 C++ build tools
+    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $hasVS = $false
+    if (Test-Path $vsWhere) {
+        $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        $hasVS = [bool]$vsPath
+    }
+    if (-not $hasVS) {
+        Write-Warn "Visual Studio 2022 with C++ tools not detected."
+        if (Ask-YesNo "Install VS 2022 Build Tools + C++ workload? (large download, ~2-6 GB)" $true) {
+            if (Test-Winget) {
+                Write-Host "This may take 15-30+ minutes..."
+                winget install Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --accept-source-agreements `
+                    --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+            } else {
+                Write-Warn "Install manually: https://visualstudio.microsoft.com/downloads/ -> Build Tools -> Desktop development with C++"
+                if (-not (Ask-YesNo "Press Y after you have installed VS Build Tools")) { throw "VS C++ tools required." }
+            }
+        } else { throw "Visual Studio 2022 C++ tools are required." }
+    } else { Write-Ok "Visual Studio C++ tools" }
+
+    # Python 3.8 + 3.12
+    $script:Py38 = Ensure-Python "3.8"
+    $script:Py312 = Ensure-Python "3.12"
+
+    # OpenSim 4.5
+    $script:OpenSimDir = Find-OpenSim $script:OpenSimDir
+    if (-not $script:OpenSimDir) {
+        Write-Warn "OpenSim 4.5 not found."
+        Write-Host "Download the Windows GUI installer from:"
+        Write-Host "  https://opensim.stanford.edu/downloads/default.html"
+        Write-Host "Install to the default location (C:\OpenSim 4.5) if possible."
+        Start-Process "https://opensim.stanford.edu/downloads/default.html"
+        $script:OpenSimDir = Ask "Enter your OpenSim install folder after installing" "C:\OpenSim 4.5"
+        $script:OpenSimDir = Find-OpenSim $script:OpenSimDir
+        if (-not $script:OpenSimDir) { throw "OpenSim not found at '$($script:OpenSimDir)'. Install OpenSim and re-run." }
+    }
+    Write-Ok "OpenSim: $script:OpenSimDir"
+
+    # OpenSim Python 3.8 bindings
+    $setupPy38 = Join-Path $script:OpenSimDir "sdk\Python\setup_win_python38.py"
+    if (Test-Path $setupPy38) {
+        Write-Host "Running OpenSim Python 3.8 setup..."
+        & $script:Py38 $setupPy38
     }
 }
 
-$pluginDir = Join-Path $DEV_ROOT "Plugin"
-$guiDir    = Join-Path $DEV_ROOT "GUI"
-$acqDir    = Join-Path $DEV_ROOT "acquisition-board"
-$esp32Dir  = Join-Path $DEV_ROOT "ESP32-S3"
+function Ensure-Clone([string]$url, [string]$dir, [string]$branch = $null, [bool]$update = $false) {
+    if (-not (Test-Path $dir)) {
+        if ($branch) { git clone --branch $branch --single-branch $url $dir }
+        else         { git clone $url $dir }
+        Write-Ok "Cloned $dir"
+    } elseif ($update) {
+        Push-Location $dir
+        git fetch origin
+        if ($branch) { git checkout $branch 2>$null; git pull origin $branch }
+        else         { git pull }
+        Pop-Location
+        Write-Ok "Updated $dir"
+    } else {
+        Write-Host "Already exists: $dir (skipping clone; use update mode to pull)"
+    }
+}
 
-Ensure-Clone $PLUGIN_REPO $pluginDir $PLUGIN_BRANCH
-Ensure-Clone $GUI_REPO    $guiDir
-Ensure-Clone $ACQ_REPO    $acqDir
-Ensure-Clone $ESP32_REPO  $esp32Dir
+function Patch-File([string]$path, [hashtable]$replacements) {
+    if (-not (Test-Path $path)) { return }
+    $text = Get-Content $path -Raw
+    foreach ($k in $replacements.Keys) {
+        $text = $text -replace [regex]::Escape($k), $replacements[$k]
+    }
+    Set-Content $path $text -NoNewline
+}
 
-# --- 3. Copy plugin sources into acquisition-board ---
+# =============================================================================
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Open Ephys + OpenSim Plugin — Interactive Local Setup" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# --- Questions ---
+Write-Step "Configuration questions"
+
+$script:WorkDir   = Ask "OpenSim work folder (models + Python scripts)" "$env:USERPROFILE\Open-Sim--Bio-Mech"
+$script:DevRoot   = Ask "Development root (GUI + plugins cloned here)" "$env:USERPROFILE\dev"
+$script:OpenSimDir = Ask "OpenSim install folder (leave default if not installed yet)" "C:\OpenSim 4.5"
+$script:BuildConfig = Ask "Open Ephys build config (Debug or Release)" "Debug"
+if ($script:BuildConfig -notin @("Debug", "Release")) { $script:BuildConfig = "Debug" }
+
+Write-Host ""
+Write-Host "Hardware type:"
+Write-Host "  1 = ESP32-S3 over USB (serial bridge)"
+Write-Host "  2 = ESP32-S3 over Wi-Fi"
+Write-Host "  3 = Red Pitaya"
+$hw = Ask "Choose hardware" "1"
+switch ($hw) {
+    "2" { $script:HwMode = "esp32-wifi"; $script:Esp32Host = Ask "ESP32 IP address or hostname" "192.168.1.100" }
+    "3" { $script:HwMode = "redpitaya" }
+    default { $script:HwMode = "esp32-usb"; $script:Esp32Com = Ask "ESP32 USB COM port" "COM5" }
+}
+
+$script:Esp32RecordDir = Ask "ESP32 CSV recording folder" "$env:USERPROFILE\Documents\Arduino\ESP32-S3-1\results"
+$script:PluginBranch   = Ask "Plugin git branch" "cursor/opensim-target-angle-display-ad4a"
+$updateRepos           = Ask-YesNo "Pull latest code if repos already exist?" $true
+$runBuild              = Ask-YesNo "Build open-ephys.exe after setup? (needs VS + CMake)" $true
+
+Write-Host ""
+Write-Host "Summary:"
+Write-Host "  Work dir:    $script:WorkDir"
+Write-Host "  Dev root:    $script:DevRoot"
+Write-Host "  OpenSim:     $script:OpenSimDir"
+Write-Host "  Hardware:    $script:HwMode"
+if ($script:HwMode -eq "esp32-usb") { Write-Host "  ESP32 COM:   $script:Esp32Com" }
+if ($script:HwMode -eq "esp32-wifi") { Write-Host "  ESP32 host:  $script:Esp32Host" }
+Write-Host "  Build:       $script:BuildConfig"
+if (-not (Ask-YesNo "Continue with setup?" $true)) { exit 0 }
+
+# --- Install prerequisites ---
+Ensure-Prerequisites
+
+# --- Folders ---
+Write-Step "Creating folders"
+New-Item -ItemType Directory -Force -Path $script:WorkDir, $script:DevRoot, $script:Esp32RecordDir | Out-Null
+Write-Ok "Folders ready"
+
+# --- Clone repos ---
+Write-Step "Cloning repositories"
+$pluginDir = Join-Path $script:DevRoot "Plugin"
+$guiDir    = Join-Path $script:DevRoot "GUI"
+$acqDir    = Join-Path $script:DevRoot "acquisition-board"
+$esp32Dir  = Join-Path $script:DevRoot "ESP32-S3"
+
+Ensure-Clone "https://github.com/Minkeejung0415/Plugin.git" $pluginDir $script:PluginBranch $updateRepos
+Ensure-Clone "https://github.com/open-ephys/GUI.git" $guiDir $null $updateRepos
+if (-not (Test-Path (Join-Path $guiDir ".git\modules"))) {
+    Push-Location $guiDir
+    git submodule update --init --recursive
+    Pop-Location
+}
+Ensure-Clone "https://github.com/open-ephys/acquisition-board.git" $acqDir $null $updateRepos
+if ($script:HwMode -like "esp32*") {
+    Ensure-Clone "https://github.com/Minkeejung0415/ESP32-S3.git" $esp32Dir $null $updateRepos
+}
+
+# --- Copy plugin into acquisition-board ---
+Write-Step "Installing plugin sources into acquisition-board"
 $acqPlugin = Join-Path $acqDir "Source\Plugin"
-if (-not (Test-Path $acqPlugin)) { throw "Not found: $acqPlugin — check acquisition-board layout" }
+if (-not (Test-Path $acqPlugin)) {
+    # Older layout fallback
+    $alt = Join-Path $acqDir "Source"
+    if (Test-Path (Join-Path $alt "DeviceEditor.cpp")) { $acqPlugin = $alt }
+    else { throw "Cannot find acquisition-board plugin sources under Source\Plugin or Source" }
+}
 
-Copy-Item -Force (Join-Path $pluginDir "acqboard.ccp")              (Join-Path $acqPlugin "devices\redpitaya\AcqBoardRedPitaya.cpp")
-Copy-Item -Force (Join-Path $pluginDir "Acqboardredpitaya.h")       (Join-Path $acqPlugin "devices\redpitaya\AcqBoardRedPitaya.h")
-Copy-Item -Force (Join-Path $pluginDir "device editor.cpp")         (Join-Path $acqPlugin "DeviceEditor.cpp")
-Copy-Item -Force (Join-Path $pluginDir "device editor.h")            (Join-Path $acqPlugin "DeviceEditor.h")
-Copy-Item -Force (Join-Path $pluginDir "devicethread.cpp")          (Join-Path $acqPlugin "DeviceThread.cpp")
+Copy-Item -Force (Join-Path $pluginDir "acqboard.ccp")        (Join-Path $acqPlugin "devices\redpitaya\AcqBoardRedPitaya.cpp")
+Copy-Item -Force (Join-Path $pluginDir "Acqboardredpitaya.h") (Join-Path $acqPlugin "devices\redpitaya\AcqBoardRedPitaya.h")
+Copy-Item -Force (Join-Path $pluginDir "device editor.cpp")   (Join-Path $acqPlugin "DeviceEditor.cpp")
+Copy-Item -Force (Join-Path $pluginDir "device editor.h")     (Join-Path $acqPlugin "DeviceEditor.h")
+Copy-Item -Force (Join-Path $pluginDir "devicethread.cpp")     (Join-Path $acqPlugin "DeviceThread.cpp")
+Write-Ok "Plugin sources copied"
 
-Write-Host "Plugin sources copied into acquisition-board." -ForegroundColor Green
-
-# --- 4. Patch hardcoded paths in plugin + Python ---
-$workEsc   = $WORK_DIR -replace '\\', '\\'
-$esp32Esc  = $ESP32_RECORD_DIR -replace '\\', '\\'
-$opensimEsc = $OPENSIM_DIR -replace '\\', '\\'
+# --- Patch paths ---
+Write-Step "Patching paths for your machine"
+$workEsc    = $script:WorkDir.Replace('\', '\\')
+$esp32Esc   = $script:Esp32RecordDir.Replace('\', '\\')
+$opensimEsc = $script:OpenSimDir.Replace('\', '\\')
 
 $cppFile = Join-Path $acqPlugin "devices\redpitaya\AcqBoardRedPitaya.cpp"
-(Get-Content $cppFile -Raw) `
-    -replace 'C:\\Users\\KIN Student\\Open-Sim--Bio-Mech', $workEsc `
-    -replace 'C:\\Users\\KIN Student\\Documents\\Arduino\\ESP32-S3-1\\results', $esp32Esc |
-    Set-Content $cppFile -NoNewline
+if (Test-Path $cppFile) {
+    (Get-Content $cppFile -Raw) `
+        -replace 'C:\\Users\\KIN Student\\Open-Sim--Bio-Mech', $workEsc `
+        -replace 'C:\\Users\\KIN Student\\Documents\\Arduino\\ESP32-S3-1\\results', $esp32Esc |
+        Set-Content $cppFile -NoNewline
+}
 
-# --- 5. Copy OpenSim work files ---
+# --- Copy OpenSim work files ---
 $workFiles = @(
-    "Rajagopal2015_opensense_calibrated.osim",
-    "Rajagopal2015_opensense.osim",
-    "ephys_imuIK_Setup.xml",
-    "_neutral_frame.sto",
-    "opensim_live_realtime.py",
-    "ephys_to_opensim_bridge.py",
-    "opensim_sensor_map.json",
-    "opensim_display_joint.json",
-    "run_bridge.bat",
-    "diagnose_oe_udp.py",
-    "test_udp_sender.py"
+    "Rajagopal2015_opensense_calibrated.osim", "Rajagopal2015_opensense.osim",
+    "ephys_imuIK_Setup.xml", "_neutral_frame.sto",
+    "opensim_live_realtime.py", "ephys_to_opensim_bridge.py",
+    "opensim_sensor_map.json", "opensim_display_joint.json",
+    "run_bridge.bat", "diagnose_oe_udp.py", "test_udp_sender.py"
 )
 foreach ($f in $workFiles) {
     $src = Join-Path $pluginDir $f
-    if (Test-Path $src) { Copy-Item -Force $src (Join-Path $WORK_DIR $f) }
+    if (Test-Path $src) { Copy-Item -Force $src (Join-Path $script:WorkDir $f) }
 }
 
-# Patch Python paths
-$pyFiles = @("opensim_live_realtime.py", "ephys_to_opensim_bridge.py")
-foreach ($py in $pyFiles) {
-    $p = Join-Path $WORK_DIR $py
-    if (-not (Test-Path $p)) { continue }
-    (Get-Content $p -Raw) `
-        -replace 'C:\\Users\\KIN Student\\Open-Sim--Bio-Mech', ($WORK_DIR -replace '\\', '\\') `
-        -replace 'C:\\OpenSim 4\.5', ($OPENSIM_DIR -replace '\\', '\\') |
-        Set-Content $p -NoNewline
+foreach ($py in @("opensim_live_realtime.py", "ephys_to_opensim_bridge.py")) {
+    $p = Join-Path $script:WorkDir $py
+    Patch-File $p @{
+        'C:\Users\KIN Student\Open-Sim--Bio-Mech' = $workEsc
+        'C:\OpenSim 4.5' = $script:OpenSimDir
+    }
 }
+Write-Ok "Work folder: $script:WorkDir"
 
-Write-Host "OpenSim work dir ready: $WORK_DIR" -ForegroundColor Green
+# --- Python packages ---
+Write-Step "Installing Python packages (numpy, imufusion)"
+& $script:Py38  -m pip install --upgrade pip numpy imufusion
+& $script:Py312 -m pip install --upgrade pip numpy imufusion
+Write-Ok "Python packages"
 
-# --- 6. Python packages ---
-Write-Host "Installing Python packages..."
-py -3.8  -m pip install --upgrade pip numpy imufusion 2>$null; if ($LASTEXITCODE -ne 0) { python -m pip install --upgrade pip numpy imufusion }
-py -3.12 -m pip install --upgrade pip numpy imufusion 2>$null
-
-# --- 7. Link acquisition-board into GUI plugins folder ---
+# --- Link plugin into GUI ---
+Write-Step "Linking acquisition-board into Open Ephys GUI build"
 $guiPlugins = Join-Path $guiDir "Build\plugins"
 New-Item -ItemType Directory -Force -Path $guiPlugins | Out-Null
 $acqLink = Join-Path $guiPlugins "acquisition-board"
-if (Test-Path $acqLink) { Remove-Item -Recurse -Force $acqLink }
-# Junction/symlink so GUI build picks up the plugin
+if (Test-Path $acqLink) { cmd /c rmdir "$acqLink" 2>$null }
 cmd /c mklink /J "$acqLink" "$acqDir" | Out-Null
-Write-Host "Linked acquisition-board -> GUI Build\plugins" -ForegroundColor Green
+Write-Ok "Junction: $acqLink -> $acqDir"
 
-# --- 8. Build Open Ephys (requires Visual Studio 2022 + CMake) ---
+# --- Build Open Ephys ---
 $buildDir = Join-Path $guiDir "Build"
-if (-not (Test-Path $buildDir)) { New-Item -ItemType Directory -Force -Path $buildDir | Out-Null }
-
-Push-Location $buildDir
-if (-not (Test-Path "CMakeCache.txt")) {
-    Write-Host "Running CMake configure..."
-    cmake .. -G "Visual Studio 17 2022" -A x64
-}
-Write-Host "Building Open Ephys ($BUILD_CONFIG) — this may take several minutes..."
-cmake --build . --config $BUILD_CONFIG --target open-ephys
-Pop-Location
-
-$oeExe = Join-Path $buildDir "$BUILD_CONFIG\open-ephys.exe"
-if (Test-Path $oeExe) {
-    Write-Host "Build OK: $oeExe" -ForegroundColor Green
+$oeExe = Join-Path $buildDir "$($script:BuildConfig)\open-ephys.exe"
+if ($runBuild) {
+    Write-Step "Building Open Ephys ($($script:BuildConfig))"
+    New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+    Push-Location $buildDir
+    if (-not (Test-Path "CMakeCache.txt")) {
+        cmake .. -G "Visual Studio 17 2022" -A x64
+    }
+    cmake --build . --config $script:BuildConfig --target open-ephys
+    Pop-Location
+    if (Test-Path $oeExe) { Write-Ok "Built: $oeExe" }
+    else { Write-Warn "open-ephys.exe not found — check build output above" }
 } else {
-    Write-Host "WARN: open-ephys.exe not found — build may have failed. Check VS/CMake." -ForegroundColor Yellow
+    Write-Warn "Skipped build (you can build later from $buildDir)"
 }
 
-# --- 9. Write quick-launch helper scripts ---
+# --- Launch helpers ---
+Write-Step "Writing launch scripts"
+$startLiveBat = Join-Path $script:WorkDir "start_opensim_live.bat"
 @"
-
 @echo off
-cd /d "$WORK_DIR"
-set PATH=$OPENSIM_DIR\bin;%PATH%
-set PYTHONPATH=$OPENSIM_DIR\sdk\Python;%PYTHONPATH%
+cd /d "$($script:WorkDir)"
+set PATH=$($script:OpenSimDir)\bin;%PATH%
+set PYTHONPATH=$($script:OpenSimDir)\sdk\Python;%PYTHONPATH%
 set OPENSIM_LIVE_SOURCE=real_redpitaya
 start "OpenSim Live" cmd /k py -3.8 -u opensim_live_realtime.py
-"@ | Set-Content (Join-Path $WORK_DIR "start_opensim_live.bat") -Encoding ASCII
+"@ | Set-Content $startLiveBat -Encoding ASCII
 
+$startOe = Join-Path $script:DevRoot "start-open-ephys.ps1"
 @"
-
 `$ErrorActionPreference = 'Stop'
-& "$esp32Dir\host\run_usb_plugin_bridge.ps1" $ESP32_COM
-"@ | Set-Content (Join-Path $DEV_ROOT "start-esp32-bridge.ps1") -Encoding UTF8
+`$exe = '$oeExe'
+if (-not (Test-Path `$exe)) { throw "Not found: `$exe — run setup with build enabled" }
+Start-Process `$exe
+"@ | Set-Content $startOe -Encoding UTF8
 
-@"
-
+if ($script:HwMode -eq "esp32-usb") {
+    $startBridge = Join-Path $script:DevRoot "start-esp32-bridge.ps1"
+    @"
 `$ErrorActionPreference = 'Stop'
-Start-Process "$oeExe"
-"@ | Set-Content (Join-Path $DEV_ROOT "start-open-ephys.ps1") -Encoding UTF8
+& '$esp32Dir\host\run_usb_plugin_bridge.ps1' '$($script:Esp32Com)'
+"@ | Set-Content $startBridge -Encoding UTF8
+}
 
+# Save config for re-runs
+$configPath = Join-Path $script:DevRoot "setup-config.json"
+@{
+    work_dir = $script:WorkDir
+    dev_root = $script:DevRoot
+    opensim_dir = $script:OpenSimDir
+    build_config = $script:BuildConfig
+    hw_mode = $script:HwMode
+    esp32_com = $(if ($script:Esp32Com) { $script:Esp32Com } else { "" })
+    esp32_host = $(if ($script:Esp32Host) { $script:Esp32Host } else { "" })
+    plugin_branch = $script:PluginBranch
+} | ConvertTo-Json | Set-Content $configPath -Encoding UTF8
+
+# --- Optional ESP32 firmware note ---
+if ($script:HwMode -like "esp32*") {
+    Write-Step "ESP32 firmware (manual step)"
+    Write-Host "Flash the ESP32-S3 firmware from:"
+    Write-Host "  $esp32Dir"
+    Write-Host "Open Arduino IDE -> select board/port -> Upload."
+    if (Ask-YesNo "Open ESP32-S3 folder in Explorer now?" $false) {
+        Start-Process explorer.exe $esp32Dir
+    }
+}
+
+# --- Done ---
 Write-Host ""
-Write-Host "=== DONE ===" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host "  SETUP COMPLETE" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "Daily workflow (3 terminals):" -ForegroundColor Yellow
-Write-Host "  1. ESP32 USB:  powershell -File `"$DEV_ROOT\start-esp32-bridge.ps1`""
-Write-Host "  2. Open Ephys: powershell -File `"$DEV_ROOT\start-open-ephys.ps1`""
-Write-Host "     -> Add Acquisition Board -> set Display Joint -> OpenSim Live -> Play"
-Write-Host "  3. (auto)      OpenSim Live opens when you click the button in the plugin"
+Write-Host "Saved config: $configPath"
 Write-Host ""
-Write-Host "Or run OpenSim Live manually:"
-Write-Host "  $WORK_DIR\start_opensim_live.bat"
+Write-Host "Daily workflow:" -ForegroundColor Yellow
+if ($script:HwMode -eq "esp32-usb") {
+    Write-Host "  1. powershell -File `"$($script:DevRoot)\start-esp32-bridge.ps1`""
+}
+if ($script:HwMode -eq "esp32-wifi") {
+    Write-Host "  1. Set Node IP in plugin to: $($script:Esp32Host)"
+}
+if ($script:HwMode -eq "redpitaya") {
+    Write-Host "  1. Power on Red Pitaya (plugin auto-detects rp-*.local)"
+}
+Write-Host "  2. powershell -File `"$startOe`""
+Write-Host "  3. In GUI: Acquisition Board -> Display Joint -> OpenSim Live -> Play"
+Write-Host "  4. Turn Filter ON (ESP32) so quaternions stream to OpenSim"
+Write-Host ""
+Write-Host "Manual OpenSim Live: $startLiveBat"
 Write-Host ""
