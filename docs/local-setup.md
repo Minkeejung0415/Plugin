@@ -54,6 +54,24 @@ If a previous run cloned the wrong repos, setup replaces them automatically.
 
 If CMake winget install fails, install from [cmake.org/download](https://cmake.org/download/) and choose **Add CMake to PATH**, then press Y when the script asks to retry detection.
 
+## Fix OpenSim paths on this machine
+
+If OpenSim Live still points at `C:\Users\KIN Student\...` or the wrong folder, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dev\Plugin\fix-opensim-paths.ps1" -WorkDir "C:\Users\justi\Documents\Plugin"
+```
+
+This patches **three places** and rebuilds the plugin:
+
+| File | What gets set |
+|------|----------------|
+| `dev\acquisition-board\Source\devices\redpitaya\AcqBoardRedPitaya.cpp` | `kOpenSimWorkDir`, `kEsp32RecordDir` |
+| `<WorkDir>\opensim_live_realtime.py` | `WORK_DIR`, `MODEL_PATH` |
+| `<WorkDir>\ephys_to_opensim_bridge.py` | `WORK_DIR` |
+
+Then restart Open Ephys.
+
 ## After setup — daily use
 
 **ESP32 USB:**

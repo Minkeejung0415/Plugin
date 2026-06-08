@@ -330,6 +330,54 @@ function Patch-File([string]$path, [hashtable]$replacements) {
     Set-Content $path $text -NoNewline -Encoding UTF8
 }
 
+function Patch-AcquisitionBoardCpp([string]$cppFile, [string]$workDir, [string]$esp32RecordDir) {
+    if (-not (Test-Path $cppFile)) { return }
+    $workEsc = $workDir.Replace('\', '\\')
+    $esp32Esc = $esp32RecordDir.Replace('\', '\\')
+    $text = Get-Content $cppFile -Raw
+    $text = $text -replace 'const char\* kOpenSimWorkDir\s*=\s*"[^"]*";', "const char* kOpenSimWorkDir = `"$workEsc`";"
+    $text = $text -replace 'const char\* kEsp32RecordDir\s*=\s*"[^"]*";', "const char* kEsp32RecordDir = `"$esp32Esc`";"
+    Set-Content $cppFile $text -Encoding UTF8
+}
+
+function Patch-OpenSimPython([string]$pyFile, [string]$workDir, [string]$openSimDir) {
+    if (-not (Test-Path $pyFile)) { return }
+    $modelPath = Join-Path $workDir 'Rajagopal2015_opensense_calibrated.osim'
+    $text = Get-Content $pyFile -Raw
+    $text = $text -replace 'WORK_DIR\s*=\s*r"[^"]*"', "WORK_DIR = r`"$workDir`""
+    $text = $text -replace 'MODEL_PATH\s*=\s*r"[^"]*"', "MODEL_PATH = r`"$modelPath`""
+    $text = $text.Replace('C:\Users\KIN Student\Open-Sim--Bio-Mech', $workDir)
+    $text = $text.Replace('C:\OpenSim 4.5', $openSimDir)
+    Set-Content $pyFile $text -Encoding UTF8
+}
+
+function Show-OpenSimPathAudit([string]$workDir, [string]$devRoot, [string]$buildConfig = 'Debug') {
+    Write-Host ''
+    Write-Host 'OpenSim path audit:' -ForegroundColor Yellow
+    $cpp = Join-Path $devRoot 'acquisition-board\Source\devices\redpitaya\AcqBoardRedPitaya.cpp'
+    if (Test-Path $cpp) {
+        Select-String -Path $cpp -Pattern 'kOpenSimWorkDir\s*=|kEsp32RecordDir\s*=' |
+            ForEach-Object { Write-Host "  C++  $($_.Line.Trim())" }
+    }
+    foreach ($name in @('opensim_live_realtime.py', 'ephys_to_opensim_bridge.py')) {
+        $py = Join-Path $workDir $name
+        if (Test-Path $py) {
+            Select-String -Path $py -Pattern '^(MODEL_PATH|WORK_DIR)\s*=' |
+                ForEach-Object { Write-Host "  PY   $($_.Line.Trim())" }
+        } else {
+            Write-Warn "  PY   missing: $py"
+        }
+    }
+    $dll = Join-Path $devRoot "GUI\Build\$buildConfig\plugins\acquisition-board.dll"
+    if (Test-Path $dll) {
+        Write-Host "  DLL  $dll (updated $(Get-Item $dll).LastWriteTime)"
+    } else {
+        Write-Warn "  DLL  missing: $dll"
+    }
+}
+
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 Write-Host ''
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host '  Open Ephys + OpenSim Plugin - Interactive Local Setup' -ForegroundColor Cyan
@@ -409,16 +457,8 @@ Copy-Item -Force (Join-Path $pluginDir 'devicethread.cpp')    (Join-Path $acqPlu
 Write-Ok 'Plugin sources copied (including RedPitaya AcquisitionBoard.h patch)'
 
 Write-Step 'Patching paths for your machine'
-$workEsc  = $script:WorkDir.Replace('\', '\\')
-$esp32Esc = $script:Esp32RecordDir.Replace('\', '\\')
-
 $cppFile = Join-Path $acqPlugin 'devices\redpitaya\AcqBoardRedPitaya.cpp'
-if (Test-Path $cppFile) {
-    (Get-Content $cppFile -Raw) `
-        -replace 'C:\\Users\\KIN Student\\Open-Sim--Bio-Mech', $workEsc `
-        -replace 'C:\\Users\\KIN Student\\Documents\\Arduino\\ESP32-S3-1\\results', $esp32Esc |
-        Set-Content $cppFile -NoNewline -Encoding UTF8
-}
+Patch-AcquisitionBoardCpp $cppFile $script:WorkDir $script:Esp32RecordDir
 
 $workFiles = @(
     'Rajagopal2015_opensense_calibrated.osim', 'Rajagopal2015_opensense.osim',
@@ -433,12 +473,10 @@ foreach ($f in $workFiles) {
 }
 
 foreach ($py in @('opensim_live_realtime.py', 'ephys_to_opensim_bridge.py')) {
-    Patch-File (Join-Path $script:WorkDir $py) @{
-        'C:\Users\KIN Student\Open-Sim--Bio-Mech' = $script:WorkDir
-        'C:\OpenSim 4.5' = $script:OpenSimDir
-    }
+    Patch-OpenSimPython (Join-Path $script:WorkDir $py) $script:WorkDir $script:OpenSimDir
 }
 Write-Ok "Work folder: $script:WorkDir"
+Show-OpenSimPathAudit $script:WorkDir $script:DevRoot $script:BuildConfig
 
 Write-Step 'Installing Python packages (numpy, imufusion)'
 & $script:Py38  -m pip install --upgrade pip numpy imufusion
