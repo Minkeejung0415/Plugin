@@ -287,6 +287,59 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
 
+        targetKneeTitle = std::make_unique<Label> ("targetKneeTitle", "Tgt Knee");
+        targetKneeTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        targetKneeTitle->setBounds (col1, 145, 52, 12);
+        addAndMakeVisible (targetKneeTitle.get());
+
+        targetKneeLabel = std::make_unique<Label> ("targetKneeLabel", "90");
+        targetKneeLabel->setEditable (true);
+        targetKneeLabel->setColour (Label::backgroundColourId, Colours::black);
+        targetKneeLabel->setColour (Label::textColourId, Colours::white);
+        targetKneeLabel->setBounds (col1, 158, 52, 18);
+        targetKneeLabel->addListener (this);
+        targetKneeLabel->setTooltip ("Target right knee angle (degrees) shown on OpenSim overlay.");
+        addAndMakeVisible (targetKneeLabel.get());
+
+        liveKneeTitle = std::make_unique<Label> ("liveKneeTitle", "Knee");
+        liveKneeTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        liveKneeTitle->setBounds (col1, 180, 52, 12);
+        addAndMakeVisible (liveKneeTitle.get());
+
+        liveKneeLabel = std::make_unique<Label> ("liveKneeLabel", "--");
+        liveKneeLabel->setColour (Label::backgroundColourId, Colours::darkgrey);
+        liveKneeLabel->setColour (Label::textColourId, Colours::white);
+        liveKneeLabel->setBounds (col1, 193, 52, 18);
+        liveKneeLabel->setJustificationType (Justification::centred);
+        addAndMakeVisible (liveKneeLabel.get());
+
+        targetHipTitle = std::make_unique<Label> ("targetHipTitle", "Tgt Hip");
+        targetHipTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        targetHipTitle->setBounds (col2, 145, 52, 12);
+        addAndMakeVisible (targetHipTitle.get());
+
+        targetHipLabel = std::make_unique<Label> ("targetHipLabel", "0");
+        targetHipLabel->setEditable (true);
+        targetHipLabel->setColour (Label::backgroundColourId, Colours::black);
+        targetHipLabel->setColour (Label::textColourId, Colours::white);
+        targetHipLabel->setBounds (col2, 158, 52, 18);
+        targetHipLabel->addListener (this);
+        targetHipLabel->setTooltip ("Target right hip flexion (degrees) shown on OpenSim overlay.");
+        addAndMakeVisible (targetHipLabel.get());
+
+        liveHipTitle = std::make_unique<Label> ("liveHipTitle", "Hip");
+        liveHipTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        liveHipTitle->setBounds (col2, 180, 52, 12);
+        addAndMakeVisible (liveHipTitle.get());
+
+        liveHipLabel = std::make_unique<Label> ("liveHipLabel", "--");
+        liveHipLabel->setColour (Label::backgroundColourId, Colours::darkgrey);
+        liveHipLabel->setColour (Label::textColourId, Colours::white);
+        liveHipLabel->setBounds (col2, 193, 52, 18);
+        liveHipLabel->setJustificationType (Justification::centred);
+        addAndMakeVisible (liveHipLabel.get());
+
+        setSize (getWidth(), 220);
         redPitayaSensorUiBuilt = true;
     }
 
@@ -891,6 +944,7 @@ void DeviceEditor::buttonClicked (Button* button)
         if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
         {
             auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+            syncOpenSimTargetAnglesToBoard();
             rp->launchOpenSimMotion();
             CoreServices::sendStatusMessage ("OpenSim Motion generation started — will open OpenSim GUI when done");
         }
@@ -900,8 +954,10 @@ void DeviceEditor::buttonClicked (Button* button)
         if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
         {
             auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+            syncOpenSimTargetAnglesToBoard();
             rp->launchOpenSimLive();
-            CoreServices::sendStatusMessage ("OpenSim Live started — press Play to stream");
+            startTimerHz (10);
+            CoreServices::sendStatusMessage ("OpenSim Live started — joint angles shown on OpenSim overlay");
         }
     }
     /*
@@ -1004,6 +1060,22 @@ void DeviceEditor::startAcquisition()
             openSimMotionButton->toFront (false);
         if (openSimLiveButton != nullptr)
             openSimLiveButton->toFront (false);
+        if (targetKneeTitle != nullptr)
+            targetKneeTitle->toFront (false);
+        if (targetKneeLabel != nullptr)
+            targetKneeLabel->toFront (false);
+        if (targetHipTitle != nullptr)
+            targetHipTitle->toFront (false);
+        if (targetHipLabel != nullptr)
+            targetHipLabel->toFront (false);
+        if (liveKneeTitle != nullptr)
+            liveKneeTitle->toFront (false);
+        if (liveKneeLabel != nullptr)
+            liveKneeLabel->toFront (false);
+        if (liveHipTitle != nullptr)
+            liveHipTitle->toFront (false);
+        if (liveHipLabel != nullptr)
+            liveHipLabel->toFront (false);
     }
 
     syncRedPitayaBoardSampleRateFromLabel();
@@ -1046,6 +1118,40 @@ void DeviceEditor::stopAcquisition()
         memoryUsage->stopAcquisition();
 
     acquisitionIsActive = false;
+    stopTimer();
+}
+
+void DeviceEditor::syncOpenSimTargetAnglesToBoard()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    if (targetKneeLabel != nullptr)
+        rp->setTargetKneeAngleDeg (targetKneeLabel->getText().getFloatValue());
+
+    if (targetHipLabel != nullptr)
+        rp->setTargetHipAngleDeg (targetHipLabel->getText().getFloatValue());
+}
+
+void DeviceEditor::timerCallback()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+    float knee = 0.0f;
+    float hip  = 0.0f;
+
+    if (! rp->getLiveJointAngles (knee, hip))
+        return;
+
+    if (liveKneeLabel != nullptr)
+        liveKneeLabel->setText (String (knee, 1), dontSendNotification);
+
+    if (liveHipLabel != nullptr)
+        liveHipLabel->setText (String (hip, 1), dontSendNotification);
 }
 
 // --- ADD THIS METHOD TO HANDLE YOUR NEW TEXT BOX ---
@@ -1114,6 +1220,17 @@ void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 
         if (board != nullptr)
             board->setAnalogOutVoltage (newVoltage);
+    }
+    else if (labelThatHasChanged == targetKneeLabel.get()
+             || labelThatHasChanged == targetHipLabel.get())
+    {
+        syncOpenSimTargetAnglesToBoard();
+
+        if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+        {
+            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+            rp->writeOpenSimTargetAngles();
+        }
     }
     else if (labelThatHasChanged == nodeHostLabel.get())
     {
@@ -1236,6 +1353,9 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
     {
         for (int i = 0; i < 6; ++i)
             xml->setAttribute ("BodySegment" + String (i), rp->getSensorBodySegment (i));
+
+        xml->setAttribute ("TargetKneeAngle", rp->getTargetKneeAngleDeg());
+        xml->setAttribute ("TargetHipAngle", rp->getTargetHipAngleDeg());
     }
 }
 
@@ -1345,6 +1465,17 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
         }
         if (sensorBodySegmentCombo != nullptr)
             sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (0) + 1, dontSendNotification);
+
+        const float tgtKnee = (float) xml->getDoubleAttribute ("TargetKneeAngle", 90.0);
+        const float tgtHip  = (float) xml->getDoubleAttribute ("TargetHipAngle", 0.0);
+        rp->setTargetKneeAngleDeg (tgtKnee);
+        rp->setTargetHipAngleDeg (tgtHip);
+
+        if (targetKneeLabel != nullptr)
+            targetKneeLabel->setText (String (tgtKnee, 0), dontSendNotification);
+
+        if (targetHipLabel != nullptr)
+            targetHipLabel->setText (String (tgtHip, 0), dontSendNotification);
     }
 }
 

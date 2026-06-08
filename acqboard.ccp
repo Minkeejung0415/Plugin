@@ -957,6 +957,12 @@ bool AcqBoardRedPitaya::stopAcquisition()
 
     openSimEnabled = false;
     openSimSocket.reset();
+    openSimAngleSocket.reset();
+
+    {
+        const juce::ScopedLock sl (liveAngleLock);
+        liveAnglesValid = false;
+    }
 
     if (openSimLiveProcess != nullptr)
     {
@@ -1384,9 +1390,89 @@ bool AcqBoardRedPitaya::writeOpenSimSensorMap() const
     return true;
 }
 
+void AcqBoardRedPitaya::setTargetKneeAngleDeg (float degrees)
+{
+    targetKneeAngleDeg = degrees;
+}
+
+void AcqBoardRedPitaya::setTargetHipAngleDeg (float degrees)
+{
+    targetHipAngleDeg = degrees;
+}
+
+bool AcqBoardRedPitaya::getLiveJointAngles (float& kneeDeg, float& hipDeg) const
+{
+    const juce::ScopedLock sl (liveAngleLock);
+
+    if (! liveAnglesValid)
+        return false;
+
+    kneeDeg = liveKneeAngleDeg;
+    hipDeg  = liveHipAngleDeg;
+    return true;
+}
+
+bool AcqBoardRedPitaya::writeOpenSimTargetAngles() const
+{
+    const juce::File targetFile (String (kOpenSimWorkDir) + "\\opensim_target_angles.json");
+
+    juce::FileOutputStream out (targetFile);
+    if (! out.openedOk())
+    {
+        std::cout << "OpenSim target angles: cannot write " << targetFile.getFullPathName() << std::endl;
+        return false;
+    }
+
+    out.setPosition (0);
+    out.truncate();
+
+    out.writeText ("{\n"
+                   "  \"comment\": \"Written by Open Ephys plugin. Target joint angles in degrees.\",\n"
+                   "  \"tolerance_deg\": " + String (targetAngleToleranceDeg, 1) + ",\n"
+                   "  \"targets\": {\n"
+                   "    \"knee_angle_r\": " + String (targetKneeAngleDeg, 2) + ",\n"
+                   "    \"hip_flexion_r\": " + String (targetHipAngleDeg, 2) + ",\n"
+                   "    \"pelvis_tilt\": 0.0,\n"
+                   "    \"pelvis_list\": 0.0,\n"
+                   "    \"pelvis_rotation\": 0.0\n"
+                   "  }\n"
+                   "}\n",
+                   false, false, nullptr);
+
+    std::cout << "OpenSim target angles: knee=" << targetKneeAngleDeg
+              << " hip=" << targetHipAngleDeg
+              << " -> " << targetFile.getFullPathName() << std::endl;
+    return true;
+}
+
+void AcqBoardRedPitaya::pollOpenSimAngleFeedback()
+{
+    if (openSimAngleSocket == nullptr)
+        return;
+
+    constexpr int kPacketFloats = 7;
+    float buffer[kPacketFloats];
+    String sender;
+    int senderPort = 0;
+
+    while (openSimAngleSocket->read (buffer, (int) sizeof (buffer), false, sender, senderPort) == (int) sizeof (buffer))
+    {
+        const float version = buffer[1];
+
+        if (version < 2.99f || version > 3.01f)
+            continue;
+
+        const juce::ScopedLock sl (liveAngleLock);
+        liveHipAngleDeg  = buffer[2];
+        liveKneeAngleDeg = buffer[3];
+        liveAnglesValid  = true;
+    }
+}
+
 void AcqBoardRedPitaya::launchOpenSimMotion()
 {
     writeOpenSimSensorMap();
+    writeOpenSimTargetAngles();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String bridgePath = workDir + "\\ephys_to_opensim_bridge.py";
     const juce::String logPath = workDir + "\\ephys_bridge_run.log";
@@ -1428,6 +1514,7 @@ void AcqBoardRedPitaya::launchOpenSimMotion()
 void AcqBoardRedPitaya::launchOpenSimLive()
 {
     writeOpenSimSensorMap();
+    writeOpenSimTargetAngles();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String scriptPath = workDir + "\\opensim_live_realtime.py";
     juce::File batFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
@@ -1459,6 +1546,18 @@ void AcqBoardRedPitaya::launchOpenSimLive()
     std::cout << "OpenSim Live: launched visible console (py -3.8 -u)." << std::endl;
 
     openSimSocket = std::make_unique<DatagramSocket>();
+    openSimAngleSocket = std::make_unique<DatagramSocket>();
+
+    if (openSimAngleSocket->bindToPort (5001))
+        std::cout << "Red Pitaya: OpenSim angle feedback listening on UDP port 5001" << std::endl;
+    else
+        std::cout << "Red Pitaya: OpenSim angle feedback bind failed on port 5001" << std::endl;
+
+    {
+        const juce::ScopedLock sl (liveAngleLock);
+        liveAnglesValid = false;
+    }
+
     openSimEnabled = true;
     std::cout << "Red Pitaya: OpenSim UDP forwarding enabled -> 127.0.0.1:5000" << std::endl;
 }
@@ -1701,6 +1800,9 @@ void AcqBoardRedPitaya::run()
 
                 if (sampleIndex == (int) samplesPerBuffer - 1)
                 {
+                    if (openSimEnabled)
+                        pollOpenSimAngleFeedback();
+
                     currentBuffer = buffer;
                     if (currentBuffer != nullptr && ! threadShouldExit())
                         currentBuffer->addToBuffer (samples,
@@ -1873,6 +1975,9 @@ void AcqBoardRedPitaya::run()
 
             if (sampleIndex == (int) samplesPerBuffer - 1)
             {
+                if (openSimEnabled)
+                    pollOpenSimAngleFeedback();
+
                 currentBuffer = buffer;
                 if (currentBuffer != nullptr && ! threadShouldExit())
                     currentBuffer->addToBuffer (samples,

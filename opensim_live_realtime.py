@@ -39,6 +39,17 @@ import numpy as np
 import json
 
 UDP_PACKET_VERSION_QUAT = 2.0
+UDP_PACKET_VERSION_ANGLES = 3.0
+ANGLE_FEEDBACK_IP = "127.0.0.1"
+ANGLE_FEEDBACK_PORT = 5001
+
+DISPLAY_COORDS = [
+    ("hip_flexion_r", "Hip flexion (R)"),
+    ("knee_angle_r", "Knee angle (R)"),
+    ("pelvis_tilt", "Pelvis tilt"),
+    ("pelvis_list", "Pelvis list"),
+    ("pelvis_rotation", "Pelvis rotation"),
+]
 _sensor_map_cache = None
 
 try:
@@ -137,6 +148,9 @@ _NEUTRAL_QUATS_8IMU = [
 _frame_lock = threading.Lock()
 _frame_queue = []
 _udp_running = True
+_angle_overlay = None
+_angle_feedback_sock = None
+_target_angles_cache = None
 
 
 def _qx(theta):
@@ -171,6 +185,239 @@ def _is_flat_fake_packet(values):
     return True
 
 
+
+
+def _load_target_angles():
+    global _target_angles_cache
+    if _target_angles_cache is not None:
+        return _target_angles_cache
+
+    defaults = {
+        "knee_angle_r": 90.0,
+        "hip_flexion_r": 0.0,
+        "pelvis_tilt": 0.0,
+        "pelvis_list": 0.0,
+        "pelvis_rotation": 0.0,
+    }
+    tolerance = 5.0
+    path = os.path.join(WORK_DIR, "opensim_target_angles.json")
+
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            targets = data.get("targets", {})
+            if isinstance(targets, dict):
+                for key in defaults:
+                    if key in targets:
+                        defaults[key] = float(targets[key])
+            tolerance = float(data.get("tolerance_deg", tolerance))
+        except Exception as exc:
+            print(f"[WARN] Could not read {path}: {exc}")
+
+    _target_angles_cache = {"targets": defaults, "tolerance_deg": tolerance}
+    return _target_angles_cache
+
+
+def _read_display_coord_values(coord_set, state):
+    values = {}
+    for name, _label in DISPLAY_COORDS:
+        try:
+            values[name] = float(np.degrees(coord_set.get(name).getValue(state)))
+        except Exception:
+            values[name] = float("nan")
+    return values
+
+
+def _send_angle_feedback(t_stream, coord_values):
+    global _angle_feedback_sock
+    if _angle_feedback_sock is None:
+        try:
+            _angle_feedback_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except OSError as exc:
+            print(f"[WARN] Angle feedback socket unavailable: {exc}")
+            return
+
+    hip_r = coord_values.get("hip_flexion_r", 0.0)
+    knee_r = coord_values.get("knee_angle_r", 0.0)
+    pelvis_tilt = coord_values.get("pelvis_tilt", 0.0)
+    pelvis_list = coord_values.get("pelvis_list", 0.0)
+    pelvis_rotation = coord_values.get("pelvis_rotation", 0.0)
+    pkt = struct.pack(
+        "<7f",
+        float(t_stream),
+        UDP_PACKET_VERSION_ANGLES,
+        float(hip_r),
+        float(knee_r),
+        float(pelvis_tilt),
+        float(pelvis_list),
+        float(pelvis_rotation),
+    )
+    try:
+        _angle_feedback_sock.sendto(pkt, (ANGLE_FEEDBACK_IP, ANGLE_FEEDBACK_PORT))
+    except OSError:
+        pass
+
+
+class AngleOverlay:
+    """Always-on-top window showing current vs target joint angles next to OpenSim."""
+
+    def __init__(self):
+        import tkinter as tk
+
+        self._tk = tk
+        self.root = tk.Tk()
+        self.root.title("OpenSim Joint Angles")
+        self.root.attributes("-topmost", True)
+        self.root.resizable(False, False)
+        self.root.configure(bg="#1e1e1e")
+
+        header = tk.Label(
+            self.root,
+            text="Joint Angle Targeting",
+            font=("Segoe UI", 11, "bold"),
+            fg="#ffffff",
+            bg="#1e1e1e",
+        )
+        header.pack(padx=10, pady=(8, 4))
+
+        sub = tk.Label(
+            self.root,
+            text="Current (deg)    Target    Error",
+            font=("Consolas", 9),
+            fg="#aaaaaa",
+            bg="#1e1e1e",
+            justify="left",
+        )
+        sub.pack(padx=10, pady=(0, 6), anchor="w")
+
+        self._rows = {}
+        targets = _load_target_angles()["targets"]
+        for name, label in DISPLAY_COORDS:
+            row = tk.Frame(self.root, bg="#1e1e1e")
+            row.pack(fill="x", padx=10, pady=2)
+            title = tk.Label(
+                row,
+                text=label,
+                width=18,
+                anchor="w",
+                font=("Segoe UI", 9),
+                fg="#dddddd",
+                bg="#1e1e1e",
+            )
+            title.pack(side="left")
+            current_lbl = tk.Label(
+                row,
+                text="--",
+                width=8,
+                anchor="e",
+                font=("Consolas", 10, "bold"),
+                fg="#ffffff",
+                bg="#1e1e1e",
+            )
+            current_lbl.pack(side="left")
+            target_lbl = tk.Label(
+                row,
+                text=f"{targets.get(name, 0.0):.1f}",
+                width=8,
+                anchor="e",
+                font=("Consolas", 10),
+                fg="#88ccff",
+                bg="#1e1e1e",
+            )
+            target_lbl.pack(side="left")
+            error_lbl = tk.Label(
+                row,
+                text="--",
+                width=8,
+                anchor="e",
+                font=("Consolas", 10, "bold"),
+                fg="#ffcc66",
+                bg="#1e1e1e",
+            )
+            error_lbl.pack(side="left")
+            self._rows[name] = {
+                "current": current_lbl,
+                "target": target_lbl,
+                "error": error_lbl,
+            }
+
+        self._status = tk.Label(
+            self.root,
+            text="Waiting for IK...",
+            font=("Segoe UI", 9),
+            fg="#88ff88",
+            bg="#1e1e1e",
+        )
+        self._status.pack(padx=10, pady=(8, 10))
+
+        self.root.update_idletasks()
+        self.root.geometry("+40+40")
+
+    def pump_events(self):
+        try:
+            self.root.update()
+        except Exception:
+            pass
+
+    def update(self, coord_values, t_stream, reload_targets=False):
+        global _target_angles_cache
+        if reload_targets:
+            _target_angles_cache = None
+        cfg = _load_target_angles()
+        targets = cfg["targets"]
+        tolerance = cfg.get("tolerance_deg", 5.0)
+        within_target = 0
+        tracked = 0
+
+        for name, _label in DISPLAY_COORDS:
+            current = coord_values.get(name)
+            target = float(targets.get(name, 0.0))
+            widgets = self._rows[name]
+            widgets["target"].configure(text=f"{target:.1f}")
+
+            if current is None or not math.isfinite(current):
+                widgets["current"].configure(text="--", fg="#ffffff")
+                widgets["error"].configure(text="--", fg="#ffcc66")
+                continue
+
+            error = current - target
+            tracked += 1
+            if abs(error) <= tolerance:
+                within_target += 1
+                err_color = "#66ff66"
+            else:
+                err_color = "#ff6666"
+
+            widgets["current"].configure(text=f"{current:.1f}", fg="#ffffff")
+            widgets["error"].configure(text=f"{error:+.1f}", fg=err_color)
+
+        if tracked == 0:
+            status = "No coordinate data"
+            status_color = "#ffcc66"
+        elif within_target == tracked:
+            status = f"On target ({within_target}/{tracked} within {tolerance:.0f} deg)"
+            status_color = "#66ff66"
+        else:
+            status = f"Adjust pose ({within_target}/{tracked} within {tolerance:.0f} deg)"
+            status_color = "#ffcc66"
+
+        self._status.configure(text=f"t={t_stream:.2f}s  {status}", fg=status_color)
+        self.pump_events()
+
+
+def _start_angle_overlay():
+    global _angle_overlay
+    if _angle_overlay is not None:
+        return _angle_overlay
+
+    try:
+        _angle_overlay = AngleOverlay()
+        print("[OVERLAY] Joint angle display window opened.")
+    except Exception as exc:
+        print(f"[WARN] Could not open angle overlay window: {exc}")
+        _angle_overlay = None
+    return _angle_overlay
 
 
 def _load_sensor_map():
@@ -667,6 +914,8 @@ def run_live():
         pass
     viz.setShowSimTime(True)
 
+    overlay = _start_angle_overlay()
+
     print("[Connect OpenSim] Assembling neutral pose ...")
     ikSolver.assemble(state)
     model.getVisualizer().show(state)
@@ -788,27 +1037,41 @@ def run_live():
             state.setTime(t_imu)
 
             live_frame += 1
-            current_coord_values = None
-            if live_frame <= 5 or live_frame % 60 == 0:
-                try:
-                    hip_r = np.degrees(coord_set.get("hip_flexion_r").getValue(state))
-                    knee_r = np.degrees(coord_set.get("knee_angle_r").getValue(state))
-                    pelvis_tilt = np.degrees(coord_set.get("pelvis_tilt").getValue(state))
-                    pelvis_list = np.degrees(coord_set.get("pelvis_list").getValue(state))
-                    pelvis_rotation = np.degrees(coord_set.get("pelvis_rotation").getValue(state))
-                    current_coord_values = [hip_r, knee_r, pelvis_tilt, pelvis_list, pelvis_rotation]
-                    print(
-                        f"[COORD {live_frame}] t={state.getTime():.3f} "
-                        f"hip_flexion_r={hip_r:.2f} deg "
-                        f"knee_angle_r={knee_r:.2f} deg "
-                        f"pelvis_tilt={pelvis_tilt:.2f} deg "
-                        f"pelvis_list={pelvis_list:.2f} deg "
-                        f"pelvis_rotation={pelvis_rotation:.2f} deg"
-                    )
-                except Exception as e:
-                    print(f"[COORD] read error: {e}")
+            coord_values = _read_display_coord_values(coord_set, state)
+            current_coord_values = [
+                coord_values.get("hip_flexion_r"),
+                coord_values.get("knee_angle_r"),
+                coord_values.get("pelvis_tilt"),
+                coord_values.get("pelvis_list"),
+                coord_values.get("pelvis_rotation"),
+            ]
 
-            if current_coord_values is not None:
+            if live_frame <= 5 or live_frame % 60 == 0:
+                print(
+                    f"[COORD {live_frame}] t={state.getTime():.3f} "
+                    f"hip_flexion_r={coord_values.get('hip_flexion_r', float('nan')):.2f} deg "
+                    f"knee_angle_r={coord_values.get('knee_angle_r', float('nan')):.2f} deg "
+                    f"pelvis_tilt={coord_values.get('pelvis_tilt', float('nan')):.2f} deg "
+                    f"pelvis_list={coord_values.get('pelvis_list', float('nan')):.2f} deg "
+                    f"pelvis_rotation={coord_values.get('pelvis_rotation', float('nan')):.2f} deg"
+                )
+
+            if overlay is not None:
+                overlay.update(coord_values, t_imu, reload_targets=(live_frame % 50 == 0))
+
+            _send_angle_feedback(t_imu, coord_values)
+
+            try:
+                knee_r = coord_values.get("knee_angle_r", float("nan"))
+                hip_r = coord_values.get("hip_flexion_r", float("nan"))
+                if math.isfinite(knee_r) and math.isfinite(hip_r):
+                    viz.setWindowTitle(
+                        f"Connect OpenSim | knee={knee_r:.1f} deg | hip={hip_r:.1f} deg"
+                    )
+            except Exception:
+                pass
+
+            if all(v is not None and math.isfinite(v) for v in current_coord_values):
                 if last_coord_values is not None:
                     coord_delta = max(abs(a - b) for a, b in zip(current_coord_values, last_coord_values))
                     if active_static and active_gyro_norm < STATIC_GYRO_EPS and coord_delta > STATIC_COORD_EPS_DEG:
@@ -840,6 +1103,18 @@ def run_live():
         print("\n[Connect OpenSim] Stopped by user.")
     finally:
         _udp_running = False
+        global _angle_feedback_sock
+        if _angle_feedback_sock is not None:
+            try:
+                _angle_feedback_sock.close()
+            except Exception:
+                pass
+            _angle_feedback_sock = None
+        if _angle_overlay is not None:
+            try:
+                _angle_overlay.root.destroy()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -271,6 +271,15 @@ public:
      *  Written to opensim_sensor_map.json when changed or just before launching the bridge. */
     int sensorBodySegment[6] = {};  /* default 0 = tibia_r_imu for every sensor */
 
+    float targetKneeAngleDeg = 90.0f;
+    float targetHipAngleDeg = 0.0f;
+    float targetAngleToleranceDeg = 5.0f;
+
+    mutable CriticalSection liveAngleLock;
+    float liveKneeAngleDeg = 0.0f;
+    float liveHipAngleDeg = 0.0f;
+    bool liveAnglesValid = false;
+
     static constexpr int NUM_BODY_SEGMENTS = 13;
     static const char* getBodySegmentName (int idx);   // e.g. "tibia_r_imu"
     static const char* getBodySegmentLabel (int idx);  // e.g. "Right Tibia"
@@ -281,10 +290,26 @@ public:
     /** Writes opensim_sensor_map.json so the Python bridge picks up the current mapping. */
     bool writeOpenSimSensorMap() const;
 
+    /** Writes opensim_target_angles.json for live IK overlay / targeting. */
+    bool writeOpenSimTargetAngles() const;
+
+    void setTargetKneeAngleDeg (float degrees);
+    void setTargetHipAngleDeg (float degrees);
+    float getTargetKneeAngleDeg() const { return targetKneeAngleDeg; }
+    float getTargetHipAngleDeg() const { return targetHipAngleDeg; }
+
+    /** Latest joint angles received from opensim_live_realtime.py (UDP v3 feedback). */
+    bool getLiveJointAngles (float& kneeDeg, float& hipDeg) const;
+    bool hasLiveJointAngles() const { return liveAnglesValid; }
+
+    /** Non-blocking read of angle feedback on UDP port 5001. */
+    void pollOpenSimAngleFeedback();
+
     /** UDP v2: quats is numSensors×4 floats (qw,qx,qy,qz per sensor, unit quaternion). */
     void sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors);
 
     std::unique_ptr<DatagramSocket> openSimSocket;
+    std::unique_ptr<DatagramSocket> openSimAngleSocket;
     bool openSimEnabled { false };
     std::unique_ptr<juce::ChildProcess> openSimProcess;
     std::unique_ptr<juce::ChildProcess> openSimLiveProcess;
