@@ -41,5 +41,9 @@ stopped_at: Milestone v1.0 complete — autonomous run
 
 None — software implementation complete.
 
+## Analysis artifacts
+
+- **VQF + IK pipeline map (optimization):** `.planning/analysis/vqf-ik-pipeline-map.md` — bottlenecks, timing table, tunables, ranked optimization matrix.
+
 ---
-*State updated: 2026-06-10 — autonomous milestone complete*
+*State updated: 2026-06-10 — added VQF/IK pipeline analysis*

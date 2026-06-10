@@ -1,114 +1,478 @@
-# VQF → IK Pipeline Map
+# VQF ↔ OpenSim IK Pipeline Map (Optimization-Oriented)
 
-Trace of one IMU sample from Red Pitaya hardware to the OpenSim joint-angle
-HUD, with the bottlenecks and correctness issues found at each stage.
+**Scope:** End-to-end orientation pipeline from Red Pitaya firmware through Open Ephys plugin to `opensim_live_realtime.py`. Analysis only — no implementation.
 
-## Stage map
+**Sources read:** `vqf.c`/`vqf.h`, `sensor_fusion.c`/`sensor_fusion.h`, `RedPitaya_justin.c`, `acqboard.ccp`, `opensim_live_realtime.py`, `docs/i2c-optimization-plan.md`.
+
+---
+
+## 1. End-to-End Pipeline
+
+### 1.1 Mermaid (full path)
+
+```mermaid
+flowchart TB
+    subgraph FW["Red Pitaya firmware (RedPitaya_justin.c)"]
+        GPIO["GPIO counter @ 125 MHz"]
+        READ["read_sensor_raw_channels() per IMU"]
+        BIAS["gyro_bias subtract (startup cal)"]
+        MAG["Mag decimation ~100 Hz + cache"]
+        VQF["fusion_update_sensor → vqf_update"]
+        Q15["Q15 quat → frame_buffer"]
+        UDP55001["UDP :55001 (CHUNK_SAMPLES=1)"]
+        GPIO --> READ --> BIAS --> VQF --> Q15 --> UDP55001
+        READ --> MAG --> VQF
+    end
+
+    subgraph PLUGIN["Open Ephys plugin (acqboard.ccp)"]
+        RX["UDP recv :55001 or TCP ESP32"]
+        SCALE["Channel scale (acc/gyr presets)"]
+        BRANCH{"Path?"}
+        FWD["quaternionFromScaledQ15 + sendOpenSimQuaternionPacket"]
+        MADG["madgwickUpdate6DOF (ESP32, no Q15)"]
+        OEBUF["Open Ephys DataBuffer"]
+        RX --> SCALE --> BRANCH
+        BRANCH -->|Red Pitaya| FWD
+        BRANCH -->|ESP32 no quat ch| MADG --> FWD
+        SCALE --> OEBUF
+    end
+
+    subgraph PY["Python bridge (opensim_live_realtime.py)"]
+        UDP5000["UDP :5000 recv thread"]
+        PARSE["Parse v2 quats OR legacy AHRS (imufusion)"]
+        QUEUE["_frame_queue (latest only)"]
+        MAIN["run_live() main loop @ 20 Hz"]
+        ROT["_quats_to_rot_table"]
+        IK["OrientationsReference + InverseKinematicsSolver rebuild"]
+        ASM["ikSolver.assemble(state)"]
+        VIZ["Visualizer.show(state)"]
+        HUD["Joint HUD + angle feedback :5001"]
+        WATCH["joint_display_config.json watcher 50 ms"]
+        UDP5000 --> PARSE --> QUEUE --> MAIN
+        MAIN --> ROT --> IK --> ASM --> VIZ --> HUD
+        WATCH -.-> HUD
+    end
+
+    UDP55001 --> RX
+    FWD --> UDP5000
+    MADG --> UDP5000
+```
+
+### 1.2 ASCII (latency-critical path)
 
 ```
-[Red Pitaya, C]
-  run_stream() loop @ g_stream_hw_hz (1–2000 Hz, GPIO counter paced)
-    └─ acquire_sensor_samples_decimated()          RedPitaya_justin.c
-         ├─ per-sensor worker threads (n-1 workers + caller thread)
-         ├─ per-sensor decimation: fusion only runs every
-         │    g_decim_interval[i] ticks (sample/hold otherwise)
-         ├─ read_sensor_raw_channels() → raw acc/gyr/mag counts
-         └─ fusion_update_sensor()                 sensor_fusion.c
-              ├─ raw counts → physical units (per-sensor LSB scales)
-              ├─ vqf_update() / vqf_update_mag()   vqf.c (VQF 6D/9D)
-              └─ quaternion → Q15 int16, appended to frame channels
-    └─ frame → UDP chunks → Open Ephys plugin (devicethread/acqboard)
-
-[Open Ephys plugin, C++]
-  quaternion channels forwarded as UDP v2 packet on port 5000:
-    <t, version=2.0, N, N×(qw,qx,qy,qz)>  little-endian float32
-
-[Python bridge: opensim_live_realtime.py, Python 3.8 + OpenSim 4.5]
-  _udp_ahrs_thread()
-    ├─ v2 quat packets: frame-rotate (_Q_OPENSIM_FRAME) → frame queue
-    └─ legacy acc/gyr packets: imufusion AHRS per slot → quats → queue
-  run_live() render loop @ OPENSIM_LIVE_VISUALIZER_RATE (~20 Hz)
-    ├─ merge live quats with neutral pose for missing sensors
-    ├─ TimeSeriesTableRotation → OrientationsReference
-    ├─ InverseKinematicsSolver.assemble(state)   (rebuilt per frame —
-    │    documented workaround for OpenSim 4.5 Python binding)
-    ├─ coord_set.get(name).getValue(state) → joint angles
-    ├─ HUD: Simbody DecorationGenerator / window title
-    └─ angle feedback UDP :5001 (v3.1 packet)
+IMU chip ──I2C/SPI──► raw int16 [acc,gyr,(mag)]
+         │
+         ├─ gyro_bias[] (200-sample startup mean, RedPitaya_justin.c:570-607)
+         ├─ mag decimated: period = hw_hz/100 (472-501)
+         │
+         ▼
+sensor_fusion.c: fusion_update_sensor()
+         ├─ scale → float physical units
+         ├─ vqf_update(gyr, acc)  [every accel/gyro tick]
+         ├─ vqf_update_mag(mag)   [when mag_is_fresh]
+         ├─ refresh_last_quaternion + normalize (again)
+         └─ quat_float_to_q15 → channels [numRaw..numRaw+3]
+         │
+         ▼
+UDP :55001  (1 sample/datagram, HEADER_SIZE=22 + payload)
+         │
+         ▼
+acqboard.ccp run(): scale Q15 → float, pack UDP v2 → 127.0.0.1:5000
+         │
+         ▼
+_udp_ahrs_thread(): drain stale packets, keep latest → _frame_queue
+         │
+         ▼
+run_live() @ OPENSIM_LIVE_VISUALIZER_RATE (default 20 Hz):
+         _quats_to_rot_table → NEW OrientationsReference + NEW IK solver → assemble → show
 ```
 
-## Findings
+---
 
-### F1 — VQF integrates with the wrong time step under decimation (BUG)
-`reinit_fusion_for_hz()` initializes every sensor's VQF with
-`Ts = 1 / g_stream_hw_hz`, but `sensor_worker()` only calls
-`fusion_update_sensor()` once every `g_decim_interval[i]` ticks
-(`init_sensor_decimation()`, derived from `cfg_target_hz`). A sensor
-decimated 10:1 therefore integrates gyro rotation with a 10× too-small dt —
-orientation lags real motion by the decimation factor.
+## 2. VQF / Fusion Deep Dive
 
-**Fix**: per-sensor effective rate (`hw_hz / decim_interval`) passed into the
-fusion config (`FusionSensorConfig.imu_sample_rate_hz`) and used when
-initializing each sensor's VQF instance.
+### 2.1 Architecture layers
 
-### F2 — `CFG <i> SRATE` changes decimation but not VQF Ts (BUG)
-Both `CFG SRATE` handlers (streaming + idle command loops) update
-`cfg_target_hz` and decimation but never re-register the sensor with the
-fusion module, so VQF keeps the old Ts.
+| Layer | File | Role |
+|-------|------|------|
+| VQF core | `vqf.c`, `vqf.h` | Daniel Laidig VQF (pure C port); 6D/9D AHRS, bias est, mag rejection |
+| Wrapper | `sensor_fusion.c` | Multi-IMU slots, scaling, Q15 I/O, enable gate |
+| Integration | `RedPitaya_justin.c` | Per-sample call, threading, timing stats, mag I/O |
+| Alternate AHRS | `acqboard.ccp:184-245` | Inline Madgwick 6-DOF for ESP32 when no Q15 quat channels |
 
-**Fix**: re-register the affected sensor with its new effective rate.
+**Precision:** `vqf_real_t` defaults to **double** (`vqf.h:29-33`); Butterworth filter state always **double** (`vqf_filter_step`). `VQF_SINGLE_PRECISION` and `VQF_NO_MOTION_BIAS_ESTIMATION` are commented out.
 
-### F3 — Mag-source/fusion-update block duplicated 3× in the hot path
-`acquire_sensor_samples()` and both branches of `sensor_worker()` carry
-identical ~30-line blocks (gyro extraction, BNO055/MPU9250/ICM20948 mag
-selection, bias subtraction, timed `fusion_update_sensor`). Divergence risk
-on every future change.
+### 2.2 Per-sample pseudocode (one IMU, fusion ON)
 
-**Fix**: single `fusion_update_from_channels()` helper returning elapsed ns.
+```
+fusion_update_sensor(index, raw_acc, raw_gyr, raw_mag, mag_is_fresh, quat_q15):
+    if not enabled → quat_q15 = identity Q15; return
 
-### F4 — Redundant status-flag write in `fusion_update_sensor()`
-`FUSION_STATUS_MAGNETOMETER_USED` is OR-ed in before
-`refresh_last_quaternion()`, which overwrites `last_status_flags`, then OR-ed
-in again afterwards. The first write is dead.
+    acc = raw_acc * accel_mps2_per_lsb
+    gyr = raw_gyr * gyro_rads_per_lsb   // already bias-subtracted in firmware
 
-### F5 — Python legacy path runs AHRS on filler slots
-`_udp_ahrs_thread()` updates `imufusion.Ahrs` + `Offset` for all 8 slots per
-packet even though slots outside `slot_map` hold neutral filler whose
-quaternions are never read. With 1–2 real sensors that is ~4–8× wasted AHRS
-work at packet rate.
+    vqf_update(&vqf, gyr, acc):
+        vqf_update_gyr:
+            optional rest LP on gyro (if restBiasEst or magDistRejection)
+            gyrNoBias = gyr - vqf.state.bias
+            strapdown integrate → gyrQuat (cos/sin, quat multiply, normalize)
 
-### F6 — Per-frame/per-packet allocations in the Python hot loops
-- `_neutral_quats_opensim_frame()` recomputes 8 quaternion multiplies per
-  rendered frame; the product is constant.
-- `struct.unpack` format strings (`<3f`, `<{n*4}f`, `<{n*6}f`, `<4f`) are
-  re-parsed every packet; `struct.Struct` objects can be cached.
-- `_is_tibia_only_mode()` evaluated 3× per frame.
-- `_apply_tibia_only_locks()` makes a SWIG `setLocked` call per coordinate
-  per frame even when the mode hasn't changed; locks persist in the state,
-  so they only need re-applying on a mode transition.
+        vqf_update_acc:
+            optional rest LP on acc; update restDetected timer
+            rotate acc to Earth frame; Butterworth LP (tauAcc=3s)
+            inclination correction → accQuat
+            if motionBiasEst or restBiasEst:
+                build 3×3 R from 6D quat
+                Kalman-like bias update (3×3 inv, matrix multiplies)  ← HEAVY
 
-### Left alone (deliberate)
-- Per-frame `InverseKinematicsSolver` rebuild: commented workaround — the
-  buffered reference doesn't update coordinates on this OpenSim 4.5 build.
-- vqf.c algorithm internals: faithful port of upstream VQF; double-precision
-  Butterworth internals are required for stability. (`VQF_SINGLE_PRECISION`
-  remains available as a build-time option if the Zynq core needs headroom;
-  measured avg/max per-call time is already reported by
-  `maybe_report_vqf_stats`.)
-- UDP v2 packet format: frozen by compatibility constraint.
+    if has_mag and mag_is_fresh:
+        vqf_update_mag → heading delta, disturbance rejection
 
-## Status
+    refresh_last_quaternion:
+        vqf_get_quat_6d or _9d
+        normalize_quaternion again                    ← redundant with VQF internal
 
-| Finding | Severity | Action |
-|---------|----------|--------|
-| F1 decimation vs VQF Ts | HIGH (correctness) | fixed |
-| F2 CFG SRATE stale Ts | MEDIUM (correctness) | fixed |
-| F3 triplicated fusion block | MEDIUM (maintainability) | fixed |
-| F4 dead flag write | LOW | fixed |
-| F5 AHRS on filler slots | MEDIUM (CPU) | fixed |
-| F6 hot-loop allocations | LOW–MEDIUM (CPU) | fixed |
+    quat_float_to_q15(last_quat)
+```
 
-F1 is covered by `tests/vqf_decimation_ts_test.c` (standalone, same pattern as
-`tests/redpitaya_stream_framing_test.c`): a 10:1-decimated sensor rotating at
-90 °/s for 1 s must fuse to ~90° of yaw — under the old module-rate Ts it
-fused to 9°.
+### 2.3 VQF default tuning (`vqf_params_init`, `vqf.c:42-73`)
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `tauAcc` | 3.0 s | Acc low-pass → inclination tracking speed |
+| `tauMag` | 9.0 s | Heading correction time constant |
+| `motionBiasEstEnabled` | true | 3×3 covariance bias update during motion |
+| `restBiasEstEnabled` | true | Bias update when stationary ≥1.5 s |
+| `magDistRejectionEnabled` | true | Reject bad mag; can zero heading gain up to 60 s |
+| `restThGyr` / `restThAcc` | 2°/s, 0.5 m/s² | Rest detection thresholds |
+| `biasClip` | 2°/s | Max estimated bias magnitude |
+
+### 2.4 Firmware fusion integration
+
+**Init:** `fusion_init(n, DESIRED_SAMPLE_RATE_HZ)` at startup (`RedPitaya_justin.c:1837`); **reinit on FREQ:** `reinit_fusion_for_hz()` (`1185-1204`, `1267`).
+
+**Enable gate:** Plugin sends `FILTER ON` / `FILTER OFF` over TCP → `fusion_set_enabled()` (`1239-1247`).
+
+**Parallelism:** `acquire_sensor_samples_decimated()` uses up to **5 worker pthreads + caller** for multi-IMU (`929-987`). Single IMU skips thread overhead (`953-959`).
+
+**Decimation:** Per-sensor `cfg_target_hz` via hold buffer (`764-902`); VQF still runs only on decimated reads, but held quats repeat on skipped ticks.
+
+**Instrumentation:** Per-call `clock_gettime` around `fusion_update_sensor`; reports avg/max µs every `current_stream_hw_hz()` samples (`1001-1017`). Loop warns if total sample path **>900 µs** (`992-998`).
+
+**Gyro bias (firmware):** 200 samples × 10 ms sleep ≈ 2 s startup calibration (`38`, `570-607`), stored in `SensorInstance.gyro_bias[3]`, subtracted **before** VQF. VQF also runs its **own** gyro bias estimator — potential double correction / interaction.
+
+**Mag path (MPU9250 I2C):** Separate I2C read to AK8963 every `hw_hz/100` samples (`472-501`); HOFL overflow reuses cache; values ×16 pre-scaled; `mag_units_per_lsb = 0.15/16` in `sensor_fusion.c:172`.
+
+### 2.5 Madgwick path (plugin-only, ESP32)
+
+When ESP32 stream has **≥6 channels but <11** (no Q15 quats) and `filterEnabled`:
+
+```
+dt = 1 / boardSampleRate
+madgwickUpdate6DOF(q, gx, gy, gz, ax, ay, az, dt, beta=0.1)
+→ sendOpenSimQuaternionPacket
+```
+
+- **6-DOF only** — yaw unobservable, will drift (`acqboard.ccp:171-177`).
+- Runs **per sample on the PC**, not on device.
+- Red Pitaya path uses **pre-fused VQF Q15** from firmware; no Madgwick on PC.
+
+### 2.6 VQF CPU hotspots (qualitative)
+
+| Hotspot | Location | Notes |
+|---------|----------|-------|
+| Motion bias 3×3 inverse | `vqf_update_acc` 489-504 | Every acc sample when enabled |
+| Multiple Butterworth `vqf_filter_vec` | gyr/acc/rest/mag paths | Double-precision biquad |
+| Trig (sin/cos/acos/asin/atan2) | gyr integration, acc/mag correction | Per sample |
+| Extra normalize in wrapper | `sensor_fusion.c:106-122, 226` | sqrt + divide after VQF already normalized |
+| I2C mag read | `read_sensor_raw_channels` | Blocks sample loop; not in VQF but serial with it |
+| Q15 convert + clamp | `float_to_q15` per component | Minor |
+
+---
+
+## 3. OpenSim IK Pipeline Deep Dive
+
+### 3.1 Threads
+
+| Thread | Function | Blocking? |
+|--------|----------|-----------|
+| Main | `run_live()` — IK, viz, throttle | Blocks on `assemble` + `show` |
+| UDP | `_udp_ahrs_thread()` | `recvfrom` 1 s timeout; drains burst with `select` |
+| Joint display | `_joint_display_watcher_thread()` | `sleep(0.05)` poll on JSON mtime |
+
+**Queue policy:** UDP thread **clears** `_frame_queue` and appends **one** latest frame (`686-688`, `849-851`). Main loop also clears after read (`1015-1016`). No backlog — intentional low latency, drops intermediate packets.
+
+### 3.2 Main loop pseudocode (render path)
+
+```
+target_frame_s = 1 / LIVE_VISUALIZER_RATE   # default 20 Hz
+
+loop:
+    pop latest frame from _frame_queue (or sleep if empty)
+
+    if t_imu <= last_t: continue              # monotonic time
+
+    if now - t_last_solve < target_frame_s:    # viz throttle
+        skip IK/render (still advances last_t)
+
+    if tibia-only mode (1 sensor):
+        ik_quats = live quats only
+        lock all coords except knee_angle_r (+ beta)
+    else:
+        ik_quats = merge live into 8-slot neutral template
+        ik_sensors = all 8 SENSORS names
+
+    rot_table = _quats_to_rot_table(0, ik_quats, ik_sensors)
+
+    # OpenSim 4.5 workaround — FULL REBUILD EVERY RENDERED FRAME:
+    oRefs = OrientationsReference(rot_table)
+    ikSolver = InverseKinematicsSolver(model, mRefs, oRefs, coordRefs, CONSTRAINT=20)
+    ikSolver.setAccuracy(1e-4)
+    state.setTime(0)
+    apply_tibia_only_locks(...)
+    ikSolver.assemble(state)                  ← dominant cost
+    state.setTime(t_imu)
+
+    read display joint angle; HUD; UDP feedback :5001
+    model.getVisualizer().show(state)
+
+    log [PERF] avg frame ms every 1 s
+```
+
+### 3.3 Legacy IMU path (non-v2 packets)
+
+If packet is **not** v2 quaternions, UDP thread runs **imufusion** per slot (`809-819`):
+
+- `imufusion.Offset(SAMPLE_RATE=1000)` gyro calibration
+- `Ahrs.update_no_magnetometer` — **second fusion** after firmware/plugin already fused
+- Only used when bridge receives raw acc/gyro floats, not quaternion v2
+
+### 3.4 Coordinate / constraint model
+
+- `CONSTRAINT = 20.0` (`opensim_live_realtime.py:76`) — orientation constraint weight in IK
+- `ikSolver.setAccuracy(1e-4)` (`957`, `1078`)
+- Neutral pose: 8-IMU template `_NEUTRAL_QUATS_8IMU` merged for partial sensor sets
+- Frame fix: `_Q_OPENSIM_FRAME = Rx(-π/2)` applied to all incoming quats
+- Tibia-only: locks all coords except `knee_angle_r` / `knee_angle_r_beta` (`886-926`)
+
+---
+
+## 4. Data Rates & Timing
+
+### 4.1 Rate table
+
+| Stage | Default | Range | Notes |
+|-------|---------|-------|-------|
+| Hardware stream tick | 100 Hz | 1–2000 Hz | `g_stream_hw_hz`, `DESIRED_SAMPLE_RATE_HZ=100` |
+| Per-sensor ODR target | = hw_hz | ≤ hw_hz | `CFG n SRATE`; BNO055 fixed ~100 Hz |
+| Per-sensor decimation | 1× | hw/target | Hold-last-sample between reads |
+| Mag effective rate | ~100 Hz | — | `mag_period = hw_hz/100` |
+| VQF update rate | = effective sensor read rate | — | Once per `fusion_update_sensor` |
+| UDP firmware → plugin | = stream Hz | — | `CHUNK_SAMPLES=1` |
+| Plugin → OpenSim | = stream Hz | — | One v2 packet per sample (RP path) |
+| OpenSim render / IK | 20 Hz | env `OPENSIM_LIVE_VISUALIZER_RATE` | Throttle in main loop |
+| Joint config poll | 20 Hz | — | 50 ms sleep |
+| Angle feedback UDP | 20 Hz | — | Tied to rendered frames |
+| imufusion offset window | 1000 Hz nominal | — | `SAMPLE_RATE=1000` constant |
+
+### 4.2 Latency budget (typical @ 100 Hz stream, 20 Hz viz)
+
+| Segment | Est. delay | Blocking? |
+|---------|------------|-----------|
+| IMU sample → VQF | 0.05–0.9 ms | Yes, in sample loop |
+| Frame → UDP send | <0.1 ms | Same loop |
+| UDP → plugin recv | 0–10 ms | OS scheduling |
+| Plugin → Python :5000 | <1 ms | localhost |
+| UDP thread → queue | <1 ms | Drains burst, keeps latest |
+| Queue → IK (throttle) | 0–50 ms | Waits for 20 Hz slot |
+| `_quats_to_rot_table` | ~1–5 ms | Logged as `avg convert` |
+| IK solver rebuild + assemble | **10–80+ ms** | **Primary bottleneck** |
+| `show(state)` | 5–30 ms | GPU/Simbody |
+| **End-to-end (packet → pixel)** | **~50–150 ms** | Dominated by viz throttle + IK |
+
+Render lag is explicitly logged: `render_lag_ms = now - packet_wall_time` (`1057`).
+
+### 4.3 Where blocking happens
+
+1. **Firmware:** I2C/SPI reads + VQF in GPIO-paced loop (must finish before next tick).
+2. **Plugin:** TCP/UDP read loop; per-packet Q15 decode + optional Madgwick (ESP32).
+3. **Python main thread:** `InverseKinematicsSolver` construction + `assemble` + `show` — **cannot overlap with viz** on same thread.
+4. **Python UDP thread:** Independent; only contends on `_frame_lock`.
+
+---
+
+## 5. Parameter Inventory
+
+### 5.1 Firmware / VQF
+
+| Parameter | Value | File:Line |
+|-----------|-------|-----------|
+| `DESIRED_SAMPLE_RATE_HZ` | 100 | `RedPitaya_justin.c:34` |
+| `g_stream_hw_hz` max | 2000 | `RedPitaya_justin.c:64` |
+| `CTR_CLK_RATE` | 125 MHz | `RedPitaya_justin.c:35` |
+| `GYRO_BIAS_CALIBRATION_SAMPLES` | 200 | `RedPitaya_justin.c:38` |
+| Gyro cal sleep | 10 ms/sample | `RedPitaya_justin.c:594` |
+| `UDP_PORT` (data) | 55001 | `RedPitaya_justin.c:54` |
+| `CHUNK_SAMPLES` | 1 | `RedPitaya_justin.c:55` |
+| `HEADER_SIZE` | 22 | `RedPitaya_justin.c:36` |
+| Loop slow warning | 900 µs | `RedPitaya_justin.c:996` |
+| Mag decimation | `hw_hz/100` | `RedPitaya_justin.c:472-473` |
+| Mag pre-scale | ×16 | `RedPitaya_justin.c:487-490` |
+| `FUSION_QUAT_Q15_SCALE` | 32767 | `sensor_fusion.h:29` |
+| Default acc scale | 9.80665/16384 m/s²/LSB | `sensor_fusion.c:156` |
+| Default gyro scale | (1/131)°/s → rad/s | `sensor_fusion.c:157` |
+| MPU9250 mag scale | 0.15/16 µT/LSB | `sensor_fusion.c:172` |
+| Mag sample rate cfg | 100 Hz | `sensor_fusion.c:159,173,181,189` |
+| `VQFParams` defaults | see §2.3 | `vqf.c:42-73` |
+| `VQF_SINGLE_PRECISION` | **off** | `vqf.h:18` |
+| `VQF_NO_MOTION_BIAS_ESTIMATION` | **off** | `vqf.h:19` |
+
+### 5.2 Plugin
+
+| Parameter | Value | File:Line |
+|-----------|-------|-----------|
+| Default `boardSampleRate` | 1000 (ctor), often 100 | `acqboard.ccp:255,385` |
+| `samplesPerBuffer` | max(1, round(rate/1000)) | `acqboard.ccp:1788-1790` |
+| Madgwick `beta` | 0.1 | `acqboard.ccp:1897` |
+| Q15 scale | 1/32767 | `acqboard.ccp:153,1941` |
+| OpenSim UDP port | 5000 | `acqboard.ccp:1766` |
+| UDP v2 version | 2.0 | `acqboard.ccp:1760` |
+| ESP32 OpenSim gate | `openSimEnabled && filterEnabled` | `acqboard.ccp:1876` |
+| Red Pitaya OpenSim gate | `openSimEnabled` only | `acqboard.ccp:2110` |
+| FREQ command range | 1–2000 Hz | `acqboard.ccp:837` |
+
+### 5.3 Python / OpenSim
+
+| Parameter | Value | File:Line |
+|-----------|-------|-----------|
+| `SAMPLE_RATE` | 1000.0 | `opensim_live_realtime.py:74` |
+| `LIVE_VISUALIZER_RATE` | 20 (env override) | `opensim_live_realtime.py:75` |
+| `CONSTRAINT` | 20.0 | `opensim_live_realtime.py:76` |
+| IK accuracy | 1e-4 | `opensim_live_realtime.py:957,1078` |
+| `NO_DATA_TIMEOUT_S` | 5.0 | `opensim_live_realtime.py:82` |
+| `STALE_PACKET_S` | 0.2 | `opensim_live_realtime.py:84` |
+| `SESSION_GAP_S` | 0.5 | `opensim_live_realtime.py:83` |
+| Static detection | gyro<0.5, change<0.02 | `opensim_live_realtime.py:86-88` |
+| Joint watcher poll | 50 ms | `opensim_live_realtime.py:355` |
+| Display joint reload | every 25 frames | `opensim_live_realtime.py:1094-1095` |
+| Angle feedback port | 5001 | `opensim_live_realtime.py:46` |
+| Main idle sleep | 5 ms | `opensim_live_realtime.py:1033,1047` |
+
+---
+
+## 6. Redundant / Duplicate Work
+
+| Duplication | Impact |
+|-------------|--------|
+| Firmware gyro_bias + VQF bias estimator | Possible over-correction; two calibrators |
+| `normalize_quaternion` after VQF get | Extra sqrt per sensor per sample |
+| imufusion AHRS on legacy path after RP VQF | Full second fusion (avoid when on v2) |
+| IK solver + OrientationsReference rebuild every frame | **Largest Python cost** |
+| Neutral merge copies 8 quats when partial sensor set | Extra Python list ops; needed for IK labels |
+| Red Pitaya sends OpenSim UDP even when FILTER OFF | Identity quats still forwarded (`2110`) |
+| `_load_display_joint(reload=True)` every 25 frames | Disk stat + JSON parse in hot path |
+
+---
+
+## 7. Optimization Matrix
+
+Ranked by **ROI** (impact ÷ effort). Impact: H/M/L. Effort: H/M/L. Risk: correctness / drift / platform.
+
+| # | Opportunity | Impact | Effort | Risk | Suggested approach |
+|---|-------------|--------|--------|------|-------------------|
+| 1 | **Stop rebuilding IK solver every frame** | H | M | M | Cache `InverseKinematicsSolver`; update orientations via `BufferedOrientationsReference` or `OrientationsReference` row API; verify OpenSim 4.5 Python bindings with spike. Comment at `1072-1075` documents the workaround. |
+| 2 | **Enable `VQF_NO_MOTION_BIAS_ESTIMATION` on embedded** | H | L | M | Cuts 3×3 matrix inverse per acc sample; keep rest bias only. Measure heading drift on hardware. |
+| 3 | **Enable `VQF_SINGLE_PRECISION`** | M | L | L | Halves VQF state/memory; filters stay double. Benchmark on RP ARM. |
+| 4 | **Remove wrapper re-normalize** | L | L | L | Trust VQF output or normalize once in `quat_float_to_q15`. |
+| 5 | **Skip duplicate gyro bias** | M | L | M | Choose firmware static bias **or** VQF bias est, not both; or seed VQF via `vqf_set_bias_estimate`. |
+| 6 | **Reduce OpenSim render rate adaptively** | M | L | L | Already throttled to 20 Hz; expose UI/env; skip `show` if coord delta < ε. |
+| 7 | **I2C mag batch / async read** | M | H | M | See `docs/i2c-optimization-plan.md`; mag already decimated but I2C still serial in read path. |
+| 8 | **Gate Red Pitaya OpenSim on `filterEnabled`** | L | L | L | Match ESP32 behavior (`1876`); avoid identity-quat spam when filter off. |
+| 9 | **Avoid imufusion on v2-only deployments** | M | L | L | Compile-time or env flag to disable legacy AHRS branch entirely. |
+| 10 | **Tune VQF time constants for live viz** | M | M | M | Lower `tauAcc` (snappier tilt), raise `tauMag` (less mag fighting) for lab environments. |
+| 11 | **Joint display: event-driven watcher** | L | L | L | Replace 50 ms poll with plugin-side UDP trigger or `watchdog` on write. |
+| 12 | **Multi-IMU VQF: disable threads for ≤2 IMUs** | L | L | L | Thread sem overhead may exceed work; profile at target sensor count. |
+| 13 | **Increase `CHUNK_SAMPLES` at high Hz** | L | L | M | Reduces UDP overhead at 1 kHz; adds latency = chunk_size/rate. |
+| 14 | **Cache `_load_display_joint`** | L | L | L | Reload on watcher signal only, not every 25 frames. |
+
+---
+
+## 8. Top Recommendations (ROI order)
+
+### #1 — Fix IK solver lifetime (Python)
+Reconstructing `InverseKinematicsSolver` + `OrientationsReference` on **every** 20 Hz frame dominates `[PERF]` logs. A one-time solver with mutable orientation input is the single largest win for live latency and CPU.
+
+### #2 — Slim VQF on firmware
+Define `VQF_NO_MOTION_BIAS_ESTIMATION` (and optionally `VQF_SINGLE_PRECISION`) for Red Pitaya builds. Motion bias Kalman update is the heaviest per-sample VQF block; firmware already calibrates static gyro bias.
+
+### #3 — Align fusion paths and rates
+- Ensure production uses **UDP v2 quaternions** end-to-end (skip imufusion).
+- Match `fusion_init` sample rate to actual `g_stream_hw_hz` at START (already on FREQ; verify at stream begin).
+- Consider lowering stream rate to 100–200 Hz for OpenSim (20 Hz viz) — saves VQF + network + plugin work with no visual loss.
+
+---
+
+## 9. Measurement Checklist (before/after)
+
+| Metric | Where to read |
+|--------|----------------|
+| VQF avg/max µs | RP console: `VQF filter time over last N calls` |
+| Sample loop us | RP console: `WARNING: loop took N us` |
+| IK frame ms | Python: `[PERF] avg frame=... avg convert=...` |
+| Render lag | Python: `[LIVE-RENDER] render_lag_ms=...` |
+| End-to-end | Compare packet timestamp vs `state.getTime()` on logged frames |
+
+---
+
+## 10. File Reference Map
+
+```
+vqf.h / vqf.c              — VQF algorithm + params
+sensor_fusion.h / .c       — Multi-IMU wrapper, Q15
+RedPitaya_justin.c         — Acquisition, VQF call site, UDP stream
+acqboard.ccp               — Plugin bridge, Madgwick, OpenSim UDP v2
+opensim_live_realtime.py   — IK loop, viz throttle, HUD
+docs/i2c-optimization-plan.md — Planned firmware I/O optimizations
+docs/opensim-udp-v2.md     — Packet format
+```
+
+---
+
+*Generated: 2026-06-10 — analysis only, no code changes.*
+
+---
+
+## 11. Implementation Addendum (branch `claude/epic-clarke-azac4g`)
+
+Code review against this map surfaced two correctness bugs not in the matrix
+above, both now fixed, plus implementations of several matrix items.
+
+### Additional bugs found & fixed
+
+| Bug | Detail | Fix |
+|-----|--------|-----|
+| **VQF Ts ignores decimation** | §2.4 notes "VQF still runs only on decimated reads", but VQF was initialized with `Ts = 1/g_stream_hw_hz`. A 10:1-decimated sensor integrated gyro rotation with a 10× too-small dt — 90°/s for 1 s fused to **9°** instead of 90°. | `FusionSensorConfig.imu_sample_rate_hz`; each sensor registers with its effective (decimated) rate. Regression test: `tests/vqf_decimation_ts_test.c`. |
+| **`CFG SRATE` leaves stale Ts** | Both `CFG <i> SRATE` handlers updated decimation but never re-registered the sensor with the fusion module. | Handlers now rebuild the sensor's fusion config via `fusion_config_for_sensor()`. |
+| Dead status-flag write | `FUSION_STATUS_MAGNETOMETER_USED` OR-ed in before `refresh_last_quaternion()` overwrites flags. | Removed the dead write. |
+
+### Matrix items implemented
+
+| # | Item | Status |
+|---|------|--------|
+| 4 | Remove wrapper re-normalize | done — `float_to_q15` already clamps; VQF output is unit-norm |
+| 14 | Cache `_load_display_joint` | done — mtime-gated reload instead of unconditional JSON parse every 25 frames |
+| — | Triplicated fusion block in firmware hot path | done — single `fusion_update_from_channels()` helper (3 copies removed) |
+| — | Legacy AHRS ran on all 8 slots incl. neutral filler | done — skips slots outside `slot_map` (~4–8× less imufusion work) |
+| — | Python hot-loop waste | done — precomputed neutral OpenSim-frame quats, cached `struct.Struct` parsers, tibia-mode locks applied only on transitions |
+
+### Matrix items deliberately not implemented here
+
+| # | Item | Reason |
+|---|------|--------|
+| 1 | IK solver lifetime | Needs OpenSim 4.5 API spike on the Windows host — the in-code comment documents that `BufferedOrientationsReference` did not update coordinates on this build. Do not change blind. |
+| 2, 3 | `VQF_NO_MOTION_BIAS_ESTIMATION` / `VQF_SINGLE_PRECISION` | Build-flag decisions for the RP build (no makefile in repo); enable with `-DVQF_NO_MOTION_BIAS_ESTIMATION` etc. and measure drift via the existing VQF µs report before adopting. |
+| 5 | Duplicate gyro bias | Firmware static cal + VQF residual estimator are complementary (VQF clips at `biasClip` 2°/s and tracks temperature drift); removing either changes drift behavior — needs on-hardware measurement. |
+| 7 | I2C mag batch/async | Covered by `docs/i2c-optimization-plan.md`; high effort. |
+| 8 | Gate RP OpenSim send on `filterEnabled` | Behavior change visible to the operator (model freezes vs. neutral pose when filter off) — confirm desired UX first. |
+| 10, 12, 13 | VQF tuning, thread cutoff, CHUNK_SAMPLES | All need on-hardware profiling. |
