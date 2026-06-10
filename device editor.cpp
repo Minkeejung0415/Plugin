@@ -135,14 +135,14 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     {
         nodeHostTitle = std::make_unique<Label> ("nodeHostTitle", "Node IP");
         nodeHostTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-        nodeHostTitle->setBounds (col1, 68, 110, 12);
+        nodeHostTitle->setBounds (col4, 108, 110, 12);
         addAndMakeVisible (nodeHostTitle.get());
 
         nodeHostLabel = std::make_unique<Label> ("nodeHostLabel", "");
         nodeHostLabel->setEditable (true);
         nodeHostLabel->setColour (Label::backgroundColourId, Colours::black);
         nodeHostLabel->setColour (Label::textColourId, Colours::white);
-        nodeHostLabel->setBounds (col1, 82, 118, 20);
+        nodeHostLabel->setBounds (col4, 122, 118, 20);
         nodeHostLabel->addListener (this);
         nodeHostLabel->setTooltip ("ESP32-S3 IP or hostname (or set ESP32_NODE_HOST env). Red Pitaya uses rp-*.local.");
         addAndMakeVisible (nodeHostLabel.get());
@@ -285,7 +285,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
         openSimLiveButton = std::make_unique<UtilityButton> ("OpenSim Live");
         openSimLiveButton->setRadius (3.0f);
-        openSimLiveButton->setBounds (col4, 122, comboW, 20);
+        openSimLiveButton->setBounds (col1, 82, 118, 20);
         openSimLiveButton->addListener (this);
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
