@@ -316,7 +316,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         liveAngleLabel->setJustificationType (Justification::centred);
         addAndMakeVisible (liveAngleLabel.get());
 
-        setSize (getWidth(), 185);
+        setSize (getWidth(), 220);
         applyDisplayButton = std::make_unique<UtilityButton> ("Apply Display");
         applyDisplayButton->setRadius (3.0f);
         applyDisplayButton->setBounds (col4, 116, comboW, 20);
