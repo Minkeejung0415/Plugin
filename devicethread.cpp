@@ -352,6 +352,9 @@ void DeviceThread::handleBroadcastMessage (const String& msg, const int64 messag
                         return;
 
                     acquisitionBoard->triggerDigitalOutput (ttlLine, eventDurationMs);
+
+                    if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (acquisitionBoard.get()))
+                        rp->writeJointDisplayConfig();
                 }
             }
         }

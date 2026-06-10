@@ -26,6 +26,7 @@
 #include "devices/AcquisitionBoard.h"
 #include "devices/redpitaya/AcqBoardRedPitaya.h"
 #include "devices/oni/AcqBoardONI.h"
+#include "opensim_joint_catalog.h"
 
 #include <cstdlib>
 
@@ -52,6 +53,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 {
     canvas = nullptr;
     noBoardsDetectedLabel = nullptr;
+    jointDisplayToggles.fill (nullptr);
 
     if (board == nullptr)
     {
@@ -287,6 +289,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
 
+<<<<<<< HEAD
         displayJointTitle = std::make_unique<Label> ("displayJointTitle", "Display Joint");
         displayJointTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
         displayJointTitle->setBounds (col3, 145, 110, 12);
@@ -314,6 +317,41 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (liveAngleLabel.get());
 
         setSize (getWidth(), 185);
+=======
+        applyDisplayButton = std::make_unique<UtilityButton> ("Apply Display");
+        applyDisplayButton->setRadius (3.0f);
+        applyDisplayButton->setBounds (col4, 116, comboW, 20);
+        applyDisplayButton->addListener (this);
+        applyDisplayButton->setTooltip ("Write current joint selection to OpenSim HUD config (no trigger required)");
+        addAndMakeVisible (applyDisplayButton.get());
+
+        jointDisplayTitle = std::make_unique<Label> ("jointDisplayTitle", "Joint HUD (max 6)");
+        jointDisplayTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        jointDisplayTitle->setBounds (col1, 145, 200, 12);
+        addAndMakeVisible (jointDisplayTitle.get());
+
+        const int toggleY = 160;
+        const int toggleW = 74;
+        const int toggleH = 18;
+
+        for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+        {
+            const int col = i % 4;
+            const int row = i / 4;
+            const int tx = col1 + col * (toggleW + 4);
+            const int ty = toggleY + row * (toggleH + 4);
+
+            jointDisplayToggles[(size_t) i] = std::make_unique<ToggleButton> (kOpenSimJointCatalog[i].abbrev);
+            jointDisplayToggles[(size_t) i]->setComponentID (String (i));
+            jointDisplayToggles[(size_t) i]->setBounds (tx, ty, toggleW, toggleH);
+            jointDisplayToggles[(size_t) i]->addListener (this);
+            addAndMakeVisible (jointDisplayToggles[(size_t) i].get());
+        }
+
+        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+            syncJointDisplayTogglesFromBoard();
+
+>>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
         redPitayaSensorUiBuilt = true;
     }
 
@@ -666,8 +704,54 @@ void DeviceEditor::refreshRedPitayaSensorCombosFromBoard()
     sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
     sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
 
+<<<<<<< HEAD
     if (sensorBodySegmentCombo != nullptr)
         sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (0) + 1, dontSendNotification);
+=======
+    refreshJointDisplayHighlights();
+}
+
+void DeviceEditor::syncJointDisplayTogglesFromBoard()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+    {
+        if (jointDisplayToggles[(size_t) i] == nullptr)
+            continue;
+
+        jointDisplayToggles[(size_t) i]->setToggleState (rp->isJointDisplaySelected (i), dontSendNotification);
+    }
+
+    refreshJointDisplayHighlights();
+}
+
+void DeviceEditor::refreshJointDisplayHighlights()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    StringArray activeSegments;
+
+    for (int i = 0; i < rp->getStreamSensorCount(); ++i)
+        activeSegments.add (rp->getStreamSensorName (i));
+
+    for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+    {
+        if (jointDisplayToggles[(size_t) i] == nullptr)
+            continue;
+
+        const bool nearActive = activeSegments.contains (kOpenSimJointCatalog[i].segment);
+        jointDisplayToggles[(size_t) i]->setColour (
+            ToggleButton::textColourId,
+            nearActive ? Colours::orange : findColour (ThemeColours::defaultText));
+    }
+>>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
 }
 
 void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
@@ -944,6 +1028,41 @@ void DeviceEditor::buttonClicked (Button* button)
             CoreServices::sendStatusMessage ("OpenSim Live started — selected joint angle shown on OpenSim viewer");
         }
     }
+    else if (button == applyDisplayButton.get())
+    {
+        if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+        {
+            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+            if (rp->writeJointDisplayConfig())
+                CoreServices::sendStatusMessage ("Joint display config applied to OpenSim work dir");
+            else
+                CoreServices::sendStatusMessage ("Joint display config write failed — check work dir path");
+        }
+    }
+    else
+    {
+        for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+        {
+            if (button != jointDisplayToggles[(size_t) i].get())
+                continue;
+
+            if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+                return;
+
+            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+            const bool wantOn = button->getToggleState();
+            rp->setJointDisplaySelected (i, wantOn);
+
+            if (wantOn && ! rp->isJointDisplaySelected (i))
+            {
+                button->setToggleState (false, dontSendNotification);
+                CoreServices::sendStatusMessage ("Joint HUD: maximum 6 joints on screen");
+            }
+
+            return;
+        }
+    }
     /*
     else if (button == auxButton.get() && ! acquisitionIsActive)
     {
@@ -1044,6 +1163,7 @@ void DeviceEditor::startAcquisition()
             openSimMotionButton->toFront (false);
         if (openSimLiveButton != nullptr)
             openSimLiveButton->toFront (false);
+<<<<<<< HEAD
         if (displayJointTitle != nullptr)
             displayJointTitle->toFront (false);
         if (displayJointCombo != nullptr)
@@ -1052,6 +1172,18 @@ void DeviceEditor::startAcquisition()
             liveAngleTitle->toFront (false);
         if (liveAngleLabel != nullptr)
             liveAngleLabel->toFront (false);
+=======
+        if (applyDisplayButton != nullptr)
+            applyDisplayButton->toFront (false);
+        if (jointDisplayTitle != nullptr)
+            jointDisplayTitle->toFront (false);
+
+        for (auto& toggle : jointDisplayToggles)
+        {
+            if (toggle != nullptr)
+                toggle->toFront (false);
+        }
+>>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
     }
 
     syncRedPitayaBoardSampleRateFromLabel();
@@ -1308,12 +1440,16 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
         xml->setAttribute ("NodeHost", nodeHostLabel->getText().trim());
 
     if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+<<<<<<< HEAD
     {
         for (int i = 0; i < 6; ++i)
             xml->setAttribute ("BodySegment" + String (i), rp->getSensorBodySegment (i));
 
         xml->setAttribute ("DisplayJoint", rp->getDisplayJointIndex());
     }
+=======
+        rp->saveJointDisplayToXml (*xml);
+>>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
 }
 
 void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
@@ -1406,7 +1542,21 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
         nodeHostLabel->setText (nodeHost, dontSendNotification);
 
         if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+        {
             rp->setNodeHost (nodeHost);
+            rp->loadJointDisplayFromXml (*xml);
+            syncJointDisplayTogglesFromBoard();
+        }
+    }
+    else if (auto* jointDisplay = xml->getChildByName ("JOINT_DISPLAY"))
+    {
+        if (previousSettings != nullptr)
+        {
+            if (auto* existing = previousSettings->getChildByName ("JOINT_DISPLAY"))
+                previousSettings->removeChildElement (existing, true);
+
+            previousSettings->addChildElement (new XmlElement (*jointDisplay));
+        }
     }
 
     // load channel naming scheme

@@ -25,7 +25,10 @@
 #define __DEVICEEDITOR_H_2AD3C591__
 
 #include "UI/MemoryMonitorUsage.h"
+#include "opensim_joint_catalog.h"
 #include <VisualizerEditorHeaders.h>
+
+#include <array>
 
 class HeadstageOptionsInterface;
 class SampleRateInterface;
@@ -107,6 +110,8 @@ public:
     void paint (Graphics& g) override;
 
     void refreshRedPitayaSensorCombosFromBoard();
+    void refreshJointDisplayHighlights();
+    void syncJointDisplayTogglesFromBoard();
     void repopulateSensorRateComboForHwHz (int hwHz);
     int getSelectedStreamSensorIndex() const;
 
@@ -187,6 +192,10 @@ private:
 
     std::unique_ptr<UtilityButton> openSimMotionButton;
     std::unique_ptr<UtilityButton> openSimLiveButton;
+    std::unique_ptr<UtilityButton> applyDisplayButton;
+
+    std::unique_ptr<Label> jointDisplayTitle;
+    std::array<std::unique_ptr<ToggleButton>, kOpenSimJointCatalogSize> jointDisplayToggles;
 
     std::unique_ptr<Label>    displayJointTitle;
     std::unique_ptr<ComboBox> displayJointCombo;

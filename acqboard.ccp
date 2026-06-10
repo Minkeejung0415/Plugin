@@ -1357,6 +1357,7 @@ void AcqBoardRedPitaya::setNumHeadstageChannels (int /*headstageIndex*/, int /*c
 {
 }
 
+<<<<<<< HEAD
 const char* AcqBoardRedPitaya::getBodySegmentName (int idx)
 {
     if (idx < 0 || idx >= NUM_BODY_SEGMENTS) idx = 0;
@@ -1500,6 +1501,151 @@ void AcqBoardRedPitaya::pollOpenSimAngleFeedback()
     }
 }
 
+=======
+String AcqBoardRedPitaya::getOpenSimWorkDir()
+{
+    return kOpenSimWorkDir;
+}
+
+const OpenSimJointCatalogEntry& AcqBoardRedPitaya::getJointCatalogEntry (int index) const
+{
+    jassert (index >= 0 && index < kOpenSimJointCatalogSize);
+    return kOpenSimJointCatalog[index];
+}
+
+bool AcqBoardRedPitaya::isJointDisplaySelected (int catalogIndex) const
+{
+    if (catalogIndex < 0 || catalogIndex >= kOpenSimJointCatalogSize)
+        return false;
+
+    return jointDisplaySelected[(size_t) catalogIndex];
+}
+
+void AcqBoardRedPitaya::setJointDisplaySelected (int catalogIndex, bool selected)
+{
+    if (catalogIndex < 0 || catalogIndex >= kOpenSimJointCatalogSize)
+        return;
+
+    if (selected)
+    {
+        int count = 0;
+
+        for (bool on : jointDisplaySelected)
+            if (on)
+                ++count;
+
+        if (! jointDisplaySelected[(size_t) catalogIndex] && count >= kMaxJointDisplaySelection)
+            return;
+    }
+
+    jointDisplaySelected[(size_t) catalogIndex] = selected;
+}
+
+StringArray AcqBoardRedPitaya::getSelectedDisplayJoints() const
+{
+    StringArray joints;
+
+    for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+    {
+        if (jointDisplaySelected[(size_t) i])
+            joints.add (kOpenSimJointCatalog[i].coordinate);
+    }
+
+    return joints;
+}
+
+void AcqBoardRedPitaya::loadJointDisplayFromXml (const XmlElement& parent)
+{
+    jointDisplaySelected.fill (false);
+
+    if (auto* jointDisplay = parent.getChildByName ("JOINT_DISPLAY"))
+    {
+        for (auto* joint : jointDisplay->getChildIterator())
+        {
+            if (! joint->hasTagName ("JOINT"))
+                continue;
+
+            const String coordinate = joint->getStringAttribute ("coordinate");
+            const bool selected = joint->getBoolAttribute ("selected", false);
+
+            for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+            {
+                if (coordinate == kOpenSimJointCatalog[i].coordinate)
+                {
+                    if (selected)
+                        setJointDisplaySelected (i, true);
+
+                    break;
+                }
+            }
+        }
+    }
+
+    jointDisplayConfigSeq = parent.getIntAttribute ("JointDisplaySeq", jointDisplayConfigSeq);
+}
+
+void AcqBoardRedPitaya::saveJointDisplayToXml (XmlElement& parent) const
+{
+    parent.setAttribute ("JointDisplaySeq", jointDisplayConfigSeq);
+
+    if (auto* existing = parent.getChildByName ("JOINT_DISPLAY"))
+        parent.removeChildElement (existing, true);
+
+    auto* jointDisplay = parent.createNewChildElement ("JOINT_DISPLAY");
+
+    for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
+    {
+        auto* joint = jointDisplay->createNewChildElement ("JOINT");
+        joint->setAttribute ("coordinate", kOpenSimJointCatalog[i].coordinate);
+        joint->setAttribute ("selected", jointDisplaySelected[(size_t) i]);
+    }
+}
+
+bool AcqBoardRedPitaya::writeJointDisplayConfig()
+{
+    const StringArray joints = getSelectedDisplayJoints();
+    const int seq = ++jointDisplayConfigSeq;
+
+    DynamicObject::Ptr root = new DynamicObject();
+    Array<var> jointVars;
+
+    for (const auto& name : joints)
+        jointVars.add (name);
+
+    root->setProperty ("joints", jointVars);
+    root->setProperty ("trigger_ts", Time::getMillisecondCounterHiRes() / 1000.0);
+    root->setProperty ("seq", seq);
+
+    const String json = JSON::toString (var (root.get()), true) + "\n";
+
+    const File workDir (kOpenSimWorkDir);
+    const File target = workDir.getChildFile ("opensim_joint_display_config.json");
+    const File temp = workDir.getChildFile ("opensim_joint_display_config.json.tmp");
+
+    if (! workDir.createDirectory())
+    {
+        std::cout << "Joint display config: could not create work dir " << workDir.getFullPathName() << std::endl;
+        return false;
+    }
+
+    if (! temp.replaceWithText (json))
+    {
+        std::cout << "Joint display config: failed to write temp file" << std::endl;
+        return false;
+    }
+
+    if (! temp.moveFileTo (target))
+    {
+        std::cout << "Joint display config: atomic rename failed" << std::endl;
+        return false;
+    }
+
+    std::cout << "Joint display config written seq=" << seq
+              << " joints=" << joints.joinIntoString (", ") << std::endl;
+    return true;
+}
+
+>>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
 void AcqBoardRedPitaya::launchOpenSimMotion()
 {
     writeOpenSimSensorMap();
@@ -1575,6 +1721,19 @@ void AcqBoardRedPitaya::launchOpenSimLive()
     }
 
     std::cout << "OpenSim Live: launched visible console (py -3.8 -u)." << std::endl;
+
+    const File repoRoot = File::getCurrentWorkingDirectory();
+    const File catalogSrc = repoRoot.getChildFile ("opensim_joint_catalog.py");
+    const File catalogDst = File (workDir).getChildFile ("opensim_joint_catalog.py");
+
+    if (catalogSrc.existsAsFile())
+        catalogSrc.copyFileTo (catalogDst);
+
+    const File liveSrc = repoRoot.getChildFile ("opensim_live_realtime.py");
+    const File liveDst = File (workDir).getChildFile ("opensim_live_realtime.py");
+
+    if (liveSrc.existsAsFile())
+        liveSrc.copyFileTo (liveDst);
 
     openSimSocket = std::make_unique<DatagramSocket>();
     openSimAngleSocket = std::make_unique<DatagramSocket>();
