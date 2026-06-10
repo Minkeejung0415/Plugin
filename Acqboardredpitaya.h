@@ -1,4 +1,4 @@
-/*
+﻿/*
     ------------------------------------------------------------------
 
     This file is part of the Open Ephys GUI
@@ -10,7 +10,7 @@
 #define __ACQBOARDREDPITAYA_H_2C4CBD67__
 
 #include "../AcquisitionBoard.h"
-#include "opensim_joint_catalog.h"
+#include "../../opensim_joint_catalog.h"
 
 #include <array>
 
@@ -286,10 +286,10 @@ public:
 
     /** Per-sensor range presets, updated when CFG commands are sent.
      *  Index matches streamSensorNames. Used by run() to scale raw counts. */
-    int sensorAccPreset[6] = {};   /* 0=±2g, 1=±4g, 2=±8g,  3=±16g       */
-    int sensorGyrPreset[6] = {};   /* 0=±250°/s, 1=±500, 2=±1000, 3=±2000 */
+    int sensorAccPreset[6] = {};   /* 0=Â±2g, 1=Â±4g, 2=Â±8g,  3=Â±16g       */
+    int sensorGyrPreset[6] = {};   /* 0=Â±250Â°/s, 1=Â±500, 2=Â±1000, 3=Â±2000 */
 
-    /** Per-sensor OpenSim body segment assignment — index into getBodySegmentName().
+    /** Per-sensor OpenSim body segment assignment â€” index into getBodySegmentName().
      *  Written to opensim_sensor_map.json when changed or just before launching the bridge. */
     int sensorBodySegment[6] = {};  /* default 0 = tibia_r_imu for every sensor */
 
@@ -326,7 +326,7 @@ public:
     /** Non-blocking read of angle feedback on UDP port 5001. */
     void pollOpenSimAngleFeedback();
 
-    /** UDP v2: quats is numSensors×4 floats (qw,qx,qy,qz per sensor, unit quaternion). */
+    /** UDP v2: quats is numSensorsÃ—4 floats (qw,qx,qy,qz per sensor, unit quaternion). */
     void sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors);
 
     std::unique_ptr<DatagramSocket> openSimSocket;

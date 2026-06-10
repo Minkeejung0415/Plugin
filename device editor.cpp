@@ -53,7 +53,8 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 {
     canvas = nullptr;
     noBoardsDetectedLabel = nullptr;
-    jointDisplayToggles.fill (nullptr);
+    for (auto& toggle : jointDisplayToggles)
+        toggle = nullptr;
 
     if (board == nullptr)
     {
