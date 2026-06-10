@@ -1,44 +1,46 @@
-# Features Research — OpenSim View Angle on Trigger
+# Features Research — Joint Angle Display on Trigger
 
 **Project:** Open Ephys Red Pitaya Plugin  
 **Researched:** 2026-06-10  
+**Revised:** 2026-06-10 (scope correction)  
 **Confidence:** HIGH
 
 ## Table Stakes (Must Have for This Milestone)
 
 | Feature | Complexity | Notes |
 |---------|------------|-------|
-| View preset selector in plugin UI | Low | ComboBox + XML persistence |
-| Apply view on trigger | Medium | Hook broadcast/TTL path |
-| Show active view label near sim clock | Medium | Simbody overlay or title hack |
+| Joint coordinate multi-select in plugin UI | Medium | Checkbox list + XML persistence |
+| Apply display filter on trigger | Medium | Hook broadcast/TTL path |
+| Show filtered joint angles near sim clock | Medium | Simbody overlay or title fallback |
 | No regression to live IK stream | Low | Sidecar must not block UDP thread |
 
 ## Differentiators (v1 Included)
 
 | Feature | Complexity | Notes |
 |---------|------------|-------|
-| Persisted preset across sessions | Low | Existing XML save pattern |
-| Standard anatomical preset library | Low | Fixed enum, not user-defined |
+| Persisted joint selection across sessions | Low | Existing XML save pattern |
+| Curated coordinate catalog (instrumented limbs) | Low | Fixed list from Rajagopal model |
 
 ## Deferred (v2)
 
 | Feature | Reason |
 |---------|--------|
-| Per-trigger preset mapping (different TTL lines → different views) | Adds UI complexity; v1 uses single selected preset |
-| Animated camera transitions | Not requested; instant switch sufficient |
-| View sync from OpenSim back to plugin | One-way control enough for operator workflow |
+| Per-trigger joint set mapping (different TTL lines → different joint lists) | Adds UI complexity; v1 uses single selected set |
+| Auto-select joints from active sensor count | Convenience; manual selection sufficient for v1 |
+| Full model coordinate picker | 80+ DOFs overwhelming; curated catalog first |
 
 ## Anti-Features
 
 | Anti-Feature | Why Avoid |
 |--------------|-----------|
-| Joint angle HUD replacing camera label | User asked for view angle beside clock, not coordinate dump |
+| Camera/view angle presets | User correction — not requested |
+| Showing all model coordinates | Explicitly the noise problem being solved |
 | Breaking UDP v2 format | Live pipeline depends on stable packet layout |
 
 ## Dependencies
 
 ```
-UI selector → settings XML → trigger handler → view config file → Python watcher → Simbody camera + label
+UI joint selector → settings XML → trigger handler → display config file → Python watcher → filtered HUD beside sim time
 ```
 
-Selector must be readable before trigger fires; Python watcher must run for full Live session.
+Selector must be readable before trigger fires; Python watcher must run for full Live session; IK loop already provides coordinate values.

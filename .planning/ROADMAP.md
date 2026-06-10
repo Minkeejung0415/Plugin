@@ -1,49 +1,51 @@
-# Roadmap: OpenSim View Angle on Trigger
+# Roadmap: Joint Angle Display on Trigger
 
 **Project:** Open Ephys Red Pitaya Plugin  
 **Created:** 2026-06-10  
+**Revised:** 2026-06-10 (scope correction)  
 **Phases:** 5  
-**Requirement coverage:** 12/12 v1 requirements mapped ✓
+**Requirement coverage:** 14/14 v1 requirements mapped ✓
 
 ## Overview
 
 | # | Phase | Goal | Requirements | Success Criteria |
 |---|-------|------|--------------|------------------|
-| 1 | View Config & Simbody Spike | Prove camera preset + sidecar pipeline | DISP-01, DISP-03 | 3 |
-| 2 | Plugin View Selector | Operator selects and persists preset | VIEW-01, VIEW-02, VIEW-03 | 3 |
-| 3 | Trigger Wiring | Trigger fires view command to OpenSim | TRIG-01, TRIG-02, TRIG-03, OPS-01 | 4 |
-| 4 | Display Label | Show angle name beside sim clock | DISP-02 | 3 |
+| 1 | Display Config Contract & Spike | Prove sidecar + filtered HUD beside sim clock | DISP-03 | 3 |
+| 2 | Plugin Joint Selector | Operator selects and persists joint list | JOIN-01, JOIN-02, JOIN-03, JOIN-04 | 4 |
+| 3 | Trigger Wiring | Trigger fires display config to OpenSim | TRIG-01, TRIG-02, TRIG-03, OPS-01 | 4 |
+| 4 | Filtered Display | Show only selected angles beside clock | DISP-01, DISP-02, DISP-05 | 3 |
 | 5 | Integration Verify | End-to-end validation, no regressions | DISP-04, OPS-02 | 3 |
 
 ---
 
 ## Phase Details
 
-### Phase 1: View Config & Simbody Spike
-**Goal:** Establish the plugin→Python view command contract and prove Simbody camera presets work on the target OpenSim 4.5 install.
+### Phase 1: Display Config Contract & Spike
+**Goal:** Establish the plugin→Python joint-display command contract and prove filtered angle readout can render beside the Simbody sim clock.
 
-**Requirements:** DISP-01, DISP-03
+**Requirements:** DISP-03
 
 **Success Criteria:**
-1. `opensim_view_config.json` schema documented with `view_id`, `label`, `trigger_ts`, `seq` fields
-2. Python watcher in `opensim_live_realtime.py` applies at least two distinct camera presets when config changes
-3. Preset switch completes within 200 ms of file update while live UDP stream continues
+1. `opensim_joint_display_config.json` schema documented with `joints` (coordinate name list), `trigger_ts`, `seq` fields
+2. Python watcher in `opensim_live_realtime.py` applies a 2-joint filter when config changes (e.g. only `knee_angle_r`, `hip_flexion_r`)
+3. Filtered values update within 200 ms of file update while live UDP stream continues
 
-**Key files:** `opensim_live_realtime.py`, new `opensim_view_presets.py` (optional module), `docs/opensim-view-config.md`
+**Key files:** `opensim_live_realtime.py`, new `opensim_joint_catalog.py` (optional module), `docs/opensim-joint-display-config.md`
 
-**Research flags:** Simbody Python camera API enumeration required in plan-phase
+**Research flags:** Simbody text overlay / status API beside `setShowSimTime` — enumerate in plan-phase
 
 ---
 
-### Phase 2: Plugin View Selector & Persistence
-**Goal:** Add operator-facing view preset selection in the device editor with save/load support.
+### Phase 2: Plugin Joint Selector & Persistence
+**Goal:** Add operator-facing joint coordinate multi-select in the device editor with save/load support.
 
-**Requirements:** VIEW-01, VIEW-02, VIEW-03
+**Requirements:** JOIN-01, JOIN-02, JOIN-03, JOIN-04
 
 **Success Criteria:**
-1. ComboBox labeled "View Angle" visible in Red Pitaya device editor alongside OpenSim controls
-2. All seven presets selectable and shown by human-readable label
-3. Selected preset restores correctly after saving and reloading plugin settings XML
+1. Multi-select UI (checkbox list or equivalent) labeled for joint angle display visible in Red Pitaya device editor
+2. Curated coordinate catalog covers instrumented-limb joints (hips, knees, ankles, pelvis minimum)
+3. Selected joints restore correctly after saving and reloading plugin settings XML
+4. Optional: joints near active `streamSensorNames` segments are visually grouped or pre-checked
 
 **Key files:** `device editor.cpp`, `device editor.h`
 
@@ -51,30 +53,31 @@
 
 ---
 
-### Phase 3: Trigger → View Command Wiring
-**Goal:** Connect acquisition triggers to view config writes so the selected angle applies when triggered.
+### Phase 3: Trigger → Display Config Wiring
+**Goal:** Connect acquisition triggers to display config writes so the selected joint filter applies when triggered.
 
 **Requirements:** TRIG-01, TRIG-02, TRIG-03, OPS-01
 
 **Success Criteria:**
-1. Handling `ACQBOARD TRIGGER` writes config with current preset to OpenSim work directory
+1. Handling `ACQBOARD TRIGGER` writes config with current joint selection to OpenSim work directory (`kOpenSimWorkDir`)
 2. Atomic write pattern prevents partial reads; sequence increments on each event
 3. IMU UDP packet timing unchanged (no measurable sample rate impact)
-4. "Apply View" utility button writes config without requiring external trigger (debug/preview)
+4. "Apply Display" utility button writes config without requiring external trigger (debug/preview)
 
 **Key files:** `devicethread.cpp`, `acqboard.ccp`, `devices/redpitaya/AcqBoardRedPitaya.h`
 
 ---
 
-### Phase 4: Display Label Beside Sim Clock
-**Goal:** Show the active view preset name adjacent to the Simbody simulation timer on the OpenSim Live window.
+### Phase 4: Filtered Display Beside Sim Clock
+**Goal:** Render only selected joint angle values adjacent to the Simbody simulation timer on the OpenSim Live window.
 
-**Requirements:** DISP-02
+**Requirements:** DISP-01, DISP-02, DISP-05
 
 **Success Criteria:**
-1. When a preset is active, its label (e.g. "Lateral Right") is visible in the Simbody visualizer window beside the sim time display
-2. Label updates immediately when preset changes via trigger or manual apply
-3. If native Simbody text overlay is unavailable, fallback (window title or documented alternative) is implemented and noted in docs
+1. Only configured coordinates appear in the on-screen readout; unselected joints are hidden
+2. Values update live from IK state (`coord_set.get(name).getValue(state)`) in degrees beside sim time
+3. Empty selection shows no coordinate dump (clean default)
+4. If native Simbody text overlay is unavailable, fallback (window title augmentation or documented alternative) is implemented
 
 **Key files:** `opensim_live_realtime.py`
 
@@ -88,19 +91,19 @@
 **Requirements:** DISP-04, OPS-02
 
 **Success Criteria:**
-1. Manual test: select preset → start OpenSim Live → Play acquisition → fire trigger → view and label change correctly
-2. Live IK skeleton continues updating through view switches (no freeze > 1 s)
-3. Operator documentation covers preset list, trigger workflow, config path, and troubleshooting
+1. Manual test: select joints → start OpenSim Live → Play acquisition → fire trigger → only selected angles appear beside clock
+2. Live IK skeleton continues updating through display filter changes (no freeze > 1 s)
+3. Operator documentation covers joint catalog, trigger workflow, config path, sensor→segment context, and troubleshooting
 
-**Key files:** `docs/opensim-view-config.md`, `docs/opensim-udp-v2.md` (cross-reference)
+**Key files:** `docs/opensim-joint-display-config.md`, `docs/opensim-udp-v2.md` (cross-reference)
 
 ---
 
 ## Phase Ordering Rationale
 
-1. **Spike first** — Simbody camera API uncertainty is the highest technical risk  
-2. **UI before trigger** — operator must select preset before trigger can mean anything  
-3. **Trigger before label polish** — core value is view-on-trigger; label completes UX  
+1. **Spike first** — Simbody on-screen text beside sim time is the highest display risk  
+2. **UI before trigger** — operator must select joints before trigger can apply a filter  
+3. **Trigger before display polish** — core value is filter-on-trigger; display rendering completes UX  
 4. **Verify last** — integration tests need all components wired  
 
 ## Dependencies
@@ -111,5 +114,10 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
               └───────────┴── both depend on Phase 1 config contract
 ```
 
+## Superseded Planning
+
+Prior roadmap phases for camera/view presets (Simbody camera API, `opensim_view_config.json`, anatomical view labels) are **void**. Do not implement.
+
 ---
-*Roadmap created: 2026-06-10*
+*Roadmap created: 2026-06-10*  
+*Revised: 2026-06-10 — joint angle display control*
