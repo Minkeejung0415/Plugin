@@ -66,6 +66,12 @@ typedef struct {
     float mag_units_per_lsb;
     /* Magnetometer sample rate used to configure VQF. */
     float mag_sample_rate_hz;
+    /*
+     * Effective accel/gyro update rate for this sensor in Hz. Set this when
+     * the sensor is decimated below the module sample rate so VQF integrates
+     * with the true per-sensor time step. 0 = use the module sample rate.
+     */
+    float imu_sample_rate_hz;
 } FusionSensorConfig;
 
 /*

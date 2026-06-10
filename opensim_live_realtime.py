@@ -134,7 +134,7 @@ def _slot_map_for_sensor_count(n_sensors):
 
 
 def _neutral_quats_opensim_frame():
-    return [_quat_mul(_Q_OPENSIM_FRAME, q) for q in _NEUTRAL_QUATS_8IMU]
+    return list(_NEUTRAL_QUATS_OPENSIM)
 
 
 def _merge_live_quats_with_neutral(live_quats, live_sensor_names):
@@ -183,6 +183,20 @@ def _quat_mul(q1, q2):
 
 
 _Q_OPENSIM_FRAME = _qx(-math.pi / 2.0)
+_NEUTRAL_QUATS_OPENSIM = [_quat_mul(_Q_OPENSIM_FRAME, q) for q in _NEUTRAL_QUATS_8IMU]
+
+_STRUCT_1F = struct.Struct("<f")
+_STRUCT_3F = struct.Struct("<3f")
+_STRUCT_4F = struct.Struct("<4f")
+_floats_struct_cache = {}
+
+
+def _floats_struct(n):
+    s = _floats_struct_cache.get(n)
+    if s is None:
+        s = struct.Struct(f"<{n}f")
+        _floats_struct_cache[n] = s
+    return s
 
 
 
@@ -256,8 +270,7 @@ def _send_angle_feedback(t_stream, joint_index, angle_deg):
             print(f"[WARN] Angle feedback socket unavailable: {exc}")
             return
 
-    pkt = struct.pack(
-        "<4f",
+    pkt = _STRUCT_4F.pack(
         float(t_stream),
         UDP_PACKET_VERSION_ANGLES,
         float(joint_index),
@@ -499,7 +512,7 @@ def _parse_quat_v2_packet(data):
     n_floats = len(data) // 4
     if n_floats < 3:
         return None
-    t0, ver, n_s = struct.unpack("<3f", data[:12])
+    t0, ver, n_s = _STRUCT_3F.unpack(data[:12])
     if not (1.99 < ver < 2.01):
         return None
     n_sensors = int(round(n_s))
@@ -508,7 +521,7 @@ def _parse_quat_v2_packet(data):
     expected = 3 + n_sensors * 4
     if n_floats != expected:
         return None
-    quats = struct.unpack(f"<{n_sensors * 4}f", data[12:12 + n_sensors * 16])
+    quats = _floats_struct(n_sensors * 4).unpack(data[12:12 + n_sensors * 16])
     return t0, n_sensors, quats
 
 def _slot_map_for_packet_imus(n_imus):
@@ -695,7 +708,7 @@ def _udp_ahrs_thread():
         #     e.g. 192 bytes → 48 floats → 8 IMUs, IMU0.ax starts at byte 0
         # These two conditions can never both be true (consecutive integers).
         if n_floats_total >= 2 and (n_floats_total - 1) % 6 == 0:
-            packet_timestamp = struct.unpack("<f", data[:4])[0]
+            packet_timestamp = _STRUCT_1F.unpack(data[:4])[0]
             imu_start = 4
             n_imus = (n_floats_total - 1) // 6
         elif n_floats_total >= 6 and n_floats_total % 6 == 0:
@@ -750,9 +763,8 @@ def _udp_ahrs_thread():
             dt = max(1.0 / SAMPLE_RATE, packet_timestamp - last_packet_timestamp)
             last_packet_timestamp = packet_timestamp
 
-        raw_values = struct.unpack(
-            f"<{packet_imus * 6}f",
-            data[imu_start:imu_start + packet_imus * 6 * 4],
+        raw_values = _floats_struct(packet_imus * 6).unpack(
+            data[imu_start:imu_start + packet_imus * 6 * 4]
         )
         values = _expand_imu_packet_to_8_slots(raw_values, slot_map)
 
@@ -807,6 +819,9 @@ def _udp_ahrs_thread():
         active_sensors = []
 
         for i in range(N_SENSORS):
+            if i not in slot_map:
+                continue  # no real sensor in this slot — skip AHRS work and never feed filler to IK
+
             base = i * 6
             ax, ay, az = values[base], values[base + 1], values[base + 2]
             gx, gy, gz = values[base + 3], values[base + 4], values[base + 5]
@@ -817,9 +832,6 @@ def _udp_ahrs_thread():
                 np.array([ax, ay, az], dtype=np.float64),
                 dt,
             )
-
-            if i not in slot_map:
-                continue  # skip slots with no real sensor — do not feed neutral filler to IK
 
             accel_norm = math.sqrt(ax*ax + ay*ay + az*az)
             if accel_norm < 0.3 or accel_norm > 3.0:
@@ -943,7 +955,7 @@ def run_live():
         print(f"[VIZ] Could not force geometry on (use Show menu): {exc}")
 
     neutral_sto = os.path.join(WORK_DIR, "_neutral_frame.sto")
-    _write_quat_sto(neutral_sto, 0.0, [_quat_mul(_Q_OPENSIM_FRAME, q) for q in _NEUTRAL_QUATS_8IMU])
+    _write_quat_sto(neutral_sto, 0.0, _NEUTRAL_QUATS_OPENSIM)
     neutral_qt = osim.TimeSeriesTableQuaternion(neutral_sto)
     neutral_rt = osim.OpenSenseUtilities.convertQuaternionsToRotations(neutral_qt)
 
@@ -995,6 +1007,7 @@ def run_live():
 
     last_t = -1.0
     last_session_id = None
+    last_tibia_mode = None
     last_frame_wall_time = None
     last_age_print = 0.0
     skipped_by_throttle = 0
@@ -1034,13 +1047,15 @@ def run_live():
                 continue
 
             last_frame_wall_time = packet_wall_time
+            tibia_only = _is_tibia_only_mode(active_sensors)
             if session_id != last_session_id:
                 print(f"[SESSION] renderer reset id={session_id}")
                 last_session_id = session_id
                 last_t = -1.0
                 t_last_solve = 0.0
                 last_coord_values = None
-                mode = "tibia-only knee lock" if _is_tibia_only_mode(active_sensors) else "full active-sensor IK"
+                last_tibia_mode = None
+                mode = "tibia-only knee lock" if tibia_only else "full active-sensor IK"
                 print(f"[IK-MODE] {mode}")
 
             if t_imu <= last_t:
@@ -1060,7 +1075,7 @@ def run_live():
                 skipped_by_throttle = 0
 
             t_convert0 = time.perf_counter()
-            if _is_tibia_only_mode(active_sensors):
+            if tibia_only:
                 ik_quats = quats
                 ik_sensors = active_sensors
             else:
@@ -1077,7 +1092,10 @@ def run_live():
             ikSolver = osim.InverseKinematicsSolver(model, mRefs, oRefs, coordRefs, CONSTRAINT)
             ikSolver.setAccuracy(1e-4)
             state.setTime(0.0)
-            _apply_tibia_only_locks(coord_set, state, _is_tibia_only_mode(active_sensors), default_coord_locks)
+            if tibia_only != last_tibia_mode:
+                # Lock flags persist in the state, so SWIG calls are only needed on a mode change.
+                _apply_tibia_only_locks(coord_set, state, tibia_only, default_coord_locks)
+                last_tibia_mode = tibia_only
             if live_frame <= 5 or live_frame % 1000 == 0:
                 q_dbg = quats[0] if quats else []
                 print(f"[IK] calling assemble frame={live_frame} t={t_imu:.3f}s sensors={active_sensors} q0={[round(v,3) for v in q_dbg]}")

@@ -130,7 +130,12 @@ static bool is_valid_sensor_index(int sensor_index)
 
 static void initialize_sensor_filter(FusionSensorState *sensor)
 {
-    const float gyr_ts = 1.0f / g_fusion.sample_rate_hz;
+    float imu_rate_hz = sensor->config.imu_sample_rate_hz;
+    if (imu_rate_hz <= 0.0f) {
+        imu_rate_hz = g_fusion.sample_rate_hz;
+    }
+
+    const float gyr_ts = 1.0f / imu_rate_hz;
     const float acc_ts = gyr_ts;
     float mag_rate_hz = sensor->config.mag_sample_rate_hz;
 
@@ -157,6 +162,7 @@ static void get_sensor_default_config(
     config.gyro_rads_per_lsb = deg_to_rad(1.0f / 131.0f);
     config.mag_units_per_lsb = 0.15f;
     config.mag_sample_rate_hz = 100.0f;
+    config.imu_sample_rate_hz = 0.0f;
 
     switch (sensor_type) {
     case FUSION_SENSOR_TYPE_MPU6050:
@@ -380,7 +386,6 @@ int fusion_update_sensor(
         vqf_real_t mag[3];
         convert_vector_to_physical(raw_mag, sensor->config.mag_units_per_lsb, mag);
         vqf_update_mag(&sensor->vqf, mag);
-        sensor->last_status_flags |= FUSION_STATUS_MAGNETOMETER_USED;
     }
 
     refresh_last_quaternion(sensor);

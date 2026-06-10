@@ -692,6 +692,52 @@ static void update_fusion_state(bool *with_fusion) {
     *with_fusion = fusion_is_enabled();
 }
 
+/* Decimation interval for a sensor at the given hardware tick rate.
+   Must stay in sync with init_sensor_decimation(), which uses it. */
+static int sensor_decim_interval_for_hz(const SensorInstance *s, int hw_hz)
+{
+    int t = s->cfg_target_hz;
+    if (t < 1) t = 1;
+    if (t > hw_hz) t = hw_hz;
+    int inv = (t >= hw_hz) ? 1 : (hw_hz + t - 1) / t;
+    return inv < 1 ? 1 : inv;
+}
+
+/* Runs fusion for one sensor from its freshly read raw channels and writes
+   the Q15 quaternion after the raw channels. Returns elapsed time in ns. */
+static long long fusion_update_from_channels(SensorInstance *s, int sensor_index, int16_t *channel_out)
+{
+    int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
+    int16_t raw_gyr[3];
+    const int16_t *raw_mag = NULL;
+    bool mag_is_fresh = false;
+
+    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
+
+    if (strcmp(s->name, "BNO055") == 0) {
+        raw_mag = &channel_out[3];
+        mag_is_fresh = true;
+    } else if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
+        raw_mag = &channel_out[6];
+        mag_is_fresh = s->mag_is_fresh;
+    } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
+        raw_mag = &channel_out[6];
+        mag_is_fresh = s->mag_is_fresh;
+    }
+
+    raw_gyr[0] -= s->gyro_bias[0];
+    raw_gyr[1] -= s->gyro_bias[1];
+    raw_gyr[2] -= s->gyro_bias[2];
+
+    struct timespec vqf_start;
+    struct timespec vqf_end;
+    clock_gettime(CLOCK_MONOTONIC, &vqf_start);
+    fusion_update_sensor(sensor_index, raw_acc, raw_gyr, raw_mag, mag_is_fresh,
+                         channel_out + s->num_channels);
+    clock_gettime(CLOCK_MONOTONIC, &vqf_end);
+    return timespec_diff_ns(&vqf_start, &vqf_end);
+}
+
 static void acquire_sensor_samples(
     HardwareContext *ctx,
     bool with_fusion,
@@ -711,37 +757,7 @@ static void acquire_sensor_samples(
         read_sensor_raw_channels(s, channel_out);
 
         if (with_fusion) {
-            int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-            int16_t raw_gyr[3];
-            const int16_t *raw_mag = NULL;
-            bool mag_is_fresh = false;
-
-            if (strcmp(s->name, "BNO055") == 0) {
-                get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                raw_mag = &channel_out[3];
-                mag_is_fresh = true;
-            } else {
-                get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = s->mag_is_fresh;
-                } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-                    raw_mag = &channel_out[6];
-                    mag_is_fresh = s->mag_is_fresh;
-                }
-            }
-
-            raw_gyr[0] -= s->gyro_bias[0];
-            raw_gyr[1] -= s->gyro_bias[1];
-            raw_gyr[2] -= s->gyro_bias[2];
-
-            struct timespec vqf_start;
-            struct timespec vqf_end;
-            clock_gettime(CLOCK_MONOTONIC, &vqf_start);
-            fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh, channel_out + s->num_channels);
-            clock_gettime(CLOCK_MONOTONIC, &vqf_end);
-
-            long long vqf_elapsed_ns = timespec_diff_ns(&vqf_start, &vqf_end);
+            long long vqf_elapsed_ns = fusion_update_from_channels(s, i, channel_out);
             *vqf_total_ns += vqf_elapsed_ns;
             (*vqf_call_count)++;
             if (vqf_elapsed_ns > *vqf_max_ns) {
@@ -769,13 +785,7 @@ static void init_sensor_decimation(HardwareContext *ctx, int hw_hz)
         memset(g_sensor_hold[i], 0, sizeof(g_sensor_hold[i]));
     }
     for (int i = 0; i < ctx->active_sensor_count && i < HOLD_SLOTS; i++) {
-        SensorInstance *s = &ctx->sensors[i];
-        int t = s->cfg_target_hz;
-        if (t < 1) t = 1;
-        if (t > hw_hz) t = hw_hz;
-        int inv = (t >= hw_hz) ? 1 : (hw_hz + t - 1) / t;
-        if (inv < 1) inv = 1;
-        g_decim_interval[i] = inv;
+        g_decim_interval[i] = sensor_decim_interval_for_hz(&ctx->sensors[i], hw_hz);
         g_decim_counter[i] = g_decim_interval[i];
     }
 }
@@ -858,37 +868,7 @@ static void *sensor_worker(void *arg)
             read_sensor_raw_channels(s, channel_out);
 
             if (a->with_fusion) {
-                int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-                int16_t raw_gyr[3];
-                const int16_t *raw_mag = NULL;
-                bool mag_is_fresh = false;
-
-                if (strcmp(s->name, "BNO055") == 0) {
-                    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                    raw_mag = &channel_out[3];
-                    mag_is_fresh = true;
-                } else {
-                    get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-                    if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                        raw_mag = &channel_out[6];
-                        mag_is_fresh = s->mag_is_fresh;
-                    } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-                        raw_mag = &channel_out[6];
-                        mag_is_fresh = s->mag_is_fresh;
-                    }
-                }
-
-                raw_gyr[0] -= s->gyro_bias[0];
-                raw_gyr[1] -= s->gyro_bias[1];
-                raw_gyr[2] -= s->gyro_bias[2];
-
-                struct timespec vqf_start, vqf_end;
-                clock_gettime(CLOCK_MONOTONIC, &vqf_start);
-                fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh,
-                                     channel_out + s->num_channels);
-                clock_gettime(CLOCK_MONOTONIC, &vqf_end);
-
-                long long elapsed = timespec_diff_ns(&vqf_start, &vqf_end);
+                long long elapsed = fusion_update_from_channels(s, i, channel_out);
                 a->vqf_total_ns += elapsed;
                 a->vqf_call_count++;
                 if (elapsed > a->vqf_max_ns) a->vqf_max_ns = elapsed;
@@ -903,23 +883,10 @@ static void *sensor_worker(void *arg)
     } else {
         read_sensor_raw_channels(s, channel_out);
         if (a->with_fusion) {
-            int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
-            int16_t raw_gyr[3];
-            const int16_t *raw_mag = NULL;
-            bool mag_is_fresh = false;
-            get_sensor_gyro_from_channels(s, channel_out, raw_gyr);
-            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                raw_mag = &channel_out[6];
-                mag_is_fresh = s->mag_is_fresh;
-            } else if (strcmp(s->name, "ICM20948") == 0 && s->is_spi) {
-                raw_mag = &channel_out[6];
-                mag_is_fresh = s->mag_is_fresh;
-            }
-            raw_gyr[0] -= s->gyro_bias[0];
-            raw_gyr[1] -= s->gyro_bias[1];
-            raw_gyr[2] -= s->gyro_bias[2];
-            fusion_update_sensor(i, raw_acc, raw_gyr, raw_mag, mag_is_fresh,
-                                 channel_out + s->num_channels);
+            long long elapsed = fusion_update_from_channels(s, i, channel_out);
+            a->vqf_total_ns += elapsed;
+            a->vqf_call_count++;
+            if (elapsed > a->vqf_max_ns) a->vqf_max_ns = elapsed;
         }
     }
 
@@ -1182,23 +1149,31 @@ static void apply_sensor_cfg_gyr(SensorInstance *s, int preset)
     }
 }
 
+static void fusion_config_for_sensor(const SensorInstance *s, int hw_hz, FusionSensorConfig *cfg)
+{
+    FusionSensorType ftype;
+    if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
+    else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
+    else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
+    else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
+    else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
+    bool has_mag = (strcmp(s->name, "MPU9250")  == 0 && !s->is_spi) ||
+                   (strcmp(s->name, "ICM20948") == 0) ||
+                   (strcmp(s->name, "BNO055")   == 0);
+    fusion_get_default_sensor_config(ftype, has_mag, cfg);
+    /* Decimated sensors only reach VQF every Nth hardware tick, so VQF must
+       integrate with the per-sensor effective rate, not the tick rate. */
+    cfg->imu_sample_rate_hz = (float)hw_hz / (float)sensor_decim_interval_for_hz(s, hw_hz);
+}
+
 static void reinit_fusion_for_hz(HardwareContext *ctx, float hz)
 {
+    int hw_hz = clamp_stream_hw_hz((int)hz);
     fusion_shutdown();
-    fusion_init(ctx->active_sensor_count, hz);
+    fusion_init(ctx->active_sensor_count, (float)hw_hz);
     for (int i = 0; i < ctx->active_sensor_count; i++) {
-        SensorInstance *s = &ctx->sensors[i];
-        FusionSensorType ftype;
-        if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
-        else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
-        else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
-        else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
-        else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
-        bool has_mag = (strcmp(s->name, "MPU9250")  == 0 && !s->is_spi) ||
-                       (strcmp(s->name, "ICM20948") == 0) ||
-                       (strcmp(s->name, "BNO055")   == 0);
         FusionSensorConfig cfg;
-        fusion_get_default_sensor_config(ftype, has_mag, &cfg);
+        fusion_config_for_sensor(&ctx->sensors[i], hw_hz, &cfg);
         fusion_register_sensor_ex(i, &cfg);
     }
 }
@@ -1291,6 +1266,9 @@ static int process_stream_commands(
                     printf("CFG sensor %d SRATE target %d Hz (ODR + decimation updated)\n",
                            si, ctx->sensors[si].cfg_target_hz);
                     init_sensor_decimation(ctx, g_stream_hw_hz);
+                    FusionSensorConfig cfg;
+                    fusion_config_for_sensor(&ctx->sensors[si], current_stream_hw_hz(), &cfg);
+                    fusion_register_sensor_ex(si, &cfg);
                 }
             }
         }
@@ -1834,31 +1812,7 @@ int main(void) {
     int base_channels = ctx.total_channels;
     bool start_with_fusion = false;
 
-    fusion_init(ctx.active_sensor_count, (float)DESIRED_SAMPLE_RATE_HZ);
-    for (int i = 0; i < ctx.active_sensor_count; i++) {
-        SensorInstance *s = &ctx.sensors[i];
-        FusionSensorType ftype;
-        if      (strcmp(s->name, "MPU6050")  == 0) ftype = FUSION_SENSOR_TYPE_MPU6050;
-        else if (strcmp(s->name, "MPU9250")  == 0) ftype = FUSION_SENSOR_TYPE_MPU9250;
-        else if (strcmp(s->name, "ICM20948") == 0) ftype = FUSION_SENSOR_TYPE_ICM20948;
-        else if (strcmp(s->name, "BNO055")   == 0) ftype = FUSION_SENSOR_TYPE_BNO055;
-        else                                        ftype = FUSION_SENSOR_TYPE_GENERIC;
-        FusionSensorConfig cfg;
-        {
-            bool has_mag = false;
-
-            if (strcmp(s->name, "MPU9250") == 0 && !s->is_spi) {
-                has_mag = true;
-            } else if (strcmp(s->name, "ICM20948") == 0) {
-                has_mag = true;
-            } else if (strcmp(s->name, "BNO055") == 0) {
-                has_mag = true;
-            }
-
-            fusion_get_default_sensor_config(ftype, has_mag, &cfg);
-        }
-        fusion_register_sensor_ex(i, &cfg);
-    }
+    reinit_fusion_for_hz(&ctx, (float)DESIRED_SAMPLE_RATE_HZ);
 
     calibrate_gyro_biases(&ctx);
     init_analog_waveform_inputs();
@@ -1960,6 +1914,9 @@ int main(void) {
                         if (ctx.sensors[si].cfg_target_hz > g_stream_hw_hz)
                             ctx.sensors[si].cfg_target_hz = g_stream_hw_hz;
                         apply_sensor_odr(&ctx.sensors[si], ctx.sensors[si].cfg_target_hz);
+                        FusionSensorConfig cfg;
+                        fusion_config_for_sensor(&ctx.sensors[si], current_stream_hw_hz(), &cfg);
+                        fusion_register_sensor_ex(si, &cfg);
                         printf("CFG sensor %d SRATE %d Hz (ODR applied)\n", si, val);
                     }
                 }
