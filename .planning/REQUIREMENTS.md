@@ -59,20 +59,20 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| JOIN-01 | Phase 2 | Pending |
-| JOIN-02 | Phase 2 | Pending |
-| JOIN-03 | Phase 2 | Pending |
-| JOIN-04 | Phase 2 | Pending |
-| TRIG-01 | Phase 3 | Pending |
-| TRIG-02 | Phase 3 | Pending |
-| TRIG-03 | Phase 3 | Pending |
-| DISP-01 | Phase 4 | Pending |
-| DISP-02 | Phase 4 | Pending |
-| DISP-03 | Phase 1 | Pending |
-| DISP-04 | Phase 5 | Pending |
-| DISP-05 | Phase 4 | Pending |
-| OPS-01 | Phase 3 | Pending |
-| OPS-02 | Phase 5 | Pending |
+| JOIN-01 | Phase 2 | Complete |
+| JOIN-02 | Phase 2 | Complete |
+| JOIN-03 | Phase 2 | Complete |
+| JOIN-04 | Phase 2 | Complete |
+| TRIG-01 | Phase 3 | Complete |
+| TRIG-02 | Phase 3 | Complete |
+| TRIG-03 | Phase 3 | Complete |
+| DISP-01 | Phase 4 | Complete |
+| DISP-02 | Phase 4 | Complete |
+| DISP-03 | Phase 1 | Complete |
+| DISP-04 | Phase 5 | Pending UAT |
+| DISP-05 | Phase 4 | Complete |
+| OPS-01 | Phase 3 | Complete |
+| OPS-02 | Phase 5 | Complete |
 
 **Coverage:**
 - v1 requirements: 14 total

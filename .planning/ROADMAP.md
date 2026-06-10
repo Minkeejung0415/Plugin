@@ -8,13 +8,13 @@
 
 ## Overview
 
-| # | Phase | Goal | Requirements | Success Criteria |
-|---|-------|------|--------------|------------------|
-| 1 | Display Config Contract & Spike | 3/3 | Complete   | 2026-06-10 |
-| 2 | Plugin Joint Selector | Operator selects and persists joint list | JOIN-01, JOIN-02, JOIN-03, JOIN-04 | 4 |
-| 3 | Trigger Wiring | Trigger fires display config to OpenSim | TRIG-01, TRIG-02, TRIG-03, OPS-01 | 4 |
-| 4 | Filtered Display | Show only selected angles beside clock | DISP-01, DISP-02, DISP-05 | 3 |
-| 5 | Integration Verify | End-to-end validation, no regressions | DISP-04, OPS-02 | 3 |
+| # | Phase | Goal | Requirements | Status |
+|---|-------|------|--------------|--------|
+| 1 | Display Config Contract & Spike | Schema, catalog, watcher, HUD spike | DISP-03 | Complete 2026-06-10 |
+| 2 | Plugin Joint Selector | Multi-select + XML persistence | JOIN-01–04 | Complete 2026-06-10 |
+| 3 | Trigger Wiring | Trigger + Apply Display → config | TRIG-01–03, OPS-01 | Complete 2026-06-10 |
+| 4 | Filtered Display | HUD polish beside sim clock | DISP-01,02,05 | Complete 2026-06-10 |
+| 5 | Integration Verify | Docs + E2E checklist | DISP-04, OPS-02 | Complete 2026-06-10 |
 
 ---
 

@@ -107,3 +107,5 @@ Manual verification with OpenSim 4.5 Python 3.8 and a live or test UDP stream:
 Optional automated pre-check: set `OPENSIM_JOINT_DISPLAY_TEST=1` before launch to write seq 1 and 2 configs; watcher should log within 200 ms after `run_live()` starts the watcher thread.
 
 **Operator sign-off required** for steps 3–6 on hardware with Simbody window open.
+
+**See also:** [opensim-joint-display-operator.md](opensim-joint-display-operator.md) — end-to-end workflow and troubleshooting.

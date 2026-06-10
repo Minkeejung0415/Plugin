@@ -17,18 +17,19 @@ When an experiment trigger fires during live acquisition, the operator sees **on
 - ✓ Red Pitaya IMU acquisition and quaternion streaming to OpenSim (UDP v2 on port 5000) — existing
 - ✓ OpenSim Live launch from device editor (`OpenSim Live` button) — existing
 - ✓ Simbody visualizer with simulation time display (`setShowSimTime(True)`) — existing in `opensim_live_realtime.py`
-- ✓ IK produces joint coordinate values from IMU orientations (`model.getCoordinateSet()`, `coord_set.get(name).getValue(state)`) — existing in `opensim_live_realtime.py`
-- ✓ Sensor → body-segment mapping (`SENSORS`, `SENSOR_CHAIN_UP`, `opensim_sensor_map.json`) — existing
-- ✓ Digital output / broadcast trigger path (`ACQBOARD TRIGGER <line> <ms>`) — existing in `devicethread.cpp`
-- ✓ Device editor persistence via XML settings — existing pattern in `device editor.cpp`
+- ✓ IK produces joint coordinate values from IMU orientations — existing
+- ✓ Sensor → body-segment mapping — existing
+- ✓ Digital output / broadcast trigger path — existing
+- ✓ Device editor persistence via XML settings — existing pattern
+- ✓ Operator joint multi-select in device editor (Phase 2)
+- ✓ Joint selection persists in plugin XML (Phase 2)
+- ✓ Trigger and Apply Display write `opensim_joint_display_config.json` (Phase 3)
+- ✓ OpenSim Live filtered HUD beside sim clock (Phases 1, 4)
+- ✓ Operator documentation (Phase 5)
 
 ### Active
 
-- [ ] Operator can select which joint coordinates to display in the plugin UI before/during acquisition
-- [ ] Selected joint list persists across plugin save/load (device settings XML)
-- [ ] On trigger (or manual apply), plugin writes the selected joint list to OpenSim work directory config
-- [ ] OpenSim Live displays **only** selected joint angle values, formatted beside the sim timer/clock
-- [ ] Display filter changes without regressing live IK/visualization or UDP v2 streaming
+- [ ] Manual hardware UAT: live trigger → HUD filter, IK continuity (DISP-04 sign-off)
 
 ### Out of Scope
 
