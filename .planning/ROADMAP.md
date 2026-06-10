@@ -30,6 +30,8 @@
 2. Python watcher in `opensim_live_realtime.py` applies a 2-joint filter when config changes (e.g. only `knee_angle_r`, `hip_flexion_r`)
 3. Filtered values update within 200 ms of file update while live UDP stream continues
 
+**Locked defaults (2026-06-10):** curated catalog (flexion only), max 6 joints, abbreviated 1-decimal HUD (`knee_r: 42.1°`), trigger applies current selection (Phase 3)
+
 **Key files:** `opensim_live_realtime.py`, new `opensim_joint_catalog.py` (optional module), `docs/opensim-joint-display-config.md`
 
 **Research flags:** Simbody text overlay / status API beside `setShowSimTime` — enumerate in plan-phase

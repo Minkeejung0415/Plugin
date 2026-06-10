@@ -66,7 +66,11 @@ When an experiment trigger fires during live acquisition, the operator sees **on
 | Trigger source | Existing `ACQBOARD TRIGGER` broadcast and plugin TTL output path |
 | Display location | Simbody visualizer window, adjacent to sim time (clock) |
 | Config transport | `opensim_joint_display_config.json` sidecar (atomic write); do not modify UDP v2 |
-| Default joint catalog v1 | Curated list from Rajagopal model coordinates near instrumented segments; full model enum deferred |
+| Default joint catalog v1 | **Locked:** curated instrumented-limb list only (primary flexion DOFs); full model enum deferred |
+| Trigger semantics v1 | **Locked:** apply current checkbox selection on trigger (not per-TTL preset maps) |
+| Max joints on screen | **Locked:** 6 joints maximum |
+| DOF per joint | **Locked:** primary flexion only (e.g. `hip_flexion_r`, not adduction/rotation) |
+| Display format | **Locked:** abbreviated labels, 1 decimal, e.g. `knee_r: 42.1°` |
 
 ## Constraints
 
@@ -85,15 +89,23 @@ When an experiment trigger fires during live acquisition, the operator sees **on
 | Coordinate-name selection in plugin | IK output is joint coordinates; sensors map to segments, not display labels directly | — Pending |
 | Hook trigger in plugin broadcast handler + optional UI test button | Reuses proven `ACQBOARD TRIGGER` path | — Pending |
 | OpenSim Live only (not Gen Motion) | Display requirement targets live Simbody window with clock | — Pending |
-| Curated joint list for v1 UI | Full Rajagopal coordinate set is large; start with instrumented-limb coordinates | — Pending |
+| Curated joint list for v1 UI | Full Rajagopal coordinate set is large; start with instrumented-limb coordinates | Locked 2026-06-10 |
+| Trigger applies current selection | User default; per-TTL preset maps deferred to v2 | Locked 2026-06-10 |
+| Max 6 joints, flexion-only, abbreviated HUD | Readability beside sim clock | Locked 2026-06-10 |
 
-## Open Questions (User)
+## Locked Defaults (2026-06-10)
 
-1. **Default joint set** — All model coordinates vs only joints near active IMUs vs user-defined list?
-2. **Trigger semantics** — Does trigger *apply the current checkbox selection* or *switch to a pre-mapped trigger-specific set*?
-3. **Max joints on screen** — Cap for readability beside the clock (e.g. 4–6)?
-4. **Per-joint DOF** — Show primary flexion only, or all DOFs (flexion/adduction/rotation) per selected joint?
-5. **Units/format** — Degrees with fixed precision? Include joint label abbreviations?
+User approved **proceed with defaults**:
+
+| # | Topic | Decision |
+|---|-------|----------|
+| 1 | Joint catalog | Curated instrumented-limb list only (not all model coordinates) |
+| 2 | Trigger behavior | Apply current checkbox selection on trigger |
+| 3 | Max on screen | 6 joints |
+| 4 | DOF per joint | Primary flexion only |
+| 5 | Display format | Abbreviated labels with 1 decimal, e.g. `knee_r: 42.1°` |
+
+These defaults govern catalog design, UI limits, config schema, and HUD formatting across all phases.
 
 ## Evolution
 
