@@ -64,3 +64,46 @@ Phase 1 spike testing may write the final file directly.
 - A daemon thread polls file mtime every 50 ms
 - On change: parse JSON, validate `joints` against the catalog, apply only if `seq` increased
 - Main IK loop reads the shared filter list each frame (no per-frame file I/O)
+
+## Simbody HUD
+
+At startup, `run_live()` probes `SimbodyVisualizer` Python bindings and logs `[JOINT-DISPLAY-SPIKE]` with text-related method names from `dir(viz)`.
+
+### Methods tested (OpenSim 4.5 spike)
+
+| Method | Result |
+|--------|--------|
+| `setShowSimTime` | Used for sim clock (existing) |
+| `setWindowTitle` | **Works** — primary fallback for joint readout |
+| `setStatusLine` | Probed at startup; use if call succeeds without error |
+| `setStatusText` | Probed at startup; use if call succeeds without error |
+| `setCaption` | Probed at startup; use if call succeeds without error |
+
+### Chosen strategy
+
+- **Preferred:** `overlay` when a status/text method accepts a static probe string at startup
+- **Fallback:** `window_title` — appends compact joint text: `Connect OpenSim - RedPitaya 8-IMU | knee_r: 42.1° | hip_r: 15.3°`
+- Title updates are throttled to when the HUD string changes (≤20 Hz visualizer rate)
+
+### Fallback behavior
+
+If no overlay API works on the target install, only `setWindowTitle` is used. Empty filter restores the base window title with no joint suffix.
+
+## Phase 1 Verification Checklist
+
+Manual verification with OpenSim 4.5 Python 3.8 and a live or test UDP stream:
+
+1. Copy `opensim_live_realtime.py` and `opensim_joint_catalog.py` to `WORK_DIR` (or run from repo if paths match).
+2. Start OpenSim Live; confirm IK skeleton updates from UDP.
+3. Write to `WORK_DIR/opensim_joint_display_config.json`:
+   ```json
+   {"joints": ["knee_angle_r", "hip_flexion_r"], "trigger_ts": 0, "seq": 1}
+   ```
+4. Within **200 ms**, confirm `[JOINT-DISPLAY] seq=1 ...` log and HUD shows only `knee_r` and `hip_r` lines (window title or overlay).
+5. Update `seq: 2` with `"joints": ["ankle_angle_r"]` — HUD switches to single `ankle_r` line within **200 ms**.
+6. Confirm IK skeleton continues updating (no freeze > 1 s).
+7. Confirm `[COORD]` debug logging still works; UDP v2 path unchanged.
+
+Optional automated pre-check: set `OPENSIM_JOINT_DISPLAY_TEST=1` before launch to write seq 1 and 2 configs; watcher should log within 200 ms after `run_live()` starts the watcher thread.
+
+**Operator sign-off required** for steps 3–6 on hardware with Simbody window open.

@@ -360,6 +360,98 @@ def get_display_filter_joints():
         return list(_display_filter_joints)
 
 
+_HUD_BASE_TITLE = "Connect OpenSim - RedPitaya 8-IMU"
+_last_hud_text = None
+_overlay_callable = None
+
+
+def _pick_hud_strategy(viz):
+    global _overlay_callable
+    methods = [m for m in dir(viz) if not m.startswith("_")]
+    text_related = sorted(
+        m for m in methods
+        if any(token in m.lower() for token in ("text", "status", "label", "title", "caption"))
+    )
+    print(f"[JOINT-DISPLAY-SPIKE] SimbodyVisualizer methods: {text_related}")
+
+    overlay_candidates = [
+        ("setStatusLine", lambda text: viz.setStatusLine(text)),
+        ("setStatusText", lambda text: viz.setStatusText(text)),
+        ("setCaption", lambda text: viz.setCaption(text)),
+    ]
+    for name, caller in overlay_candidates:
+        if name not in methods:
+            continue
+        try:
+            caller("joint display spike")
+            _overlay_callable = caller
+            print(f"[JOINT-DISPLAY-SPIKE] overlay method works: {name}")
+            return "overlay"
+        except Exception as exc:
+            print(f"[JOINT-DISPLAY-SPIKE] {name} failed: {exc}")
+
+    print("[JOINT-DISPLAY-SPIKE] chosen strategy=window_title (overlay unavailable)")
+    return "window_title"
+
+
+def _render_joint_display_hud(viz, coord_set, state, strategy, base_title=_HUD_BASE_TITLE):
+    global _last_hud_text
+    filter_joints = get_display_filter_joints()
+    if not filter_joints:
+        if _last_hud_text is not None:
+            _last_hud_text = None
+            try:
+                viz.setWindowTitle(base_title)
+            except Exception:
+                pass
+            if strategy == "overlay" and _overlay_callable is not None:
+                try:
+                    _overlay_callable("")
+                except Exception:
+                    pass
+        return
+
+    lines = []
+    for name in filter_joints:
+        try:
+            degrees = float(np.degrees(coord_set.get(name).getValue(state)))
+        except Exception:
+            print(f"[WARN] unknown coordinate {name}")
+            continue
+        abbrev = opensim_joint_catalog.abbrev_for(name)
+        lines.append(opensim_joint_catalog.format_angle_line(abbrev, degrees))
+
+    if not lines:
+        return
+
+    hud_text = "\n".join(lines)
+    if strategy == "window_title":
+        compact = " | ".join(lines)
+        display_text = f"{base_title} | {compact}"
+        if display_text == _last_hud_text:
+            return
+        _last_hud_text = display_text
+        try:
+            viz.setWindowTitle(display_text)
+        except Exception as exc:
+            print(f"[WARN] setWindowTitle failed: {exc}")
+        return
+
+    if hud_text == _last_hud_text:
+        return
+    _last_hud_text = hud_text
+    if _overlay_callable is not None:
+        try:
+            _overlay_callable(hud_text)
+        except Exception as exc:
+            print(f"[WARN] overlay HUD failed, falling back to window title: {exc}")
+            compact = " | ".join(lines)
+            try:
+                viz.setWindowTitle(f"{base_title} | {compact}")
+            except Exception:
+                pass
+
+
 def _write_test_joint_display_config(joints, seq):
     path = os.path.join(WORK_DIR, JOINT_DISPLAY_CONFIG)
     payload = {
@@ -874,6 +966,7 @@ def run_live():
     _attach_simbody_angle_hud(viz)
     display_joint = _load_display_joint()
     print(f"[HUD] Display joint: {display_joint['label']} ({display_joint['joint']})")
+    hud_strategy = _pick_hud_strategy(viz)
 
     print("[Connect OpenSim] Assembling neutral pose ...")
     ikSolver.assemble(state)
@@ -1026,6 +1119,8 @@ def run_live():
                             f"active_change={active_change:.3f} coord_delta_deg={coord_delta:.3f}"
                         )
                 last_coord_values = angle_deg
+
+            _render_joint_display_hud(viz, coord_set, state, hud_strategy)
 
             if live_frame <= 5 or live_frame % 1000 == 0:
                 print(f"[VIZ] show frame={live_frame} t={state.getTime():.3f}s")
