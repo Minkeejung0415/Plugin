@@ -317,12 +317,6 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (liveAngleLabel.get());
 
         setSize (getWidth(), 220);
-        applyDisplayButton = std::make_unique<UtilityButton> ("Apply Display");
-        applyDisplayButton->setRadius (3.0f);
-        applyDisplayButton->setBounds (col4, 116, comboW, 20);
-        applyDisplayButton->addListener (this);
-        applyDisplayButton->setTooltip ("Write current joint selection to OpenSim HUD config (no trigger required)");
-        addAndMakeVisible (applyDisplayButton.get());
 
         jointDisplayTitle = std::make_unique<Label> ("jointDisplayTitle", "Joint HUD (max 6)");
         jointDisplayTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
@@ -348,7 +342,10 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         }
 
         if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+        {
             syncJointDisplayTogglesFromBoard();
+            rp->writeJointDisplayConfig();
+        }
 
         redPitayaSensorUiBuilt = true;
     }
@@ -1020,19 +1017,7 @@ void DeviceEditor::buttonClicked (Button* button)
             syncOpenSimDisplayJointToBoard();
             rp->launchOpenSimLive();
             startTimerHz (10);
-            CoreServices::sendStatusMessage ("OpenSim Live started — selected joint angle shown on OpenSim viewer");
-        }
-    }
-    else if (button == applyDisplayButton.get())
-    {
-        if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
-        {
-            auto* rp = static_cast<AcqBoardRedPitaya*> (board);
-
-            if (rp->writeJointDisplayConfig())
-                CoreServices::sendStatusMessage ("Joint display config applied to OpenSim work dir");
-            else
-                CoreServices::sendStatusMessage ("Joint display config write failed — check work dir path");
+            CoreServices::sendStatusMessage ("OpenSim Live started — joint angles shown on OpenSim viewer");
         }
     }
     else
@@ -1053,6 +1038,10 @@ void DeviceEditor::buttonClicked (Button* button)
             {
                 button->setToggleState (false, dontSendNotification);
                 CoreServices::sendStatusMessage ("Joint HUD: maximum 6 joints on screen");
+            }
+            else
+            {
+                rp->writeJointDisplayConfig();
             }
 
             return;
@@ -1166,8 +1155,6 @@ void DeviceEditor::startAcquisition()
             liveAngleTitle->toFront (false);
         if (liveAngleLabel != nullptr)
             liveAngleLabel->toFront (false);
-        if (applyDisplayButton != nullptr)
-            applyDisplayButton->toFront (false);
         if (jointDisplayTitle != nullptr)
             jointDisplayTitle->toFront (false);
 
@@ -1179,6 +1166,12 @@ void DeviceEditor::startAcquisition()
     }
 
     syncRedPitayaBoardSampleRateFromLabel();
+
+    if (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+    {
+        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+            rp->writeJointDisplayConfig();
+    }
 
     if (memoryUsage != nullptr)
         memoryUsage->startAcquisition();
@@ -1535,6 +1528,7 @@ void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)
             rp->setNodeHost (nodeHost);
             rp->loadJointDisplayFromXml (*xml);
             syncJointDisplayTogglesFromBoard();
+            rp->writeJointDisplayConfig();
         }
     }
     else if (auto* jointDisplay = xml->getChildByName ("JOINT_DISPLAY"))

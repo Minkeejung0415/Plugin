@@ -829,6 +829,7 @@ bool AcqBoardRedPitaya::startAcquisition()
                   << numAdcChannels << " ch @ " << targetHz << " Hz)." << std::endl;
 
         startThread();
+        writeJointDisplayConfig();
         return true;
     }
 
@@ -946,6 +947,7 @@ bool AcqBoardRedPitaya::startAcquisition()
     }
 
     startThread();
+    writeJointDisplayConfig();
     return true;
 }
 
@@ -1601,7 +1603,11 @@ void AcqBoardRedPitaya::saveJointDisplayToXml (XmlElement& parent) const
 
 bool AcqBoardRedPitaya::writeJointDisplayConfig()
 {
-    const StringArray joints = getSelectedDisplayJoints();
+    StringArray joints = getSelectedDisplayJoints();
+
+    if (joints.isEmpty())
+        joints.add (kDefaultJointDisplayCoordinate);
+
     const int seq = ++jointDisplayConfigSeq;
 
     DynamicObject::Ptr root = new DynamicObject();
@@ -1747,6 +1753,7 @@ void AcqBoardRedPitaya::launchOpenSimLive()
 
     openSimEnabled = true;
     std::cout << "Red Pitaya: OpenSim UDP forwarding enabled -> 127.0.0.1:5000" << std::endl;
+    writeJointDisplayConfig();
 }
 
 void AcqBoardRedPitaya::sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors)

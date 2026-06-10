@@ -14,6 +14,8 @@ struct OpenSimJointCatalogEntry
 
 static constexpr int kOpenSimJointCatalogSize = 7;
 static constexpr int kMaxJointDisplaySelection = 6;
+static constexpr int kDefaultJointDisplayCatalogIndex = 2;
+static constexpr const char* kDefaultJointDisplayCoordinate = "knee_angle_r";
 
 static constexpr OpenSimJointCatalogEntry kOpenSimJointCatalog[kOpenSimJointCatalogSize] = {
     { "pelvis_tilt",   "pelvis", "pelvis_imu"   },

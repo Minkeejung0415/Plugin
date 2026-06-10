@@ -192,8 +192,6 @@ private:
 
     std::unique_ptr<UtilityButton> openSimMotionButton;
     std::unique_ptr<UtilityButton> openSimLiveButton;
-    std::unique_ptr<UtilityButton> applyDisplayButton;
-
     std::unique_ptr<Label> jointDisplayTitle;
     std::array<std::unique_ptr<ToggleButton>, kOpenSimJointCatalogSize> jointDisplayToggles;
 

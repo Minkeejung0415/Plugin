@@ -162,7 +162,7 @@ _udp_running = True
 _angle_feedback_sock = None
 
 _display_filter_lock = threading.Lock()
-_display_filter_joints = []
+_display_filter_joints = [opensim_joint_catalog.DEFAULT_DISPLAY_JOINT]
 _display_filter_seq = -1
 _joint_display_watcher_running = True
 
@@ -351,6 +351,8 @@ def _read_joint_display_config():
     if not isinstance(joints, list) or not isinstance(seq, int):
         return None
     validated = opensim_joint_catalog.validate_joints(joints)
+    if not validated:
+        validated = [opensim_joint_catalog.DEFAULT_DISPLAY_JOINT]
     return seq, validated
 
 
@@ -378,7 +380,10 @@ def _joint_display_watcher_thread():
 
 def get_display_filter_joints():
     with _display_filter_lock:
-        return list(_display_filter_joints)
+        joints = list(_display_filter_joints)
+        if not joints:
+            return [opensim_joint_catalog.DEFAULT_DISPLAY_JOINT]
+        return joints
 
 
 _HUD_BASE_TITLE = "Connect OpenSim - RedPitaya 8-IMU"
@@ -418,20 +423,6 @@ def _pick_hud_strategy(viz):
 def _render_joint_display_hud(viz, coord_set, state, strategy, base_title=_HUD_BASE_TITLE):
     global _last_hud_text
     filter_joints = get_display_filter_joints()
-    if not filter_joints:
-        if _last_hud_text is not None:
-            _last_hud_text = None
-            try:
-                viz.setWindowTitle(base_title)
-            except Exception:
-                pass
-            if strategy == "overlay" and _overlay_callable is not None:
-                try:
-                    _overlay_callable("")
-                except Exception:
-                    pass
-        return
-
     lines = []
     for name in filter_joints:
         try:

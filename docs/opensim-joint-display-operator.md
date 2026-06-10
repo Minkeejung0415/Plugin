@@ -1,13 +1,13 @@
 # OpenSim Joint Angle Display — Operator Guide
 
-Display **selected IK joint angles** beside the Simbody simulation clock when a trigger fires or when you click **Apply Display** in the Red Pitaya device editor.
+Display **selected IK joint angles** beside the Simbody simulation clock. **Right knee (`knee_r`) is always shown** when no joints are selected; toggles add or remove angles (up to 6 total).
 
 ## Quick workflow
 
-1. In the Open Ephys **Acq Board** editor (Red Pitaya), check up to **6 joints** under **Joint HUD**.
+1. In the Open Ephys **Acq Board** editor (Red Pitaya), check up to **6 joints** under **Joint HUD** (optional — knee shows by default).
 2. Click **OpenSim Live**, then press **Play** in Open Ephys to stream IMU data.
-3. Fire a trigger (`ACQBOARD TRIGGER <line> <ms>`) or click **Apply Display**.
-4. OpenSim Live shows only the selected angles (e.g. `knee_r: 42.1°`) beside the sim timer.
+3. Angles update automatically when toggles change, acquisition starts, or a trigger fires (`ACQBOARD TRIGGER <line> <ms>`).
+4. OpenSim Live shows the active set (e.g. `knee_r: 42.1°`) beside the sim timer.
 
 ## Joint catalog (v1)
 
@@ -27,7 +27,7 @@ Orange checkbox labels indicate joints on segments that are active in the curren
 
 Path: `{WORK_DIR}/opensim_joint_display_config.json`
 
-Default on this project: `C:\Users\KIN Student\Open-Sim--Bio-Mech\opensim_joint_display_config.json`
+The plugin writes this file automatically (no Apply button). If the file is missing or empty, OpenSim Live falls back to **`knee_angle_r` only**.
 
 Schema and HUD behavior: [opensim-joint-display-config.md](opensim-joint-display-config.md)
 
@@ -41,7 +41,7 @@ Broadcast format (existing):
 ACQBOARD TRIGGER <ttlLine> <durationMs>
 ```
 
-On each valid trigger, the plugin writes the **current checkbox selection** to the config file with an incremented `seq` field (atomic temp + rename).
+On each valid trigger, the plugin writes the **current checkbox selection** (minimum knee when none selected) with an incremented `seq` field (atomic temp + rename).
 
 ## Troubleshooting
 
@@ -56,9 +56,10 @@ On each valid trigger, the plugin writes the **current checkbox selection** to t
 
 Requires OpenSim 4.5 Python 3.8, Red Pitaya/ESP32 stream, and Simbody window:
 
-1. Select 2 joints → **Apply Display** → HUD updates within 200 ms.
-2. Change selection → fire trigger → HUD updates to new set.
-3. Confirm skeleton keeps moving (no freeze > 1 s).
-4. Clear all checkboxes → **Apply Display** → HUD clears (base window title only).
+1. Open **OpenSim Live** with no joints checked → HUD shows `knee_r` within 200 ms.
+2. Select 2 joints → HUD updates automatically within 200 ms.
+3. Change selection → fire trigger → HUD updates to new set.
+4. Confirm skeleton keeps moving (no freeze > 1 s).
+5. Clear all checkboxes → HUD still shows `knee_r` (default minimum).
 
 See Phase 1 checklist in [opensim-joint-display-config.md](opensim-joint-display-config.md#phase-1-verification-checklist).

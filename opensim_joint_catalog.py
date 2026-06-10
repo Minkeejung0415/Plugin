@@ -4,6 +4,7 @@ Pure Python — no OpenSim import (Python 3.8 unit-test friendly).
 """
 
 MAX_DISPLAY_JOINTS = 6
+DEFAULT_DISPLAY_JOINT = "knee_angle_r"
 
 JOINT_CATALOG = [
     {"coordinate": "pelvis_tilt", "abbrev": "pelvis_tilt", "segment": "pelvis_imu"},
