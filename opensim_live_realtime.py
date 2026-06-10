@@ -38,6 +38,8 @@ import numpy as np
 
 import json
 
+import opensim_joint_catalog
+
 UDP_PACKET_VERSION_QUAT = 2.0
 UDP_PACKET_VERSION_ANGLES = 3.1
 ANGLE_FEEDBACK_IP = "127.0.0.1"
@@ -55,6 +57,7 @@ JOINT_OPTIONS = [
     ("pelvis_rotation", "Pelvis Rotation", 8),
     ("lumbar_extension", "Lumbar Extension", 9),
 ]
+JOINT_DISPLAY_CONFIG = "opensim_joint_display_config.json"
 _sensor_map_cache = None
 _display_joint_cache = None
 _simbody_hud_line = "Select a joint in the plugin"
@@ -156,6 +159,11 @@ _frame_lock = threading.Lock()
 _frame_queue = []
 _udp_running = True
 _angle_feedback_sock = None
+
+_display_filter_lock = threading.Lock()
+_display_filter_joints = []
+_display_filter_seq = -1
+_joint_display_watcher_running = True
 
 
 def _qx(theta):
@@ -307,6 +315,61 @@ def _update_simbody_angle_display(viz, joint_label, angle_deg):
         viz.setWindowTitle(f"OpenSim Live | {_simbody_hud_line}")
     except Exception:
         pass
+def _read_joint_display_config():
+    path = os.path.join(WORK_DIR, JOINT_DISPLAY_CONFIG)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"[WARN] Could not read {path}: {exc}")
+        return None
+    joints = data.get("joints")
+    seq = data.get("seq")
+    if not isinstance(joints, list) or not isinstance(seq, int):
+        return None
+    validated = opensim_joint_catalog.validate_joints(joints)
+    return seq, validated
+
+
+def _joint_display_watcher_thread():
+    global _display_filter_joints, _display_filter_seq
+    path = os.path.join(WORK_DIR, JOINT_DISPLAY_CONFIG)
+    last_mtime = None
+    while _joint_display_watcher_running:
+        try:
+            mtime = os.path.getmtime(path) if os.path.isfile(path) else None
+        except OSError:
+            mtime = None
+        if mtime is not None and mtime != last_mtime:
+            last_mtime = mtime
+            result = _read_joint_display_config()
+            if result is not None:
+                seq, validated = result
+                with _display_filter_lock:
+                    if seq > _display_filter_seq:
+                        _display_filter_seq = seq
+                        _display_filter_joints = list(validated)
+                        print(f"[JOINT-DISPLAY] seq={seq} joints={validated}")
+        time.sleep(0.05)
+
+
+def get_display_filter_joints():
+    with _display_filter_lock:
+        return list(_display_filter_joints)
+
+
+def _write_test_joint_display_config(joints, seq):
+    path = os.path.join(WORK_DIR, JOINT_DISPLAY_CONFIG)
+    payload = {
+        "joints": list(joints),
+        "trigger_ts": time.time(),
+        "seq": int(seq),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
 
 
 def _load_sensor_map():
@@ -817,9 +880,11 @@ def run_live():
     model.getVisualizer().show(state)
     print("[Connect OpenSim] Neutral pose assembled. Waiting for IMU stream ...")
 
-    global _udp_running
+    global _udp_running, _joint_display_watcher_running
     t_recv = threading.Thread(target=_udp_ahrs_thread, daemon=True)
     t_recv.start()
+    t_joint_display = threading.Thread(target=_joint_display_watcher_thread, daemon=True)
+    t_joint_display.start()
 
     t_start = time.time()
     while True:
@@ -990,7 +1055,16 @@ def run_live():
             except Exception:
                 pass
             _angle_feedback_sock = None
+        _joint_display_watcher_running = False
 
 
 if __name__ == "__main__":
+    if os.environ.get("OPENSIM_JOINT_DISPLAY_TEST") == "1":
+        _write_test_joint_display_config(["knee_angle_r", "hip_flexion_r"], 1)
+        time.sleep(0.25)
+        _write_test_joint_display_config(["ankle_angle_r"], 2)
+        print(
+            "[JOINT-DISPLAY-TEST] Wrote seq=1 (knee_r, hip_r) then seq=2 (ankle_r). "
+            "Observe [JOINT-DISPLAY] log within 200 ms of each write when run_live starts."
+        )
     run_live()
