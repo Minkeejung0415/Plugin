@@ -60,6 +60,7 @@ JOINT_OPTIONS = [
 JOINT_DISPLAY_CONFIG = "opensim_joint_display_config.json"
 _sensor_map_cache = None
 _display_joint_cache = None
+_display_joint_mtime = None
 _simbody_hud_line = "Select a joint in the plugin"
 
 try:
@@ -215,14 +216,21 @@ def _is_flat_fake_packet(values):
 
 
 def _load_display_joint(reload=False):
-    global _display_joint_cache
+    global _display_joint_cache, _display_joint_mtime
+    path = os.path.join(WORK_DIR, "opensim_display_joint.json")
     if reload:
-        _display_joint_cache = None
+        try:
+            mtime = os.path.getmtime(path) if os.path.isfile(path) else None
+        except OSError:
+            mtime = None
+        # Only re-parse the JSON when the file actually changed.
+        if mtime != _display_joint_mtime or _display_joint_cache is None:
+            _display_joint_mtime = mtime
+            _display_joint_cache = None
     if _display_joint_cache is not None:
         return _display_joint_cache
 
     default = JOINT_OPTIONS[1]
-    path = os.path.join(WORK_DIR, "opensim_display_joint.json")
     joint_name = default[0]
     joint_label = default[1]
     joint_index = default[2]

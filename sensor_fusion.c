@@ -103,24 +103,6 @@ static void quat_float_to_q15(const float quat[4], int16_t quat_q15[4])
     quat_q15[3] = float_to_q15(quat[3]);
 }
 
-static void normalize_quaternion(float quat[4])
-{
-    const float norm = sqrtf(quat[0] * quat[0] +
-                             quat[1] * quat[1] +
-                             quat[2] * quat[2] +
-                             quat[3] * quat[3]);
-
-    if (norm <= 0.0f) {
-        set_identity_quaternion(quat);
-        return;
-    }
-
-    quat[0] /= norm;
-    quat[1] /= norm;
-    quat[2] /= norm;
-    quat[3] /= norm;
-}
-
 static bool is_valid_sensor_index(int sensor_index)
 {
     return g_fusion.initialized &&
@@ -229,7 +211,8 @@ static void refresh_last_quaternion(FusionSensorState *sensor)
     sensor->last_quat[1] = (float)quat[1];
     sensor->last_quat[2] = (float)quat[2];
     sensor->last_quat[3] = (float)quat[3];
-    normalize_quaternion(sensor->last_quat);
+    /* VQF output is already unit-norm (gyrQuat/accQuat are normalized each
+       update) and float_to_q15 clamps, so no re-normalization is needed. */
 
     sensor->last_status_flags = FUSION_STATUS_VALID | FUSION_STATUS_ENABLED;
 
