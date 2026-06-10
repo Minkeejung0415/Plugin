@@ -10,7 +10,7 @@
 
 | # | Phase | Goal | Requirements | Success Criteria |
 |---|-------|------|--------------|------------------|
-| 1 | Display Config Contract & Spike | 1/3 | In Progress|  |
+| 1 | Display Config Contract & Spike | 3/3 | Complete   | 2026-06-10 |
 | 2 | Plugin Joint Selector | Operator selects and persists joint list | JOIN-01, JOIN-02, JOIN-03, JOIN-04 | 4 |
 | 3 | Trigger Wiring | Trigger fires display config to OpenSim | TRIG-01, TRIG-02, TRIG-03, OPS-01 | 4 |
 | 4 | Filtered Display | Show only selected angles beside clock | DISP-01, DISP-02, DISP-05 | 3 |
