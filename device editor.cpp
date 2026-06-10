@@ -289,7 +289,6 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
 
-<<<<<<< HEAD
         displayJointTitle = std::make_unique<Label> ("displayJointTitle", "Display Joint");
         displayJointTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
         displayJointTitle->setBounds (col3, 145, 110, 12);
@@ -317,7 +316,6 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         addAndMakeVisible (liveAngleLabel.get());
 
         setSize (getWidth(), 185);
-=======
         applyDisplayButton = std::make_unique<UtilityButton> ("Apply Display");
         applyDisplayButton->setRadius (3.0f);
         applyDisplayButton->setBounds (col4, 116, comboW, 20);
@@ -351,7 +349,6 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
             syncJointDisplayTogglesFromBoard();
 
->>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
         redPitayaSensorUiBuilt = true;
     }
 
@@ -704,10 +701,8 @@ void DeviceEditor::refreshRedPitayaSensorCombosFromBoard()
     sensorCfgAccelCombo->setSelectedId (1, dontSendNotification);
     sensorCfgGyroCombo->setSelectedId (1, dontSendNotification);
 
-<<<<<<< HEAD
     if (sensorBodySegmentCombo != nullptr)
         sensorBodySegmentCombo->setSelectedId (rp->getSensorBodySegment (0) + 1, dontSendNotification);
-=======
     refreshJointDisplayHighlights();
 }
 
@@ -751,7 +746,6 @@ void DeviceEditor::refreshJointDisplayHighlights()
             ToggleButton::textColourId,
             nearActive ? Colours::orange : findColour (ThemeColours::defaultText));
     }
->>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
 }
 
 void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
@@ -1163,7 +1157,6 @@ void DeviceEditor::startAcquisition()
             openSimMotionButton->toFront (false);
         if (openSimLiveButton != nullptr)
             openSimLiveButton->toFront (false);
-<<<<<<< HEAD
         if (displayJointTitle != nullptr)
             displayJointTitle->toFront (false);
         if (displayJointCombo != nullptr)
@@ -1172,7 +1165,6 @@ void DeviceEditor::startAcquisition()
             liveAngleTitle->toFront (false);
         if (liveAngleLabel != nullptr)
             liveAngleLabel->toFront (false);
-=======
         if (applyDisplayButton != nullptr)
             applyDisplayButton->toFront (false);
         if (jointDisplayTitle != nullptr)
@@ -1183,7 +1175,6 @@ void DeviceEditor::startAcquisition()
             if (toggle != nullptr)
                 toggle->toFront (false);
         }
->>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
     }
 
     syncRedPitayaBoardSampleRateFromLabel();
@@ -1440,16 +1431,13 @@ void DeviceEditor::saveVisualizerEditorParameters (XmlElement* xml)
         xml->setAttribute ("NodeHost", nodeHostLabel->getText().trim());
 
     if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
-<<<<<<< HEAD
     {
         for (int i = 0; i < 6; ++i)
             xml->setAttribute ("BodySegment" + String (i), rp->getSensorBodySegment (i));
 
         xml->setAttribute ("DisplayJoint", rp->getDisplayJointIndex());
-    }
-=======
         rp->saveJointDisplayToXml (*xml);
->>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
+    }
 }
 
 void DeviceEditor::loadVisualizerEditorParameters (XmlElement* xml)

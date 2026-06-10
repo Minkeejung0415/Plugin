@@ -1357,7 +1357,6 @@ void AcqBoardRedPitaya::setNumHeadstageChannels (int /*headstageIndex*/, int /*c
 {
 }
 
-<<<<<<< HEAD
 const char* AcqBoardRedPitaya::getBodySegmentName (int idx)
 {
     if (idx < 0 || idx >= NUM_BODY_SEGMENTS) idx = 0;
@@ -1501,7 +1500,6 @@ void AcqBoardRedPitaya::pollOpenSimAngleFeedback()
     }
 }
 
-=======
 String AcqBoardRedPitaya::getOpenSimWorkDir()
 {
     return kOpenSimWorkDir;
@@ -1645,7 +1643,6 @@ bool AcqBoardRedPitaya::writeJointDisplayConfig()
     return true;
 }
 
->>>>>>> 39fd5cd (feat(02-03): plugin joint selector, trigger config write, Apply Display)
 void AcqBoardRedPitaya::launchOpenSimMotion()
 {
     writeOpenSimSensorMap();
