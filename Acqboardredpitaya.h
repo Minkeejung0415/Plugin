@@ -329,6 +329,9 @@ public:
     /** UDP v2: quats is numSensorsÃ—4 floats (qw,qx,qy,qz per sensor, unit quaternion). */
     void sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors);
 
+    /** UDP v3: imu6 is numSensors×6 floats (ax,ay,az,gx,gy,gz in g and deg/s per sensor). */
+    void sendOpenSimImuPacket (float timestamp, const float* imu6, int numSensors);
+
     std::unique_ptr<DatagramSocket> openSimSocket;
     std::unique_ptr<DatagramSocket> openSimAngleSocket;
     bool openSimEnabled { false };

@@ -1,10 +1,12 @@
 """
 opensim_live_realtime.py  -  Python 3.8 ONLY
 Real-time OpenSim IK with Simbody visualizer.
-Receives UDP from Open Ephys: v2 quaternion packets (t, version=2, N, N×qw,qx,qy,qz) or legacy acc/gyro IMU packets
-on port 5000, same format as the Open Ephys bridge sends.
-Runs imufusion AHRS per sensor -> quaternions -> OpenSim orientation IK
--> Simbody visualizer update.
+Receives UDP from Open Ephys on port 5000:
+  - v3 accel/gyro (t, version=3, N, N×ax,ay,az,gx,gy,gz in g and deg/s) — preferred
+  - v2 quaternion packets (t, version=2, N, N×qw,qx,qy,qz)
+  - legacy acc/gyro IMU packets (no version tag)
+Accel/gyro baseline calibration runs in this process: first 3 s still per session,
+average a,g per sensor slot is subtracted before AHRS → IK.
 """
 
 import sys
@@ -41,6 +43,7 @@ import json
 import opensim_joint_catalog
 
 UDP_PACKET_VERSION_QUAT = 2.0
+UDP_PACKET_VERSION_IMU = 3.0
 UDP_PACKET_VERSION_ANGLES = 3.1
 ANGLE_FEEDBACK_IP = "127.0.0.1"
 ANGLE_FEEDBACK_PORT = 5001
@@ -88,10 +91,7 @@ STATIC_ACCEL_EPS = 0.03
 STATIC_CHANGE_EPS = 0.02
 STATIC_COORD_EPS_DEG = 0.25
 REAL_SOURCE_LABELS   = ("real", "real_redpitaya", "redpitaya", "rp")
-CALIB_COUNTDOWN_S = int(os.environ.get("OPENSIM_CALIB_COUNTDOWN", "3"))
-CALIB_STABLE_FRAMES = int(os.environ.get("OPENSIM_CALIB_FRAMES", "25"))
-CALIB_QUAT_STABLE_EPS = float(os.environ.get("OPENSIM_CALIB_QUAT_EPS", "0.015"))
-CALIB_TIMEOUT_S = float(os.environ.get("OPENSIM_CALIB_TIMEOUT", "30.0"))
+CALIB_DURATION_S = float(os.environ.get("OPENSIM_CALIB_DURATION", "3.0"))
 OPENSIM_SKIP_CALIB = os.environ.get("OPENSIM_SKIP_CALIB", "0") == "1"
 
 SENSORS = [
@@ -208,100 +208,86 @@ def _quat_distance(q1, q2):
     return 1.0 - min(1.0, abs(_quat_dot(q1, q2)))
 
 
-def _apply_calib_offsets(quats, active_sensors, offsets):
-    if not offsets:
-        return list(quats)
-    corrected = []
-    for q, name in zip(quats, active_sensors):
-        q_neutral = offsets.get(name)
-        if q_neutral is None:
-            corrected.append(q)
-        else:
-            corrected.append(_quat_normalize(_quat_mul(_quat_conj(q_neutral), q)))
-    return corrected
+_ag_calib_lock = threading.Lock()
+_ag_offsets = None
+_ag_calib_session = None
+_ag_calib_t_end = 0.0
+_ag_calib_sums = None
+_ag_calib_counts = None
 
 
-def _calib_frame_is_stable(active_static, prev_quats, quats):
-    if active_static:
-        return True
-    if prev_quats is None or quats is None or len(prev_quats) != len(quats):
-        return False
-    return all(
-        _quat_distance(q1, q2) <= CALIB_QUAT_STABLE_EPS
-        for q1, q2 in zip(prev_quats, quats)
+def _zero_ag_offsets():
+    return [[0.0] * 6 for _ in range(N_SENSORS)]
+
+
+def _reset_ag_calib_for_session(session_id):
+    """Start a 3 s still capture; averages are subtracted from later a,g samples."""
+    global _ag_offsets, _ag_calib_session, _ag_calib_t_end, _ag_calib_sums, _ag_calib_counts
+    with _ag_calib_lock:
+        _ag_calib_session = session_id
+        _ag_calib_t_end = time.time() + CALIB_DURATION_S
+        _ag_offsets = None
+        _ag_calib_sums = [[0.0] * 6 for _ in range(N_SENSORS)]
+        _ag_calib_counts = [0] * N_SENSORS
+    print(
+        f"[CALIB] Accel/gyro baseline — hold standing still for {CALIB_DURATION_S:.0f} s "
+        f"(session {session_id})"
     )
 
 
-def _run_neutral_pose_calibration(model, viz, coord_set, state, hud_strategy, last_hud_angles, session_id):
-    """Capture per-sensor quaternions at neutral standing; session-only offsets."""
-    if OPENSIM_SKIP_CALIB:
-        print("[CALIB] Skipped (OPENSIM_SKIP_CALIB=1)")
-        return {}
+def _accumulate_ag_calib(raw_values, slot_map):
+    """Return True once baseline offsets are ready for this session."""
+    global _ag_offsets, _ag_calib_t_end, _ag_calib_sums, _ag_calib_counts
+    with _ag_calib_lock:
+        if _ag_offsets is not None:
+            return True
 
-    print("[CALIB] Neutral pose calibration — hold standing still.")
-    for sec in range(CALIB_COUNTDOWN_S, 0, -1):
-        print(f"[CALIB] Hold still... {sec}")
-        t_end = time.time() + 1.0
-        while time.time() < t_end:
-            _render_joint_display_hud(
-                viz, coord_set, state, hud_strategy, last_known=last_hud_angles
-            )
-            model.getVisualizer().show(state)
-            time.sleep(0.05)
+        for slot in slot_map:
+            base = slot * 6
+            for k in range(6):
+                _ag_calib_sums[slot][k] += raw_values[base + k]
+            _ag_calib_counts[slot] += 1
 
-    samples = {}
-    prev_quats = None
-    stable_count = 0
-    t_start = time.time()
+        if time.time() < _ag_calib_t_end:
+            return False
 
-    while stable_count < CALIB_STABLE_FRAMES and time.time() - t_start < CALIB_TIMEOUT_S:
-        with _frame_lock:
-            if not _frame_queue:
-                time.sleep(0.01)
+        _ag_offsets = _zero_ag_offsets()
+        for slot in slot_map:
+            count = _ag_calib_counts[slot]
+            if count <= 0:
                 continue
-            (
-                _t_imu,
-                quats,
-                active_sensors,
-                sid,
-                _packet_wall,
-                active_static,
-                _gyro,
-                _change,
-            ) = _frame_queue[-1]
+            inv = 1.0 / count
+            for k in range(6):
+                _ag_offsets[slot][k] = _ag_calib_sums[slot][k] * inv
 
-        if sid != session_id:
-            print("[CALIB] Session changed during calibration — abort")
-            return {}
-
-        if not _calib_frame_is_stable(active_static, prev_quats, quats):
-            stable_count = 0
-            prev_quats = list(quats)
-            time.sleep(0.005)
-            continue
-
-        stable_count += 1
-        for q, name in zip(quats, active_sensors):
-            samples.setdefault(name, []).append(_quat_normalize(q))
-        prev_quats = list(quats)
-        time.sleep(0.005)
-
-    if not samples:
-        print("[CALIB] WARN: no stable frames captured; IK will use raw orientations")
-        return {}
-
-    if stable_count < CALIB_STABLE_FRAMES:
+    print("[CALIB] Accel/gyro baseline complete — subtracting from live stream")
+    for slot in slot_map:
+        off = _ag_offsets[slot]
         print(
-            f"[CALIB] WARN: only {stable_count}/{CALIB_STABLE_FRAMES} stable frames; "
-            "using best-effort capture"
+            f"[CALIB]   {SENSORS[slot]}: "
+            f"acc=[{off[0]:.4f},{off[1]:.4f},{off[2]:.4f}] "
+            f"gyro=[{off[3]:.4f},{off[4]:.4f},{off[5]:.4f}]"
         )
+    return True
 
-    offsets = {name: qs[-1] for name, qs in samples.items()}
-    print("[CALIB] Calibration complete — neutral pose set")
-    for name in sorted(offsets):
-        q = offsets[name]
-        print(f"[CALIB]   {name}: q=[{', '.join(f'{v:.4f}' for v in q)}]")
-    return offsets
+
+def _get_ag_offsets():
+    with _ag_calib_lock:
+        return _ag_offsets
+
+
+def _apply_ag_offsets(values, offsets):
+    if not offsets:
+        return values
+    corrected = list(values)
+    for slot in range(N_SENSORS):
+        off = offsets[slot]
+        if all(abs(v) < 1e-12 for v in off):
+            continue
+        base = slot * 6
+        for k in range(6):
+            corrected[base + k] -= off[k]
+    return corrected
 
 
 _Q_OPENSIM_FRAME = _qx(-math.pi / 2.0)
@@ -516,29 +502,25 @@ def _build_joint_hud_lines(coord_set, state, last_known=None):
     lines = []
     filter_joints = get_display_filter_joints()
     for name in filter_joints:
-        degrees = None
-        try:
-            raw = float(np.degrees(coord_set.get(name).getValue(state)))
-            if math.isfinite(raw):
-                degrees = raw
-        except Exception:
-            print(f"[WARN] unknown coordinate {name}")
-        if degrees is None and last_known is not None:
-            degrees = last_known.get(name)
+        degrees = _read_coord_value(coord_set, state, name)
+        if not math.isfinite(degrees) and last_known is not None:
+            cached = last_known.get(name)
+            if cached is not None and math.isfinite(cached):
+                degrees = cached
         abbrev = opensim_joint_catalog.abbrev_for(name)
-        if degrees is None or not math.isfinite(degrees):
-            lines.append(f"{abbrev}: --.-°")
-        else:
-            lines.append(opensim_joint_catalog.format_angle_line(abbrev, degrees))
-            if last_known is not None:
-                last_known[name] = degrees
+        if not math.isfinite(degrees):
+            lines.append(f"{abbrev}: --.--°")
+            continue
+        lines.append(opensim_joint_catalog.format_angle_line(abbrev, degrees))
+        if last_known is not None:
+            last_known[name] = degrees
     return lines
 
 
 def _init_screen_text_hud(viz):
     global _hud_screen_text
     xform = _hud_screen_transform()
-    text = osim.DecorativeText("knee_r: --.-°")
+    text = osim.DecorativeText("knee_r: --.--°")
     text.setIsScreenText(True)
     text.setColor(_HUD_SCREEN_COLOR)
     text.setScaleFactors(_HUD_SCREEN_SCALE)
@@ -574,19 +556,17 @@ def _render_joint_display_hud(viz, coord_set, state, strategy, base_title=_HUD_B
     if not lines:
         return
 
-    hud_text = "\n".join(lines)
-    if hud_text == _last_hud_text:
+    compact = " | ".join(lines)
+    if compact == _last_hud_text:
         return
-    _last_hud_text = hud_text
+    _last_hud_text = compact
 
     if strategy == "screen_text" and _hud_screen_text is not None:
         try:
-            _hud_screen_text.setText(hud_text)
-            return
+            _hud_screen_text.setText(compact)
         except Exception as exc:
             print(f"[WARN] screen text HUD update failed: {exc}")
 
-    compact = " | ".join(lines)
     display_text = f"{base_title} | {compact}"
     try:
         viz.setWindowTitle(display_text)
@@ -635,6 +615,23 @@ def _slot_map_for_quat_packet(n_sensors, sensor_map=None):
             slots.append(SENSORS.index(name))
         return slots
     return _slot_map_for_sensor_count(n_sensors)
+
+
+def _parse_imu_v3_packet(data):
+    n_floats = len(data) // 4
+    if n_floats < 3:
+        return None
+    t0, ver, n_s = _STRUCT_3F.unpack(data[:12])
+    if not (2.99 < ver < 3.01):
+        return None
+    n_sensors = int(round(n_s))
+    if n_sensors < 1 or n_sensors > N_SENSORS:
+        return None
+    expected = 3 + n_sensors * 6
+    if n_floats != expected:
+        return None
+    imu = _floats_struct(n_sensors * 6).unpack(data[12:12 + n_sensors * 24])
+    return t0, n_sensors, imu
 
 
 def _parse_quat_v2_packet(data):
@@ -705,7 +702,6 @@ def _active_imu_summary(values, slot_map, previous_values=None):
 
 def _udp_ahrs_thread():
     ahrs_list = [imufusion.Ahrs() for _ in range(N_SENSORS)]
-    offset_list = [imufusion.Offset(int(SAMPLE_RATE)) for _ in range(N_SENSORS)]
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -761,6 +757,115 @@ def _udp_ahrs_thread():
         n_bytes = len(data)
         n_floats_total = n_bytes // 4
 
+        imu_v3 = _parse_imu_v3_packet(data)
+        if imu_v3 is not None:
+            packet_timestamp, n_sensors, imu_floats = imu_v3
+            slot_map = _slot_map_for_quat_packet(n_sensors)
+            if slot_map is None:
+                continue
+            source_key = (SOURCE_LABEL, "imu_v3", n_sensors, tuple(slot_map))
+            packet_imus = n_sensors
+            raw_values = _expand_imu_packet_to_8_slots(list(imu_floats), slot_map)
+
+            new_session = False
+            reason = ""
+            if last_source_key is not None and source_key != last_source_key:
+                new_session = True
+                reason = f"source/slot changed {last_source_key}->{source_key}"
+            elif first_packet_timestamp is None or last_packet_timestamp is None:
+                new_session = True
+                reason = "first packet"
+            elif packet_timestamp < last_packet_timestamp - 0.05:
+                new_session = True
+                reason = f"timestamp reset {last_packet_timestamp:.3f}->{packet_timestamp:.3f}"
+            elif dt > SESSION_GAP_S:
+                new_session = True
+                reason = f"packet gap {dt*1000.0:.1f} ms"
+
+            if new_session:
+                session_id += 1
+                first_packet_timestamp = packet_timestamp
+                last_packet_timestamp = packet_timestamp
+                ahrs_list = [imufusion.Ahrs() for _ in range(N_SENSORS)]
+                with _frame_lock:
+                    _frame_queue.clear()
+                dt = 1.0 / SAMPLE_RATE
+                last_source_key = source_key
+                last_expanded_values = None
+                neutral_static_since = None
+                neutral_warned = False
+                _connected_announced = False
+                if not OPENSIM_SKIP_CALIB:
+                    _reset_ag_calib_for_session(session_id)
+                print(f"[SESSION] new IMU v3 session id={session_id} reason={reason}")
+            else:
+                dt = max(1.0 / SAMPLE_RATE, packet_timestamp - last_packet_timestamp)
+                last_packet_timestamp = packet_timestamp
+
+            if not _connected_announced:
+                _connected_announced = True
+                active_names = [SENSORS[s] for s in slot_map]
+                print(f"[CONNECTED] Receiving OpenSim UDP v3 accel/gyro packets.")
+                print(f"[SENSORS] {n_sensors} sensor(s): {', '.join(active_names)}")
+                for idx, name in zip(slot_map, active_names):
+                    print(f"[MAP] sensor{idx} → {name}")
+
+            active_summary, active_static, active_gyro_norm, active_change = _active_imu_summary(
+                raw_values, slot_map, last_expanded_values
+            )
+            last_expanded_values = list(raw_values)
+
+            if not OPENSIM_SKIP_CALIB and not _accumulate_ag_calib(raw_values, slot_map):
+                continue
+
+            values = _apply_ag_offsets(raw_values, _get_ag_offsets())
+
+            _pkt_n += 1
+            t_stream = max(0.0, packet_timestamp - first_packet_timestamp)
+            if _pkt_n <= 5 or _pkt_n % PACKET_LOG_INTERVAL == 0:
+                print(
+                    f"[PKT v3 {_pkt_n}] t={t_stream:.3f}s sensors={n_sensors} "
+                    f"slots={slot_map} static={active_static}"
+                )
+
+            active_quats = []
+            active_sensors = []
+            for i in range(N_SENSORS):
+                if i not in slot_map:
+                    continue
+                base = i * 6
+                ax, ay, az = values[base], values[base + 1], values[base + 2]
+                gx, gy, gz = values[base + 3], values[base + 4], values[base + 5]
+                ahrs_list[i].update_no_magnetometer(
+                    np.array([gx, gy, gz], dtype=np.float64),
+                    np.array([ax, ay, az], dtype=np.float64),
+                    dt,
+                )
+                accel_norm = math.sqrt(ax * ax + ay * ay + az * az)
+                if accel_norm < 0.3 or accel_norm > 3.0:
+                    continue
+                q = ahrs_list[i].quaternion
+                nw, nx, ny, nz = _NEUTRAL_QUATS_8IMU[i]
+                qw, qx, qy, qz = q.w, q.x, q.y, q.z
+                _q_raw = [
+                    nw * qw - nx * qx - ny * qy - nz * qz,
+                    nw * qx + nx * qw + ny * qz - nz * qy,
+                    nw * qy - nx * qz + ny * qw + nz * qx,
+                    nw * qz + nx * qy - ny * qx + nz * qw,
+                ]
+                active_quats.append(_quat_mul(_Q_OPENSIM_FRAME, _q_raw))
+                active_sensors.append(SENSORS[i])
+
+            if not active_quats:
+                continue
+
+            with _frame_lock:
+                _frame_queue.clear()
+                _frame_queue.append(
+                    (t_stream, active_quats, active_sensors, session_id, now, active_static, active_gyro_norm, active_change)
+                )
+            continue
+
         quat_pkt = _parse_quat_v2_packet(data)
         if quat_pkt is not None:
             packet_timestamp, n_sensors, quat_floats = quat_pkt
@@ -798,6 +903,10 @@ def _udp_ahrs_thread():
                 neutral_warned = False
                 _connected_announced = False
                 print(f"[SESSION] new quat v2 session id={session_id} reason={reason}")
+                print(
+                    "[CALIB] WARN: UDP v2 quaternions carry no raw accel/gyro; "
+                    "Python a,g baseline calib skipped (use UDP v3 from plugin or legacy IMU packets)"
+                )
             else:
                 dt = max(1.0 / SAMPLE_RATE, packet_timestamp - last_packet_timestamp)
                 last_packet_timestamp = packet_timestamp
@@ -876,7 +985,6 @@ def _udp_ahrs_thread():
             first_packet_timestamp = packet_timestamp
             last_packet_timestamp = packet_timestamp
             ahrs_list = [imufusion.Ahrs() for _ in range(N_SENSORS)]
-            offset_list = [imufusion.Offset(int(SAMPLE_RATE)) for _ in range(N_SENSORS)]
             with _frame_lock:
                 _frame_queue.clear()
             dt = 1.0 / SAMPLE_RATE
@@ -885,6 +993,8 @@ def _udp_ahrs_thread():
             neutral_static_since = None
             neutral_warned = False
             _connected_announced = False
+            if not OPENSIM_SKIP_CALIB:
+                _reset_ag_calib_for_session(session_id)
             if "source/slot changed" in reason:
                 print(f"[SESSION] source changed, reset AHRS id={session_id} reason={reason}")
             print(f"[SESSION] new play session detected id={session_id} reason={reason}")
@@ -944,6 +1054,11 @@ def _udp_ahrs_thread():
                 print("[FREEZE] real data invalid/static; OpenSim update skipped")
             continue
 
+        if not OPENSIM_SKIP_CALIB and not _accumulate_ag_calib(values, slot_map):
+            continue
+
+        values = _apply_ag_offsets(values, _get_ag_offsets())
+
         active_quats   = []
         active_sensors = []
 
@@ -955,9 +1070,8 @@ def _udp_ahrs_thread():
             ax, ay, az = values[base], values[base + 1], values[base + 2]
             gx, gy, gz = values[base + 3], values[base + 4], values[base + 5]
 
-            gyr_cal = offset_list[i].update(np.array([gx, gy, gz], dtype=np.float64))
             ahrs_list[i].update_no_magnetometer(
-                gyr_cal,
+                np.array([gx, gy, gz], dtype=np.float64),
                 np.array([ax, ay, az], dtype=np.float64),
                 dt,
             )
@@ -1147,12 +1261,7 @@ def run_live():
         time.sleep(0.05)
 
     with _frame_lock:
-        _first = _frame_queue[-1]
-    _first_session = _first[3]
-    calib_offsets = _run_neutral_pose_calibration(
-        model, viz, coord_set, state, hud_strategy, last_hud_angles, _first_session
-    )
-    calibrated_session = _first_session
+        _frame_queue[-1]
 
     print("[Connect OpenSim] Streaming started. Close the Simbody window to stop.")
 
@@ -1212,12 +1321,6 @@ def run_live():
                 mode = "tibia-only knee lock" if tibia_only else "full active-sensor IK"
                 print(f"[IK-MODE] {mode}")
 
-            if session_id != calibrated_session:
-                calib_offsets = _run_neutral_pose_calibration(
-                    model, viz, coord_set, state, hud_strategy, last_hud_angles, session_id
-                )
-                calibrated_session = session_id
-
             if t_imu <= last_t:
                 time.sleep(0.005)
                 continue
@@ -1235,15 +1338,14 @@ def run_live():
                 skipped_by_throttle = 0
 
             t_convert0 = time.perf_counter()
-            quats_cal = _apply_calib_offsets(quats, active_sensors, calib_offsets)
             if tibia_only:
-                ik_quats = quats_cal
+                ik_quats = quats
                 ik_sensors = active_sensors
             else:
                 ik_quats = (
-                    quats_cal
+                    quats
                     if active_sensors == SENSORS
-                    else _merge_live_quats_with_neutral(quats_cal, active_sensors)
+                    else _merge_live_quats_with_neutral(quats, active_sensors)
                 )
                 ik_sensors = SENSORS
             rot_table = _quats_to_rot_table(0.0, ik_quats, ik_sensors)

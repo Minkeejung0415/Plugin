@@ -35,7 +35,8 @@
 #define CTR_CLK_RATE      125000000
 #define HEADER_SIZE       22
 #define ANALOG_WAVEFORM_CHANNELS 2
-#define GYRO_BIAS_CALIBRATION_SAMPLES 200
+#define GYRO_BIAS_CALIBRATION_SAMPLES 3000
+#define IMU_BIAS_CALIBRATION_SLEEP_US 1000
 #define ICM20948_BANK_0 0x00
 #define ICM20948_BANK_2 0x02
 #define ICM20948_BANK_3 0x03
@@ -87,6 +88,7 @@ typedef struct {
     bool split_read;
     bool is_spi; // NEW: Flag to tell run_stream which protocol to use
     int16_t gyro_bias[3];
+    int16_t acc_bias[3];
     bool mag_is_fresh;
     int16_t mag_cache[3];
     int mag_skip_counter;
@@ -567,13 +569,14 @@ static void get_sensor_gyro_from_channels(const SensorInstance *s, const int16_t
     }
 }
 
-static void calibrate_gyro_biases(HardwareContext *ctx) {
+static void calibrate_imu_biases(HardwareContext *ctx) {
     int16_t raw_channels[16];
     int64_t gyro_sums[6][3] = {0};
+    int64_t acc_sums[6][3] = {0};
 
     if (ctx->active_sensor_count <= 0) return;
 
-    printf("Calibrating gyro bias using %d stationary samples. Keep sensors still...\n",
+    printf("Calibrating accel/gyro bias using %d stationary samples (~3 s). Keep sensors still...\n",
            GYRO_BIAS_CALIBRATION_SAMPLES);
     fflush(stdout);
 
@@ -585,25 +588,34 @@ static void calibrate_gyro_biases(HardwareContext *ctx) {
             memset(raw_channels, 0, sizeof(raw_channels));
             read_sensor_raw_channels(s, raw_channels);
 
+            acc_sums[i][0] += raw_channels[0];
+            acc_sums[i][1] += raw_channels[1];
+            acc_sums[i][2] += raw_channels[2];
+
             int16_t raw_gyr[3];
             get_sensor_gyro_from_channels(s, raw_channels, raw_gyr);
             gyro_sums[i][0] += raw_gyr[0];
             gyro_sums[i][1] += raw_gyr[1];
             gyro_sums[i][2] += raw_gyr[2];
         }
-        usleep(10000);
+        usleep(IMU_BIAS_CALIBRATION_SLEEP_US);
     }
 
     for (int i = 0; i < ctx->active_sensor_count; i++) {
         SensorInstance *s = &ctx->sensors[i];
         if (s->num_channels < 6) continue;
 
+        s->acc_bias[0] = (int16_t)(acc_sums[i][0] / GYRO_BIAS_CALIBRATION_SAMPLES);
+        s->acc_bias[1] = (int16_t)(acc_sums[i][1] / GYRO_BIAS_CALIBRATION_SAMPLES);
+        s->acc_bias[2] = (int16_t)(acc_sums[i][2] / GYRO_BIAS_CALIBRATION_SAMPLES);
         s->gyro_bias[0] = (int16_t)(gyro_sums[i][0] / GYRO_BIAS_CALIBRATION_SAMPLES);
         s->gyro_bias[1] = (int16_t)(gyro_sums[i][1] / GYRO_BIAS_CALIBRATION_SAMPLES);
         s->gyro_bias[2] = (int16_t)(gyro_sums[i][2] / GYRO_BIAS_CALIBRATION_SAMPLES);
 
-        printf("Sensor %d (%s) gyro bias: [%d, %d, %d]\n",
-               i, s->name, s->gyro_bias[0], s->gyro_bias[1], s->gyro_bias[2]);
+        printf("Sensor %d (%s) acc bias: [%d, %d, %d] gyro bias: [%d, %d, %d]\n",
+               i, s->name,
+               s->acc_bias[0], s->acc_bias[1], s->acc_bias[2],
+               s->gyro_bias[0], s->gyro_bias[1], s->gyro_bias[2]);
     }
 }
 
@@ -707,7 +719,11 @@ static int sensor_decim_interval_for_hz(const SensorInstance *s, int hw_hz)
    the Q15 quaternion after the raw channels. Returns elapsed time in ns. */
 static long long fusion_update_from_channels(SensorInstance *s, int sensor_index, int16_t *channel_out)
 {
-    int16_t raw_acc[3] = { channel_out[0], channel_out[1], channel_out[2] };
+    int16_t raw_acc[3] = {
+        (int16_t)(channel_out[0] - s->acc_bias[0]),
+        (int16_t)(channel_out[1] - s->acc_bias[1]),
+        (int16_t)(channel_out[2] - s->acc_bias[2]),
+    };
     int16_t raw_gyr[3];
     const int16_t *raw_mag = NULL;
     bool mag_is_fresh = false;
@@ -1814,7 +1830,7 @@ int main(void) {
 
     reinit_fusion_for_hz(&ctx, (float)DESIRED_SAMPLE_RATE_HZ);
 
-    calibrate_gyro_biases(&ctx);
+    calibrate_imu_biases(&ctx);
     init_analog_waveform_inputs();
 
     // Plugin controls fusion state - default to OFF

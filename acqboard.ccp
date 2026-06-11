@@ -1784,6 +1784,34 @@ void AcqBoardRedPitaya::sendOpenSimQuaternionPacket (float timestamp, const floa
     }
 }
 
+void AcqBoardRedPitaya::sendOpenSimImuPacket (float timestamp, const float* imu6, int numSensors)
+{
+    if (! openSimEnabled || openSimSocket == nullptr || imu6 == nullptr || numSensors < 1)
+        return;
+
+    const int totalFloats = 3 + numSensors * 6;
+    juce::HeapBlock<float> pkt (totalFloats);
+    pkt[0] = timestamp;
+    pkt[1] = 3.0f;
+    pkt[2] = (float) numSensors;
+
+    for (int i = 0; i < numSensors * 6; ++i)
+        pkt[3 + i] = imu6[i];
+
+    openSimSocket->write ("127.0.0.1", 5000, pkt, totalFloats * (int) sizeof (float));
+
+    static int openSimImuSendCount = 0;
+    ++openSimImuSendCount;
+
+    if (openSimImuSendCount == 1 || (openSimImuSendCount % 1000) == 0)
+    {
+        std::cout << "OpenSim UDP v3 sent #" << openSimImuSendCount
+                  << " t=" << timestamp
+                  << " n_sensors=" << numSensors
+                  << " ax[0]=" << imu6[0] << std::endl;
+    }
+}
+
 
 void AcqBoardRedPitaya::run()
 {
@@ -1877,51 +1905,26 @@ void AcqBoardRedPitaya::run()
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
                 }
 
-                // One physical IMU → one quaternion in UDP v2 (numSensors=1). Do not map
-                // gyro raw counts into quat slots (legacy 8-ch layout); that drove multiple
-                // OpenSim segments from a single bad orientation.
-                if (openSimEnabled && filterEnabled && channelsInPacket >= 6)
+                // OpenSim Live: forward raw accel/gyro (UDP v3) so Python can run 3 s baseline
+                // calibration before AHRS → IK. One physical IMU → numSensors=1.
+                if (openSimEnabled && channelsInPacket >= 6)
                 {
-                    float qw = 0.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
+                    const float imuPkt[6] = {
+                        float (channels[0]) * accScale,
+                        float (channels[1]) * accScale,
+                        float (channels[2]) * accScale,
+                        float (channels[3]) * gyrScale,
+                        float (channels[4]) * gyrScale,
+                        float (channels[5]) * gyrScale,
+                    };
 
-                    if (channelsInPacket >= 11)
+                    if (sampleNumber == 0)
                     {
-                        quaternionFromScaledQ15 (float (channels[7]), float (channels[8]),
-                                                 float (channels[9]), float (channels[10]),
-                                                 qw, qx, qy, qz);
-                    }
-                    else
-                    {
-                        const float dt = 1.0f / jmax (1.0f, settings.boardSampleRate);
-                        float q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-                        constexpr float kDegToRad = 0.017453292519943295f;
-                        const float gx = float (channels[3]) * gyrScale * kDegToRad;
-                        const float gy = float (channels[4]) * gyrScale * kDegToRad;
-                        const float gz = float (channels[5]) * gyrScale * kDegToRad;
-                        const float ax = float (channels[0]) * accScale;
-                        const float ay = float (channels[1]) * accScale;
-                        const float az = float (channels[2]) * accScale;
-                        madgwickUpdate6DOF (q, gx, gy, gz, ax, ay, az, dt, 0.1f);
-                        qw = q[0];
-                        qx = q[1];
-                        qy = q[2];
-                        qz = q[3];
+                        std::cout << "ESP32-S3: OpenSim UDP v3 n_sensors=1, ax="
+                                  << imuPkt[0] << std::endl;
                     }
 
-                    const float n2 = qw * qw + qx * qx + qy * qy + qz * qz;
-
-                    if (n2 > 1.0e-6f)
-                    {
-                        const float quatPkt[4] = { qw, qx, qy, qz };
-
-                        if (sampleNumber == 0)
-                        {
-                            std::cout << "ESP32-S3: OpenSim UDP v2 n_sensors=1 (filter on), qw="
-                                      << qw << std::endl;
-                        }
-
-                        sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
-                    }
+                    sendOpenSimImuPacket ((float) elapsedSeconds, imuPkt, 1);
                 }
 
                 // PC-side CSV recording for ESP32 WiFi mode.
@@ -2120,42 +2123,37 @@ void AcqBoardRedPitaya::run()
 
                 if (numSensors >= 1)
                 {
-                    float quatPkt[MAX_CHANNELS];
-                    int   nQuat = 0;
+                    float imuPkt[MAX_CHANNELS];
+                    int   nImu = 0;
 
                     for (int si = 0; si < numSensors && si < 6; ++si)
                     {
                         const String& sname = streamSensorNames.getReference (si);
                         const int     off     = channelOffsetForSensorIndex (streamSensorNames, si);
-                        const int     numRaw  = rawChannelCountForSensorName (sname);
-                        const int     q0      = off + numRaw;
+                        const int     gyrOff  = (sname == "BNO055") ? off + 6 : off + 3;
 
-                        const auto qSample = [&](int qIdx) -> float {
-                            const int ch = q0 + qIdx;
-
+                        const auto sampleCh = [&](int ch) -> float {
                             if (ch >= numAdcChannelsLocal)
                                 return 0.0f;
 
                             return samples[(ch * samplesPerBuffer) + sampleIndex];
                         };
 
-                        float qw, qx, qy, qz;
-                        quaternionFromScaledQ15 (qSample (0), qSample (1), qSample (2), qSample (3),
-                                                 qw, qx, qy, qz);
-
-                        quatPkt[nQuat++] = qw;
-                        quatPkt[nQuat++] = qx;
-                        quatPkt[nQuat++] = qy;
-                        quatPkt[nQuat++] = qz;
+                        imuPkt[nImu++] = sampleCh (off + 0);
+                        imuPkt[nImu++] = sampleCh (off + 1);
+                        imuPkt[nImu++] = sampleCh (off + 2);
+                        imuPkt[nImu++] = sampleCh (gyrOff + 0);
+                        imuPkt[nImu++] = sampleCh (gyrOff + 1);
+                        imuPkt[nImu++] = sampleCh (gyrOff + 2);
                     }
 
                     if (sampleNumber == 0)
                     {
-                        std::cout << "Red Pitaya: OpenSim UDP v2, " << numSensors
-                                  << " sensor(s), qw0=" << quatPkt[0] << std::endl;
+                        std::cout << "Red Pitaya: OpenSim UDP v3, " << numSensors
+                                  << " sensor(s), ax0=" << imuPkt[0] << std::endl;
                     }
 
-                    sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, numSensors);
+                    sendOpenSimImuPacket ((float) elapsedSeconds, imuPkt, numSensors);
                 }
             }
 

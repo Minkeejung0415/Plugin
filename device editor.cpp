@@ -266,25 +266,26 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
 
         jointDisplayTitle = std::make_unique<Label> ("jointDisplayTitle", "Joint HUD (max 6)");
         jointDisplayTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        jointDisplayTitle->setBounds (col5, 28, 125, 12);
+        jointDisplayTitle->setBounds (col5, 28, 130, 12);
         addAndMakeVisible (jointDisplayTitle.get());
 
-        const int toggleW = 31;
-        const int toggleH = 16;
-        const int toggleGap = 2;
+        const int toggleW = 62;
+        const int toggleH = 18;
+        const int toggleGap = 4;
+        const int toggleCols = 2;
         const int toggleRow1Y = 42;
-        const int toggleRow2Y = 60;
 
         for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
         {
-            const int col = i % 4;
-            const int row = i / 4;
+            const int col = i % toggleCols;
+            const int row = i / toggleCols;
             const int tx = col5 + col * (toggleW + toggleGap);
-            const int ty = row == 0 ? toggleRow1Y : toggleRow2Y;
+            const int ty = toggleRow1Y + row * (toggleH + 3);
 
             jointDisplayToggles[(size_t) i] = std::make_unique<ToggleButton> (kOpenSimJointCatalog[i].abbrev);
             jointDisplayToggles[(size_t) i]->setComponentID (String (i));
             jointDisplayToggles[(size_t) i]->setBounds (tx, ty, toggleW, toggleH);
+            jointDisplayToggles[(size_t) i]->setTooltip (kOpenSimJointCatalog[i].coordinate);
             jointDisplayToggles[(size_t) i]->addListener (this);
             addAndMakeVisible (jointDisplayToggles[(size_t) i].get());
         }
