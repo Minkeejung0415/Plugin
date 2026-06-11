@@ -390,7 +390,10 @@ def _read_coord_value(model, state, joint_name):
     if coord is None:
         return float("nan")
     try:
-        return float(math.degrees(coord.getValue(state)))
+        value = float(coord.getValue(state))
+        if not math.isfinite(value):
+            return float("nan")
+        return float(math.degrees(value))
     except Exception:
         return float("nan")
 
@@ -422,11 +425,26 @@ def _format_angle_hud(joint_label, angle_deg):
     return f"{joint_label}: {angle_deg:.1f} deg"
 
 
-def _update_simbody_angle_display(viz, joint_label, angle_deg):
+_window_title_supported = None
+_window_title_warned = False
+
+
+def _try_set_window_title(viz, title):
+    """OpenSim 4.5 SWIG rejects plain Python str for setWindowTitle; skip after first failure."""
+    global _window_title_supported, _window_title_warned
+    if _window_title_supported is False:
+        return
     try:
-        viz.setWindowTitle(f"OpenSim Live | {_format_angle_hud(joint_label, angle_deg)}")
-    except Exception:
-        pass
+        viz.setWindowTitle(title)
+        _window_title_supported = True
+    except Exception as exc:
+        _window_title_supported = False
+        if not _window_title_warned:
+            _window_title_warned = True
+            print(
+                f"[WARN] setWindowTitle unavailable ({exc}); "
+                "using in-viewport DecorativeText HUD only"
+            )
 
 
 def _try_enable_model_geometry(model, simbody_viz):
@@ -524,8 +542,8 @@ def _build_joint_hud_lines(model, state, last_known=None):
     lines = []
     filter_joints = get_display_filter_joints()
     for name in filter_joints:
+        degrees = _read_coord_value(model, state, name)
         coord_name = opensim_joint_catalog.coordinate_for(name)
-        degrees = _read_coord_value(model, state, coord_name)
         if not math.isfinite(degrees) and last_known is not None:
             cached = last_known.get(coord_name)
             if cached is not None and math.isfinite(cached):
@@ -589,12 +607,11 @@ def _render_joint_display_hud(model, viz, state, strategy, base_title=_HUD_BASE_
                 _hud_screen_text.setText(compact)
         except Exception as exc:
             print(f"[WARN] screen text HUD update failed: {exc}")
+        return
 
     display_text = f"{base_title} | {compact}"
-    try:
-        viz.setWindowTitle(display_text)
-    except Exception as exc:
-        print(f"[WARN] setWindowTitle failed: {exc}")
+    if text_changed:
+        _try_set_window_title(viz, display_text)
 
 
 def _write_test_joint_display_config(joints, seq):
@@ -1234,10 +1251,7 @@ def run_live():
     ikSolver.setAccuracy(1e-4)
     default_coord_locks = _capture_coordinate_locks(model.getCoordinateSet(), state)
 
-    try:
-        viz.setWindowTitle("Connect OpenSim - RedPitaya 8-IMU")
-    except Exception:
-        pass
+    _try_set_window_title(viz, _HUD_BASE_TITLE)
     viz.setShowSimTime(True)
     hud_strategy = _pick_hud_strategy(viz)
     coord_set = model.getCoordinateSet()
@@ -1414,7 +1428,6 @@ def run_live():
                     f"{joint_name}={angle_text} deg"
                 )
 
-            _update_simbody_angle_display(viz, joint_label, angle_deg)
             _send_angle_feedback(t_imu, joint_index, angle_deg)
 
             if math.isfinite(angle_deg):
@@ -1443,6 +1456,12 @@ def run_live():
                 avg_convert = sum(convert_times) / len(convert_times) * 1000.0 if convert_times else 0.0
                 warn = f"  <-- SLOW (>{target_frame_ms:.1f}ms)!" if avg_frame > target_frame_ms else ""
                 print(f"[PERF] avg frame={avg_frame:.1f}ms  avg convert={avg_convert:.1f}ms  target={target_frame_ms:.1f}ms{warn}")
+                knee_deg = _read_coord_value(model, state, "knee_angle_r")
+                knee_text = f"{knee_deg:.2f}" if math.isfinite(knee_deg) else "nan"
+                print(
+                    f"[HUD-DIAG] t={state.getTime():.2f}s knee_angle_r={knee_text} deg "
+                    f"filter={get_display_filter_joints()} sensors={active_sensors}"
+                )
                 frame_times.clear()
                 convert_times.clear()
                 t_last_perf_print = now_perf

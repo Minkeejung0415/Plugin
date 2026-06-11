@@ -269,7 +269,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         jointDisplayTitle->setBounds (col5, 28, 130, 12);
         addAndMakeVisible (jointDisplayTitle.get());
 
-        const int toggleW = 62;
+        const int toggleW = 70;
         const int toggleH = 18;
         const int toggleGap = 4;
         const int toggleCols = 2;
