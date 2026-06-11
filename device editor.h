@@ -45,8 +45,7 @@ class DeviceEditor : public VisualizerEditor,
                      public ComboBox::Listener,
                      public Button::Listener,
                      public PopupChannelSelector::Listener,
-                     public Label::Listener,
-                     public Timer
+                     public Label::Listener
 
 {
 public:
@@ -104,8 +103,6 @@ public:
     }
 
     void labelTextChanged (Label* labelThatHasChanged) override;
-
-    void timerCallback() override;
 
     void paint (Graphics& g) override;
 
@@ -197,8 +194,6 @@ private:
 
     std::unique_ptr<Label>    displayJointTitle;
     std::unique_ptr<ComboBox> displayJointCombo;
-    std::unique_ptr<Label>    liveAngleTitle;
-    std::unique_ptr<Label>    liveAngleLabel;
 
     enum AudioChannel
     {

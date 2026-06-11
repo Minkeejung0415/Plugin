@@ -47,7 +47,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
                             AcquisitionBoard* board_)
     : VisualizerEditor (parentNode,
                         "Acq Board",
-                        (board_ != nullptr && board_->getBoardType() == AcquisitionBoard::BoardType::RedPitaya) ? 560 : 340),
+                        (board_ != nullptr && board_->getBoardType() == AcquisitionBoard::BoardType::RedPitaya) ? 800 : 340),
       board (board_),
       activeAudioChannel (LEFT)
 {
@@ -93,6 +93,8 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     const int col2 = xOffset + 135;
     const int col3 = xOffset + 275;
     const int col4 = xOffset + 420;
+    const int col5 = xOffset + 555;
+    const int col6 = xOffset + 690;
     const int midCol = isRedPitaya ? col3 : (xOffset + 155);
 
     // add headstage-specific controls (currently just a toggle button)
@@ -130,34 +132,6 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     sampleRateLabel->setTooltip (isRedPitaya ? "Hardware tick rate 1–2000 Hz (per-sensor SRATE decimates from this)"
                                              : "Set streaming frequency (100 - 2000 Hz)");
     addAndMakeVisible (sampleRateLabel.get());
-
-    if (isRedPitaya)
-    {
-        nodeHostTitle = std::make_unique<Label> ("nodeHostTitle", "Node IP");
-        nodeHostTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
-        nodeHostTitle->setBounds (col4, 108, 110, 12);
-        addAndMakeVisible (nodeHostTitle.get());
-
-        nodeHostLabel = std::make_unique<Label> ("nodeHostLabel", "");
-        nodeHostLabel->setEditable (true);
-        nodeHostLabel->setColour (Label::backgroundColourId, Colours::black);
-        nodeHostLabel->setColour (Label::textColourId, Colours::white);
-        nodeHostLabel->setBounds (col4, 122, 118, 20);
-        nodeHostLabel->addListener (this);
-        nodeHostLabel->setTooltip ("ESP32-S3 IP or hostname (or set ESP32_NODE_HOST env). Red Pitaya uses rp-*.local.");
-        addAndMakeVisible (nodeHostLabel.get());
-
-        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
-        {
-            const String envHost = String (std::getenv ("ESP32_NODE_HOST") != nullptr
-                                               ? std::getenv ("ESP32_NODE_HOST")
-                                               : "");
-            const String initial = rp->getNodeHost().isNotEmpty() ? rp->getNodeHost() : envHost.trim();
-            nodeHostLabel->setText (initial, dontSendNotification);
-            if (initial.isNotEmpty())
-                rp->setNodeHost (initial);
-        }
-    }
 
     filterTitle = std::make_unique<Label> ("filterTitle", "Filter");
     filterTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
@@ -290,49 +264,23 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
 
-        displayJointTitle = std::make_unique<Label> ("displayJointTitle", "Display Joint");
-        displayJointTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        displayJointTitle->setBounds (col3, 145, 110, 12);
-        addAndMakeVisible (displayJointTitle.get());
-
-        displayJointCombo = std::make_unique<ComboBox> ("displayJoint");
-        displayJointCombo->setBounds (col3, 158, comboW, 20);
-        displayJointCombo->addListener (this);
-        for (int i = 0; i < AcqBoardRedPitaya::NUM_DISPLAY_JOINTS; ++i)
-            displayJointCombo->addItem (AcqBoardRedPitaya::getDisplayJointLabel (i), i + 1);
-        displayJointCombo->setSelectedId (2, dontSendNotification);  // Right Knee
-        displayJointCombo->setTooltip ("Joint whose angle is drawn on the OpenSim 3D viewer.");
-        addAndMakeVisible (displayJointCombo.get());
-
-        liveAngleTitle = std::make_unique<Label> ("liveAngleTitle", "Angle (deg)");
-        liveAngleTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        liveAngleTitle->setBounds (col4, 145, 110, 12);
-        addAndMakeVisible (liveAngleTitle.get());
-
-        liveAngleLabel = std::make_unique<Label> ("liveAngleLabel", "--");
-        liveAngleLabel->setColour (Label::backgroundColourId, Colours::darkgrey);
-        liveAngleLabel->setColour (Label::textColourId, Colours::white);
-        liveAngleLabel->setBounds (col4, 158, comboW, 20);
-        liveAngleLabel->setJustificationType (Justification::centred);
-        addAndMakeVisible (liveAngleLabel.get());
-
-        setSize (getWidth(), 220);
-
         jointDisplayTitle = std::make_unique<Label> ("jointDisplayTitle", "Joint HUD (max 6)");
         jointDisplayTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        jointDisplayTitle->setBounds (col1, 145, 200, 12);
+        jointDisplayTitle->setBounds (col5, 28, 125, 12);
         addAndMakeVisible (jointDisplayTitle.get());
 
-        const int toggleY = 160;
-        const int toggleW = 74;
-        const int toggleH = 18;
+        const int toggleW = 31;
+        const int toggleH = 16;
+        const int toggleGap = 2;
+        const int toggleRow1Y = 42;
+        const int toggleRow2Y = 60;
 
         for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
         {
             const int col = i % 4;
             const int row = i / 4;
-            const int tx = col1 + col * (toggleW + 4);
-            const int ty = toggleY + row * (toggleH + 4);
+            const int tx = col5 + col * (toggleW + toggleGap);
+            const int ty = row == 0 ? toggleRow1Y : toggleRow2Y;
 
             jointDisplayToggles[(size_t) i] = std::make_unique<ToggleButton> (kOpenSimJointCatalog[i].abbrev);
             jointDisplayToggles[(size_t) i]->setComponentID (String (i));
@@ -340,6 +288,47 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
             jointDisplayToggles[(size_t) i]->addListener (this);
             addAndMakeVisible (jointDisplayToggles[(size_t) i].get());
         }
+
+        nodeHostTitle = std::make_unique<Label> ("nodeHostTitle", "Node IP");
+        nodeHostTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
+        nodeHostTitle->setBounds (col6, 28, 110, 12);
+        addAndMakeVisible (nodeHostTitle.get());
+
+        nodeHostLabel = std::make_unique<Label> ("nodeHostLabel", "");
+        nodeHostLabel->setEditable (true);
+        nodeHostLabel->setColour (Label::backgroundColourId, Colours::black);
+        nodeHostLabel->setColour (Label::textColourId, Colours::white);
+        nodeHostLabel->setBounds (col6, 42, comboW, 20);
+        nodeHostLabel->addListener (this);
+        nodeHostLabel->setTooltip ("ESP32-S3 IP or hostname (or set ESP32_NODE_HOST env). Red Pitaya uses rp-*.local.");
+        addAndMakeVisible (nodeHostLabel.get());
+
+        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+        {
+            const String envHost = String (std::getenv ("ESP32_NODE_HOST") != nullptr
+                                               ? std::getenv ("ESP32_NODE_HOST")
+                                               : "");
+            const String initial = rp->getNodeHost().isNotEmpty() ? rp->getNodeHost() : envHost.trim();
+            nodeHostLabel->setText (initial, dontSendNotification);
+            if (initial.isNotEmpty())
+                rp->setNodeHost (initial);
+        }
+
+        displayJointTitle = std::make_unique<Label> ("displayJointTitle", "Display Joint");
+        displayJointTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        displayJointTitle->setBounds (col6, 68, 110, 12);
+        addAndMakeVisible (displayJointTitle.get());
+
+        displayJointCombo = std::make_unique<ComboBox> ("displayJoint");
+        displayJointCombo->setBounds (col6, 82, comboW, 20);
+        displayJointCombo->addListener (this);
+        for (int i = 0; i < AcqBoardRedPitaya::NUM_DISPLAY_JOINTS; ++i)
+            displayJointCombo->addItem (AcqBoardRedPitaya::getDisplayJointLabel (i), i + 1);
+        displayJointCombo->setSelectedId (2, dontSendNotification);  // Right Knee
+        displayJointCombo->setTooltip ("Joint whose angle is drawn on the OpenSim 3D viewer.");
+        addAndMakeVisible (displayJointCombo.get());
+
+        setSize (getWidth(), 185);
 
         if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
         {
@@ -562,14 +551,18 @@ void DeviceEditor::paint (Graphics& g)
         const int c2 = 135;
         const int c3 = 275;
         const int c4 = 420;
+        const int c5 = 555;
+        const int c6 = 690;
 
         g.drawText ("Col 1", c1, top, 110, 14, Justification::left, false);
         g.drawText ("Col 2", c2, top, 120, 14, Justification::left, false);
         g.drawText ("Col 3", c3, top, 120, 14, Justification::left, false);
         g.drawText ("Col 4", c4, top, 120, 14, Justification::left, false);
+        g.drawText ("Col 5", c5, top, 120, 14, Justification::left, false);
+        g.drawText ("Col 6", c6, top, 110, 14, Justification::left, false);
 
         g.setColour (findColour (ThemeColours::defaultText).withAlpha (0.25f));
-        for (int divX : { 135, 275, 410 })
+        for (int divX : { 135, 275, 410, 545, 680 })
             g.fillRect (divX, top, 1, h);
     }
 }
@@ -1016,7 +1009,6 @@ void DeviceEditor::buttonClicked (Button* button)
             auto* rp = static_cast<AcqBoardRedPitaya*> (board);
             syncOpenSimDisplayJointToBoard();
             rp->launchOpenSimLive();
-            startTimerHz (10);
             CoreServices::sendStatusMessage ("OpenSim Live started — joint angles shown on OpenSim viewer");
         }
     }
@@ -1151,10 +1143,10 @@ void DeviceEditor::startAcquisition()
             displayJointTitle->toFront (false);
         if (displayJointCombo != nullptr)
             displayJointCombo->toFront (false);
-        if (liveAngleTitle != nullptr)
-            liveAngleTitle->toFront (false);
-        if (liveAngleLabel != nullptr)
-            liveAngleLabel->toFront (false);
+        if (nodeHostTitle != nullptr)
+            nodeHostTitle->toFront (false);
+        if (nodeHostLabel != nullptr)
+            nodeHostLabel->toFront (false);
         if (jointDisplayTitle != nullptr)
             jointDisplayTitle->toFront (false);
 
@@ -1211,7 +1203,6 @@ void DeviceEditor::stopAcquisition()
         memoryUsage->stopAcquisition();
 
     acquisitionIsActive = false;
-    stopTimer();
 }
 
 void DeviceEditor::syncOpenSimDisplayJointToBoard()
@@ -1223,21 +1214,6 @@ void DeviceEditor::syncOpenSimDisplayJointToBoard()
 
     if (displayJointCombo != nullptr)
         rp->setDisplayJointIndex (displayJointCombo->getSelectedId() - 1);
-}
-
-void DeviceEditor::timerCallback()
-{
-    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
-        return;
-
-    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
-    float angle = 0.0f;
-
-    if (! rp->getLiveDisplayAngle (angle))
-        return;
-
-    if (liveAngleLabel != nullptr)
-        liveAngleLabel->setText (String (angle, 1), dontSendNotification);
 }
 
 // --- ADD THIS METHOD TO HANDLE YOUR NEW TEXT BOX ---
