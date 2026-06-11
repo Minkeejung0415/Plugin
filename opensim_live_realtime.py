@@ -88,6 +88,11 @@ STATIC_ACCEL_EPS = 0.03
 STATIC_CHANGE_EPS = 0.02
 STATIC_COORD_EPS_DEG = 0.25
 REAL_SOURCE_LABELS   = ("real", "real_redpitaya", "redpitaya", "rp")
+CALIB_COUNTDOWN_S = int(os.environ.get("OPENSIM_CALIB_COUNTDOWN", "3"))
+CALIB_STABLE_FRAMES = int(os.environ.get("OPENSIM_CALIB_FRAMES", "25"))
+CALIB_QUAT_STABLE_EPS = float(os.environ.get("OPENSIM_CALIB_QUAT_EPS", "0.015"))
+CALIB_TIMEOUT_S = float(os.environ.get("OPENSIM_CALIB_TIMEOUT", "30.0"))
+OPENSIM_SKIP_CALIB = os.environ.get("OPENSIM_SKIP_CALIB", "0") == "1"
 
 SENSORS = [
     "torso_imu",
@@ -180,6 +185,123 @@ def _quat_mul(q1, q2):
         w1*y2 - x1*z2 + y1*w2 + z1*x2,
         w1*z2 + x1*y2 - y1*x2 + z1*w2,
     ]
+
+
+def _quat_conj(q):
+    w, x, y, z = q
+    return [w, -x, -y, -z]
+
+
+def _quat_normalize(q):
+    w, x, y, z = q
+    n = math.sqrt(w * w + x * x + y * y + z * z)
+    if n < 1e-12:
+        return [1.0, 0.0, 0.0, 0.0]
+    return [w / n, x / n, y / n, z / n]
+
+
+def _quat_dot(q1, q2):
+    return sum(a * b for a, b in zip(_quat_normalize(q1), _quat_normalize(q2)))
+
+
+def _quat_distance(q1, q2):
+    return 1.0 - min(1.0, abs(_quat_dot(q1, q2)))
+
+
+def _apply_calib_offsets(quats, active_sensors, offsets):
+    if not offsets:
+        return list(quats)
+    corrected = []
+    for q, name in zip(quats, active_sensors):
+        q_neutral = offsets.get(name)
+        if q_neutral is None:
+            corrected.append(q)
+        else:
+            corrected.append(_quat_normalize(_quat_mul(_quat_conj(q_neutral), q)))
+    return corrected
+
+
+def _calib_frame_is_stable(active_static, prev_quats, quats):
+    if active_static:
+        return True
+    if prev_quats is None or quats is None or len(prev_quats) != len(quats):
+        return False
+    return all(
+        _quat_distance(q1, q2) <= CALIB_QUAT_STABLE_EPS
+        for q1, q2 in zip(prev_quats, quats)
+    )
+
+
+def _run_neutral_pose_calibration(model, viz, coord_set, state, hud_strategy, last_hud_angles, session_id):
+    """Capture per-sensor quaternions at neutral standing; session-only offsets."""
+    if OPENSIM_SKIP_CALIB:
+        print("[CALIB] Skipped (OPENSIM_SKIP_CALIB=1)")
+        return {}
+
+    print("[CALIB] Neutral pose calibration — hold standing still.")
+    for sec in range(CALIB_COUNTDOWN_S, 0, -1):
+        print(f"[CALIB] Hold still... {sec}")
+        t_end = time.time() + 1.0
+        while time.time() < t_end:
+            _render_joint_display_hud(
+                viz, coord_set, state, hud_strategy, last_known=last_hud_angles
+            )
+            model.getVisualizer().show(state)
+            time.sleep(0.05)
+
+    samples = {}
+    prev_quats = None
+    stable_count = 0
+    t_start = time.time()
+
+    while stable_count < CALIB_STABLE_FRAMES and time.time() - t_start < CALIB_TIMEOUT_S:
+        with _frame_lock:
+            if not _frame_queue:
+                time.sleep(0.01)
+                continue
+            (
+                _t_imu,
+                quats,
+                active_sensors,
+                sid,
+                _packet_wall,
+                active_static,
+                _gyro,
+                _change,
+            ) = _frame_queue[-1]
+
+        if sid != session_id:
+            print("[CALIB] Session changed during calibration — abort")
+            return {}
+
+        if not _calib_frame_is_stable(active_static, prev_quats, quats):
+            stable_count = 0
+            prev_quats = list(quats)
+            time.sleep(0.005)
+            continue
+
+        stable_count += 1
+        for q, name in zip(quats, active_sensors):
+            samples.setdefault(name, []).append(_quat_normalize(q))
+        prev_quats = list(quats)
+        time.sleep(0.005)
+
+    if not samples:
+        print("[CALIB] WARN: no stable frames captured; IK will use raw orientations")
+        return {}
+
+    if stable_count < CALIB_STABLE_FRAMES:
+        print(
+            f"[CALIB] WARN: only {stable_count}/{CALIB_STABLE_FRAMES} stable frames; "
+            "using best-effort capture"
+        )
+
+    offsets = {name: qs[-1] for name, qs in samples.items()}
+    print("[CALIB] Calibration complete — neutral pose set")
+    for name in sorted(offsets):
+        q = offsets[name]
+        print(f"[CALIB]   {name}: q=[{', '.join(f'{v:.4f}' for v in q)}]")
+    return offsets
 
 
 _Q_OPENSIM_FRAME = _qx(-math.pi / 2.0)
@@ -386,7 +508,7 @@ _HUD_SCREEN_SCALE = osim.Vec3(0.025, 0.025, 0.025)
 def _hud_screen_transform():
     """Normalized viewport coords; place joint block under Simbody sim-time readout."""
     xform = osim.Transform()
-    xform.setP(osim.Vec3(-0.92, 0.72, 0.0))
+    xform.setP(osim.Vec3(-0.92, 0.52, 0.0))
     return xform
 
 
@@ -1024,6 +1146,14 @@ def run_live():
         model.getVisualizer().show(state)
         time.sleep(0.05)
 
+    with _frame_lock:
+        _first = _frame_queue[-1]
+    _first_session = _first[3]
+    calib_offsets = _run_neutral_pose_calibration(
+        model, viz, coord_set, state, hud_strategy, last_hud_angles, _first_session
+    )
+    calibrated_session = _first_session
+
     print("[Connect OpenSim] Streaming started. Close the Simbody window to stop.")
 
     last_t = -1.0
@@ -1082,6 +1212,12 @@ def run_live():
                 mode = "tibia-only knee lock" if tibia_only else "full active-sensor IK"
                 print(f"[IK-MODE] {mode}")
 
+            if session_id != calibrated_session:
+                calib_offsets = _run_neutral_pose_calibration(
+                    model, viz, coord_set, state, hud_strategy, last_hud_angles, session_id
+                )
+                calibrated_session = session_id
+
             if t_imu <= last_t:
                 time.sleep(0.005)
                 continue
@@ -1099,11 +1235,16 @@ def run_live():
                 skipped_by_throttle = 0
 
             t_convert0 = time.perf_counter()
+            quats_cal = _apply_calib_offsets(quats, active_sensors, calib_offsets)
             if tibia_only:
-                ik_quats = quats
+                ik_quats = quats_cal
                 ik_sensors = active_sensors
             else:
-                ik_quats = quats if active_sensors == SENSORS else _merge_live_quats_with_neutral(quats, active_sensors)
+                ik_quats = (
+                    quats_cal
+                    if active_sensors == SENSORS
+                    else _merge_live_quats_with_neutral(quats_cal, active_sensors)
+                )
                 ik_sensors = SENSORS
             rot_table = _quats_to_rot_table(0.0, ik_quats, ik_sensors)
             convert_times.append(time.perf_counter() - t_convert0)
