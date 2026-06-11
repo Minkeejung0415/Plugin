@@ -68,8 +68,8 @@ try:
 except Exception:
     pass
 
-MODEL_PATH = r"C:\Users\justi\Documents\Plugin\Rajagopal2015_opensense_calibrated.osim"
-WORK_DIR = r"C:\Users\justi\Documents\Plugin"
+MODEL_PATH = r"C:\Users\justi\Open-Sim--Bio-Mech\Rajagopal2015_opensense_calibrated.osim"
+WORK_DIR = r"C:\Users\justi\Open-Sim--Bio-Mech"
 UDP_IP = "0.0.0.0"
 UDP_PORT = 5000
 SAMPLE_RATE = 1000.0
@@ -944,14 +944,11 @@ def run_live():
             os.remove(_p)
             print(f"[CLEANUP] Deleted stale file: {_stale}")
     print("[Connect OpenSim] Loading model ...")
+    if not os.path.isfile(MODEL_PATH):
+        print(f"[ERROR] Model file not found: {MODEL_PATH}")
+        return
     model = osim.Model(MODEL_PATH)
     model.setUseVisualizer(True)
-    try:
-        model.getVisualizer().setShowGeometry(True)
-        model.getVisualizer().setShowMarkers(True)
-        print("[VIZ] Model geometry + markers enabled.")
-    except Exception as exc:
-        print(f"[VIZ] Could not force geometry on (use Show menu): {exc}")
 
     neutral_sto = os.path.join(WORK_DIR, "_neutral_frame.sto")
     _write_quat_sto(neutral_sto, 0.0, _NEUTRAL_QUATS_OPENSIM)
@@ -963,6 +960,12 @@ def run_live():
 
     print("[Connect OpenSim] Initialising IK solver ...")
     state = model.initSystem()
+    try:
+        model.getVisualizer().setShowGeometry(True)
+        model.getVisualizer().setShowMarkers(True)
+        print("[VIZ] Model geometry + markers enabled.")
+    except Exception as exc:
+        print(f"[VIZ] Could not force geometry on (use Show menu): {exc}")
     oRefs = osim.OrientationsReference(neutral_rt)
     ikSolver = osim.InverseKinematicsSolver(model, mRefs, oRefs, coordRefs, CONSTRAINT)
     ikSolver.setAccuracy(1e-4)

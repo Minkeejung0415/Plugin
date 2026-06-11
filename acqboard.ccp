@@ -20,7 +20,7 @@ namespace
     // active + editor Node IP + ESP32_NODE_HOST + both rp-*.local (deduped)
     constexpr int kMaxHostsToTry = kNumRedPitayaHosts + 4;
 
-    const char* kOpenSimWorkDir = "C:\\Users\\justi\\Documents\\Plugin";
+    const char* kOpenSimWorkDir = "C:\\Users\\justi\\Open-Sim--Bio-Mech";
 
     const char* kEsp32RecordDir = "C:\\Users\\justi\\Documents\\Arduino\\ESP32-S3-1\\results";
 
