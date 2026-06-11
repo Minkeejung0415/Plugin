@@ -369,9 +369,28 @@ def _load_display_joint(reload=False):
     return _display_joint_cache
 
 
-def _read_coord_value(coord_set, state, joint_name):
+def _read_coord_value(model, state, joint_name):
+    """Read IK coordinate value in degrees; resolves HUD abbrevs to model names."""
+    coord_name = opensim_joint_catalog.coordinate_for(joint_name)
     try:
-        return float(np.degrees(coord_set.get(joint_name).getValue(state)))
+        model.realizePosition(state)
+    except Exception:
+        pass
+
+    coord_set = model.getCoordinateSet()
+    coord = None
+    try:
+        coord = coord_set.get(coord_name)
+    except Exception:
+        for i in range(coord_set.getSize()):
+            candidate = coord_set.get(i)
+            if candidate.getName() == coord_name:
+                coord = candidate
+                break
+    if coord is None:
+        return float("nan")
+    try:
+        return float(math.degrees(coord.getValue(state)))
     except Exception:
         return float("nan")
 
@@ -479,9 +498,12 @@ def _joint_display_watcher_thread():
 def get_display_filter_joints():
     with _display_filter_lock:
         joints = list(_display_filter_joints)
-        if not joints:
-            return [opensim_joint_catalog.DEFAULT_DISPLAY_JOINT]
-        return joints
+    if not joints:
+        joints = [opensim_joint_catalog.DEFAULT_DISPLAY_JOINT]
+    default = opensim_joint_catalog.DEFAULT_DISPLAY_JOINT
+    if default not in joints:
+        joints = opensim_joint_catalog.validate_joints([default] + joints)
+    return joints
 
 
 _HUD_BASE_TITLE = "Connect OpenSim - RedPitaya 8-IMU"
@@ -498,22 +520,23 @@ def _hud_screen_transform():
     return xform
 
 
-def _build_joint_hud_lines(coord_set, state, last_known=None):
+def _build_joint_hud_lines(model, state, last_known=None):
     lines = []
     filter_joints = get_display_filter_joints()
     for name in filter_joints:
-        degrees = _read_coord_value(coord_set, state, name)
+        coord_name = opensim_joint_catalog.coordinate_for(name)
+        degrees = _read_coord_value(model, state, coord_name)
         if not math.isfinite(degrees) and last_known is not None:
-            cached = last_known.get(name)
+            cached = last_known.get(coord_name)
             if cached is not None and math.isfinite(cached):
                 degrees = cached
-        abbrev = opensim_joint_catalog.abbrev_for(name)
+        abbrev = opensim_joint_catalog.abbrev_for(coord_name)
         if not math.isfinite(degrees):
             lines.append(f"{abbrev}: --.--°")
             continue
         lines.append(opensim_joint_catalog.format_angle_line(abbrev, degrees))
         if last_known is not None:
-            last_known[name] = degrees
+            last_known[coord_name] = degrees
     return lines
 
 
@@ -550,20 +573,20 @@ def _pick_hud_strategy(viz):
     return "window_title"
 
 
-def _render_joint_display_hud(viz, coord_set, state, strategy, base_title=_HUD_BASE_TITLE, last_known=None):
+def _render_joint_display_hud(model, viz, state, strategy, base_title=_HUD_BASE_TITLE, last_known=None):
     global _last_hud_text
-    lines = _build_joint_hud_lines(coord_set, state, last_known)
+    lines = _build_joint_hud_lines(model, state, last_known)
     if not lines:
         return
 
     compact = " | ".join(lines)
-    if compact == _last_hud_text:
-        return
+    text_changed = compact != _last_hud_text
     _last_hud_text = compact
 
     if strategy == "screen_text" and _hud_screen_text is not None:
         try:
-            _hud_screen_text.setText(compact)
+            if text_changed:
+                _hud_screen_text.setText(compact)
         except Exception as exc:
             print(f"[WARN] screen text HUD update failed: {exc}")
 
@@ -1236,7 +1259,7 @@ def run_live():
 
     print("[Connect OpenSim] Assembling neutral pose ...")
     ikSolver.assemble(state)
-    _render_joint_display_hud(viz, coord_set, state, hud_strategy, last_known=last_hud_angles)
+    _render_joint_display_hud(model, viz, state, hud_strategy, last_known=last_hud_angles)
     model.getVisualizer().show(state)
     print("[Connect OpenSim] Neutral pose assembled. Waiting for IMU stream ...")
 
@@ -1256,7 +1279,7 @@ def run_live():
             print("[Connect OpenSim] Timeout - no UDP frames received. Exiting.")
             _udp_running = False
             return
-        _render_joint_display_hud(viz, coord_set, state, hud_strategy, last_known=last_hud_angles)
+        _render_joint_display_hud(model, viz, state, hud_strategy, last_known=last_hud_angles)
         model.getVisualizer().show(state)
         time.sleep(0.05)
 
@@ -1303,7 +1326,7 @@ def run_live():
                         print("  Model is frozen. Reconnect the sensor stream to resume.")
                         last_age_print = now_age
                 _render_joint_display_hud(
-                    viz, coord_set, state, hud_strategy, last_known=last_hud_angles
+                    model, viz, state, hud_strategy, last_known=last_hud_angles
                 )
                 model.getVisualizer().show(state)
                 time.sleep(0.005)
@@ -1382,7 +1405,7 @@ def run_live():
             joint_name = display_joint["joint"]
             joint_label = display_joint["label"]
             joint_index = display_joint["joint_index"]
-            angle_deg = _read_coord_value(coord_set, state, joint_name)
+            angle_deg = _read_coord_value(model, state, joint_name)
 
             if live_frame <= 5 or live_frame % 60 == 0:
                 angle_text = f"{angle_deg:.2f}" if math.isfinite(angle_deg) else "nan"
@@ -1406,7 +1429,7 @@ def run_live():
                 last_coord_values = angle_deg
 
             _render_joint_display_hud(
-                viz, coord_set, state, hud_strategy, last_known=last_hud_angles
+                model, viz, state, hud_strategy, last_known=last_hud_angles
             )
 
             if live_frame <= 5 or live_frame % 1000 == 0:

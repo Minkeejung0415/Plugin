@@ -18,26 +18,33 @@ JOINT_CATALOG = [
 
 _CATALOG_BY_COORD = {entry["coordinate"]: entry for entry in JOINT_CATALOG}
 _CATALOG_ORDER = [entry["coordinate"] for entry in JOINT_CATALOG]
+_ABBREV_TO_COORD = {entry["abbrev"]: entry["coordinate"] for entry in JOINT_CATALOG}
 
 
 def abbrev_for(coordinate: str) -> str:
-    entry = _CATALOG_BY_COORD.get(coordinate)
+    entry = _CATALOG_BY_COORD.get(coordinate_for(coordinate))
     if entry is None:
         return coordinate
     return entry["abbrev"]
+
+
+def coordinate_for(name: str) -> str:
+    """Map HUD abbrev or coordinate string to OpenSim coordinate name."""
+    if name in _CATALOG_BY_COORD:
+        return name
+    return _ABBREV_TO_COORD.get(name, name)
 
 
 def validate_joints(joints):
     """Return catalog-known coordinates in catalog order, at most MAX_DISPLAY_JOINTS."""
     if not joints:
         return []
-    requested = []
     seen = set()
     for name in joints:
-        if name not in _CATALOG_BY_COORD or name in seen:
+        coord = coordinate_for(name)
+        if coord not in _CATALOG_BY_COORD or coord in seen:
             continue
-        seen.add(name)
-        requested.append(name)
+        seen.add(coord)
     ordered = [name for name in _CATALOG_ORDER if name in seen]
     return ordered[:MAX_DISPLAY_JOINTS]
 
