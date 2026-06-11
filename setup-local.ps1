@@ -472,6 +472,18 @@ foreach ($f in $workFiles) {
     if (Test-Path $src) { Copy-Item -Force $src (Join-Path $script:WorkDir $f) }
 }
 
+$geomDst = Join-Path $script:WorkDir 'Geometry'
+$geomSrc = Join-Path $script:OpenSimDir 'Geometry'
+if (-not (Test-Path (Join-Path $geomDst 'femur_r.vtp')) -and (Test-Path $geomSrc)) {
+    New-Item -ItemType Directory -Force -Path $geomDst | Out-Null
+    Copy-Item -Path (Join-Path $geomSrc '*') -Destination $geomDst -Recurse -Force
+    Write-Ok "Rajagopal meshes copied from $geomSrc to $geomDst"
+} elseif (Test-Path (Join-Path $geomDst 'femur_r.vtp')) {
+    Write-Ok "Geometry folder already present in work dir"
+} else {
+    Write-Warn "Geometry missing; copy from OpenSim install: $geomSrc"
+}
+
 foreach ($py in @('opensim_live_realtime.py', 'ephys_to_opensim_bridge.py')) {
     Patch-OpenSimPython (Join-Path $script:WorkDir $py) $script:WorkDir $script:OpenSimDir
 }

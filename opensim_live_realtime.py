@@ -61,7 +61,6 @@ JOINT_DISPLAY_CONFIG = "opensim_joint_display_config.json"
 _sensor_map_cache = None
 _display_joint_cache = None
 _display_joint_mtime = None
-_simbody_hud_line = "Select a joint in the plugin"
 
 try:
     osim.Logger.setLevelString("Warn")
@@ -296,46 +295,37 @@ def _format_angle_hud(joint_label, angle_deg):
     return f"{joint_label}: {angle_deg:.1f} deg"
 
 
-def _attach_simbody_angle_hud(viz):
-    global _simbody_hud_line
-
-    class _AngleHudGenerator(osim.DecorationGenerator):
-        def generateDecorations(self, state, geometry):
-            try:
-                text = osim.DecorativeText(_simbody_hud_line)
-                text.setIsScreenText(True)
-                try:
-                    text.setScale(2.5)
-                except Exception:
-                    pass
-                try:
-                    text.setColor(osim.Green)
-                except Exception:
-                    pass
-                try:
-                    text.setLocation(osim.Vec3(-0.95, 0.90, 0))
-                except Exception:
-                    pass
-                geometry.append(text)
-            except Exception:
-                pass
-
-    try:
-        viz.addDecorationGenerator(_AngleHudGenerator())
-        print("[HUD] Simbody on-screen joint angle text enabled.")
-        return True
-    except Exception as exc:
-        print(f"[HUD] Simbody screen text unavailable, using window title only: {exc}")
-        return False
-
-
 def _update_simbody_angle_display(viz, joint_label, angle_deg):
-    global _simbody_hud_line
-    _simbody_hud_line = _format_angle_hud(joint_label, angle_deg)
     try:
-        viz.setWindowTitle(f"OpenSim Live | {_simbody_hud_line}")
+        viz.setWindowTitle(f"OpenSim Live | {_format_angle_hud(joint_label, angle_deg)}")
     except Exception:
         pass
+
+
+def _try_enable_model_geometry(model, simbody_viz):
+    """Enable mesh display where OpenSim 4.5 Python bindings expose an API."""
+    model_viz = model.getVisualizer()
+    enabled = False
+    for target, method, value in (
+        (model_viz, "setShowGeometry", True),
+        (model_viz, "setShowMarkers", True),
+        (simbody_viz, "setShowFrameGeometry", False),
+        (simbody_viz, "setShowWrapGeometry", False),
+    ):
+        if not hasattr(target, method):
+            continue
+        try:
+            getattr(target, method)(value)
+            if "Geometry" in method or method == "setShowMarkers":
+                enabled = True
+        except Exception:
+            pass
+    if enabled:
+        print("[VIZ] Model geometry + markers enabled.")
+    else:
+        print("[VIZ] Geometry API unavailable on this OpenSim build; meshes load from Geometry/ if present.")
+
+
 def _read_joint_display_config():
     path = os.path.join(WORK_DIR, JOINT_DISPLAY_CONFIG)
     if not os.path.isfile(path):
@@ -960,24 +950,18 @@ def run_live():
 
     print("[Connect OpenSim] Initialising IK solver ...")
     state = model.initSystem()
-    try:
-        model.getVisualizer().setShowGeometry(True)
-        model.getVisualizer().setShowMarkers(True)
-        print("[VIZ] Model geometry + markers enabled.")
-    except Exception as exc:
-        print(f"[VIZ] Could not force geometry on (use Show menu): {exc}")
+    viz = model.updVisualizer().updSimbodyVisualizer()
+    _try_enable_model_geometry(model, viz)
     oRefs = osim.OrientationsReference(neutral_rt)
     ikSolver = osim.InverseKinematicsSolver(model, mRefs, oRefs, coordRefs, CONSTRAINT)
     ikSolver.setAccuracy(1e-4)
     default_coord_locks = _capture_coordinate_locks(model.getCoordinateSet(), state)
 
-    viz = model.updVisualizer().updSimbodyVisualizer()
     try:
         viz.setWindowTitle("Connect OpenSim - RedPitaya 8-IMU")
     except Exception:
         pass
     viz.setShowSimTime(True)
-    _attach_simbody_angle_hud(viz)
     display_joint = _load_display_joint()
     print(f"[HUD] Display joint: {display_joint['label']} ({display_joint['joint']})")
     hud_strategy = _pick_hud_strategy(viz)
