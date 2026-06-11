@@ -378,80 +378,98 @@ def get_display_filter_joints():
 
 _HUD_BASE_TITLE = "Connect OpenSim - RedPitaya 8-IMU"
 _last_hud_text = None
-_overlay_callable = None
+_hud_screen_text = None
+_HUD_SCREEN_COLOR = osim.Vec3(1.0, 0.55, 0.0)
+_HUD_SCREEN_SCALE = osim.Vec3(0.025, 0.025, 0.025)
+
+
+def _hud_screen_transform():
+    """Normalized viewport coords; place joint block under Simbody sim-time readout."""
+    xform = osim.Transform()
+    xform.setP(osim.Vec3(-0.92, 0.72, 0.0))
+    return xform
+
+
+def _build_joint_hud_lines(coord_set, state, last_known=None):
+    lines = []
+    filter_joints = get_display_filter_joints()
+    for name in filter_joints:
+        degrees = None
+        try:
+            raw = float(np.degrees(coord_set.get(name).getValue(state)))
+            if math.isfinite(raw):
+                degrees = raw
+        except Exception:
+            print(f"[WARN] unknown coordinate {name}")
+        if degrees is None and last_known is not None:
+            degrees = last_known.get(name)
+        abbrev = opensim_joint_catalog.abbrev_for(name)
+        if degrees is None or not math.isfinite(degrees):
+            lines.append(f"{abbrev}: --.-°")
+        else:
+            lines.append(opensim_joint_catalog.format_angle_line(abbrev, degrees))
+            if last_known is not None:
+                last_known[name] = degrees
+    return lines
+
+
+def _init_screen_text_hud(viz):
+    global _hud_screen_text
+    xform = _hud_screen_transform()
+    text = osim.DecorativeText("knee_r: --.-°")
+    text.setIsScreenText(True)
+    text.setColor(_HUD_SCREEN_COLOR)
+    text.setScaleFactors(_HUD_SCREEN_SCALE)
+    text.setTransform(xform)
+    decor_idx = viz.addDecoration(0, xform, text)
+    _hud_screen_text = text
+    print(f"[JOINT-DISPLAY] in-viewport screen text enabled (decoration idx={decor_idx})")
+    return True
 
 
 def _pick_hud_strategy(viz):
-    global _overlay_callable
-    methods = [m for m in dir(viz) if not m.startswith("_")]
+    methods = sorted(m for m in dir(viz) if not m.startswith("_"))
     text_related = sorted(
         m for m in methods
-        if any(token in m.lower() for token in ("text", "status", "label", "title", "caption"))
+        if any(token in m.lower() for token in ("text", "status", "label", "title", "caption", "decor"))
     )
     print(f"[JOINT-DISPLAY-SPIKE] SimbodyVisualizer methods: {text_related}")
-
-    overlay_candidates = [
-        ("setStatusLine", lambda text: viz.setStatusLine(text)),
-        ("setStatusText", lambda text: viz.setStatusText(text)),
-        ("setCaption", lambda text: viz.setCaption(text)),
-    ]
-    for name, caller in overlay_candidates:
-        if name not in methods:
-            continue
+    if "addDecoration" in methods:
         try:
-            caller("joint display spike")
-            _overlay_callable = caller
-            print(f"[JOINT-DISPLAY-SPIKE] overlay method works: {name}")
-            return "overlay"
+            _init_screen_text_hud(viz)
+            return "screen_text"
         except Exception as exc:
-            print(f"[JOINT-DISPLAY-SPIKE] {name} failed: {exc}")
-
-    print("[JOINT-DISPLAY-SPIKE] chosen strategy=window_title (overlay unavailable)")
+            print(f"[JOINT-DISPLAY-SPIKE] screen_text failed: {exc}")
+            global _hud_screen_text
+            _hud_screen_text = None
+    print("[JOINT-DISPLAY-SPIKE] chosen strategy=window_title (screen text unavailable)")
     return "window_title"
 
 
-def _render_joint_display_hud(viz, coord_set, state, strategy, base_title=_HUD_BASE_TITLE):
+def _render_joint_display_hud(viz, coord_set, state, strategy, base_title=_HUD_BASE_TITLE, last_known=None):
     global _last_hud_text
-    filter_joints = get_display_filter_joints()
-    lines = []
-    for name in filter_joints:
-        try:
-            degrees = float(np.degrees(coord_set.get(name).getValue(state)))
-        except Exception:
-            print(f"[WARN] unknown coordinate {name}")
-            continue
-        abbrev = opensim_joint_catalog.abbrev_for(name)
-        lines.append(opensim_joint_catalog.format_angle_line(abbrev, degrees))
-
+    lines = _build_joint_hud_lines(coord_set, state, last_known)
     if not lines:
         return
 
     hud_text = "\n".join(lines)
-    if strategy == "window_title":
-        compact = " | ".join(lines)
-        display_text = f"{base_title} | {compact}"
-        if display_text == _last_hud_text:
-            return
-        _last_hud_text = display_text
-        try:
-            viz.setWindowTitle(display_text)
-        except Exception as exc:
-            print(f"[WARN] setWindowTitle failed: {exc}")
-        return
-
     if hud_text == _last_hud_text:
         return
     _last_hud_text = hud_text
-    if _overlay_callable is not None:
+
+    if strategy == "screen_text" and _hud_screen_text is not None:
         try:
-            _overlay_callable(hud_text)
+            _hud_screen_text.setText(hud_text)
+            return
         except Exception as exc:
-            print(f"[WARN] overlay HUD failed, falling back to window title: {exc}")
-            compact = " | ".join(lines)
-            try:
-                viz.setWindowTitle(f"{base_title} | {compact}")
-            except Exception:
-                pass
+            print(f"[WARN] screen text HUD update failed: {exc}")
+
+    compact = " | ".join(lines)
+    display_text = f"{base_title} | {compact}"
+    try:
+        viz.setWindowTitle(display_text)
+    except Exception as exc:
+        print(f"[WARN] setWindowTitle failed: {exc}")
 
 
 def _write_test_joint_display_config(joints, seq):
@@ -962,12 +980,27 @@ def run_live():
     except Exception:
         pass
     viz.setShowSimTime(True)
+    hud_strategy = _pick_hud_strategy(viz)
+    coord_set = model.getCoordinateSet()
+    last_hud_angles = {}
+
+    startup_cfg = _read_joint_display_config()
+    if startup_cfg is not None:
+        seq, validated = startup_cfg
+        global _display_filter_joints, _display_filter_seq
+        with _display_filter_lock:
+            if seq > _display_filter_seq:
+                _display_filter_seq = seq
+                _display_filter_joints = list(validated)
+                print(f"[JOINT-DISPLAY] startup seq={seq} joints={validated}")
+
     display_joint = _load_display_joint()
     print(f"[HUD] Display joint: {display_joint['label']} ({display_joint['joint']})")
-    hud_strategy = _pick_hud_strategy(viz)
+    print(f"[HUD] Filter joints: {get_display_filter_joints()} strategy={hud_strategy}")
 
     print("[Connect OpenSim] Assembling neutral pose ...")
     ikSolver.assemble(state)
+    _render_joint_display_hud(viz, coord_set, state, hud_strategy, last_known=last_hud_angles)
     model.getVisualizer().show(state)
     print("[Connect OpenSim] Neutral pose assembled. Waiting for IMU stream ...")
 
@@ -987,7 +1020,9 @@ def run_live():
             print("[Connect OpenSim] Timeout - no UDP frames received. Exiting.")
             _udp_running = False
             return
-        time.sleep(0.01)
+        _render_joint_display_hud(viz, coord_set, state, hud_strategy, last_known=last_hud_angles)
+        model.getVisualizer().show(state)
+        time.sleep(0.05)
 
     print("[Connect OpenSim] Streaming started. Close the Simbody window to stop.")
 
@@ -1005,7 +1040,6 @@ def run_live():
     t_last_solve = 0.0
     target_frame_s = 1.0 / LIVE_VISUALIZER_RATE
     target_frame_ms = target_frame_s * 1000.0
-    coord_set = model.getCoordinateSet()
 
     try:
         while True:
@@ -1029,6 +1063,10 @@ def run_live():
                         print("  Reason: LFP Viewer/Open Ephys stopped sending packets or disconnected.")
                         print("  Model is frozen. Reconnect the sensor stream to resume.")
                         last_age_print = now_age
+                _render_joint_display_hud(
+                    viz, coord_set, state, hud_strategy, last_known=last_hud_angles
+                )
+                model.getVisualizer().show(state)
                 time.sleep(0.005)
                 continue
 
@@ -1124,7 +1162,9 @@ def run_live():
                         )
                 last_coord_values = angle_deg
 
-            _render_joint_display_hud(viz, coord_set, state, hud_strategy)
+            _render_joint_display_hud(
+                viz, coord_set, state, hud_strategy, last_known=last_hud_angles
+            )
 
             if live_frame <= 5 or live_frame % 1000 == 0:
                 print(f"[VIZ] show frame={live_frame} t={state.getTime():.3f}s")
