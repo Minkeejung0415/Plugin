@@ -366,25 +366,25 @@ See Q5 block above. Returns `"udp_feedback"` on this build.
 | A2 | Copying the source-of-truth wholesale over the executed copy introduces no machine-specific regressions | Runtime State Inventory | Could overwrite a local-only tweak; mitigated by diffing first |
 | A3 | `setWindowTitle` cannot be salvaged via `SimTK.String(title)` wrapping | Q4(a) / Open Questions | If it CAN, a free in-viewport-adjacent readout returns; low effort to test |
 
-## Open Questions
+## Open Questions (RESOLVED in 06-01-PLAN.md)
 
-1. **Can `setWindowTitle` be revived by wrapping the arg?**
+1. **Can `setWindowTitle` be revived by wrapping the arg?** — RESOLVED (deferred to runtime test).
    - Known: method exists; plain `str` rejected; `_try_set_window_title` latches off.
    - Unclear: whether `viz.setWindowTitle(osim.String(title))` (if `osim.String`/`SimTK::String`
      is wrapped) passes the typemap.
-   - Recommendation: have the plan include a one-line probe attempt with a wrapped string; if it
-     works, window-title becomes a cheap secondary readout. Low risk, low effort. (Confidence the
-     plain-str path is dead: HIGH; that a wrapped-str path exists: LOW — verify at execution.)
+   - **Resolution:** Task 2 attempts `osim.String(title)` at runtime with clean fall-through to
+     `udp_feedback` if it is also rejected. Residual uncertainty is intentional and fully mitigated
+     by the fall-through (plain-str dead: HIGH; wrapped-str works: LOW — proven at execution).
 
-2. **Does the Open Ephys plugin consume UDP :5001 today?**
+2. **Does the Open Ephys plugin consume UDP :5001 today?** — RESOLVED (scoped out + UAT-covered).
    - Known: Python sends it every frame; docstring says plugin "optionally reads" it.
-   - Unclear: whether the plugin UI currently displays it (plugin C++ is out of this Python phase).
-   - Recommendation: verification step should confirm the operator can SEE the number change
-     somewhere (plugin UI or a console/log readout), since the viewport itself cannot show it.
+   - **Resolution:** plugin C++ is out of scope this phase (no rebuild). Task 4 UAT confirms the
+     operator can SEE the number change on the active readout surface (plugin UI or logged readout);
+     plugin-side rendering is flagged as a separate follow-up only if the UAT shows it is absent.
 
-3. **Copy-wholesale vs. surgical port for the two files?**
-   - Recommendation: diff first; default to overwriting the executed copy from source-of-truth, then
-     apply the fix once, then assert empty diff.
+3. **Copy-wholesale vs. surgical port for the two files?** — RESOLVED.
+   - **Resolution:** Task 3 overwrites the executed copy from source-of-truth, then asserts `fc /b`
+     empty — the copy-wholesale default recommended here.
 
 ## Environment Availability
 
