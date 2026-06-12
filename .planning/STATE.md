@@ -40,9 +40,28 @@ Live source is **ESP32-S3 (ICM-20948), not a physical Red Pitaya**, run via the 
 
 - Live OpenSim 4.5 + ESP32-via-RP-compat-gateway: trigger → HUD filter, IK continuity (DISP-04)
 - Plugin rebuild in Open Ephys GUI (C++ changes)
-- **Phase 6 operator flow (confirmed):** the operator launches ONLY the Open Ephys GUI; the acquisition-board plugin starts OpenSim Live itself. `AcqBoardRedPitaya::launchOpenSimLive()` (acqboard.ccp:1694) runs `kOpenSimWorkDir\opensim_live_realtime.py` = `C:\Users\justi\Open-Sim--Bio-Mech\opensim_live_realtime.py` — the executed copy that was fixed. UAT: turn on Open Ephys, click "OpenSim Live", move knee → live angle tracks the OpenSim-console `[HUD-DIAG]`/`[HUD-UPDATE]` value on the active readout; switching selected joint changes the label.
-  - **Launch-path verified safe:** only TWO copies of opensim_live_realtime.py exist (repo + Open-Sim--Bio-Mech), both at fixed SHA `c8ee2aca…`. No stale copy at the GUI launch dir (`Downloads\open-ephys-v1.0.2-windows\open-ephys\`). `launchOpenSimLive()` also copies the script from the GUI's CWD over the workdir copy (acqboard.ccp:1708-1712) — harmless here because (a) deployed DLL is Jun 11, copy-logic source is Jun 12 (likely not in the running binary), and (b) no source file exists at the GUI CWD to copy. If the plugin is ever REBUILT, ensure the GUI's working dir contains the fixed script (or none) so it cannot clobber the fix.
-  - **Residual gap (not fixed this phase):** whether the Open Ephys plugin UI actually *renders* the port-5001 angle packet is UNVERIFIED (plugin C++ untouched). If active strategy is `udp_feedback` and the plugin UI shows nothing, the `[HUD-UPDATE]` console line is ground-truth that the fix works; plugin-side rendering would be a separate follow-up.
+- **Phase 6 final approach — Live Angle readout IN the Open Ephys editor (option A).** In-viewport
+  text proven IMPOSSIBLE on this OpenSim 4.5 build (verified directly against the installed Python
+  bindings): no `DecorationGenerator` class to subclass, `updDecoration()` returns base
+  `DecorativeGeometry` without `setText`, `osim.String` absent so `setWindowTitle` is unusable, no
+  `removeDecoration`/`clearDecorations`. So the selected Display Joint's angle is surfaced in the
+  device editor (Col 6, "Live Angle") via the UDP-5001 feed the plugin already receives.
+  - **C++ change (commit 947185f):** `device editor.h/.cpp` add a `Live Angle` label + 10 Hz member
+    Timer that calls `pollOpenSimAngleFeedback()` (previously defined-but-never-called) then
+    `getLiveDisplayAngle()`. Joint-index spaces verified aligned (knee_angle_r = index 1 in both
+    C++ `kDisplayJointNames` and Python `JOINT_OPTIONS`). Overlay files copied to
+    `C:\Users\justi\dev\acquisition-board\Source\DeviceEditor.{cpp,h}`, built + INSTALLed to
+    `C:\Users\justi\dev\GUI\Build\Debug\plugins\acquisition-board.dll` (2,100,736 B, 2026-06-12 13:56).
+  - **CLONE MAP (corrected — earlier "only 2 copies" note was WRONG):** there are 3 git clones of
+    `github.com/Minkeejung0415/Plugin.git`: `Documents\Plugin` (canonical edit repo + .planning, HEAD
+    ahead with Phase 6), `C:\Users\justi\Plugin` (older, the runtime CWD the plugin copies the Python
+    from), `dev\Plugin` (oldest). Plus the VS build source `C:\Users\justi\dev\acquisition-board\Source`
+    (overlay target) and dev GUI `C:\Users\justi\dev\GUI\Build\Debug`. Fixed Python deployed to
+    `C:\Users\justi\Plugin`, `Open-Sim--Bio-Mech`, and `Documents\Plugin`.
+  - **PENDING LIVE TEST:** launch `C:\Users\justi\dev\GUI\Build\Debug\open-ephys.exe`, click OpenSim
+    Live, move knee → editor "Live Angle" updates ~10 Hz tracking console `[HUD-DIAG] knee_angle_r=`;
+    changing Display Joint dropdown changes the readout. Note: the editor readout works regardless of
+    which Python copy runs (old or new both send 5001).
 
 ## Decisions
 
