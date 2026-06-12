@@ -368,6 +368,26 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         displayJointCombo->setTooltip ("Joint whose angle is drawn on the OpenSim 3D viewer.");
         addAndMakeVisible (displayJointCombo.get());
 
+        // --- Col 6: live angle readout (UDP 5001 feedback from opensim_live_realtime.py) ---
+        // OpenSim 4.5's bindings can't draw live text in the 3D viewport, so the
+        // selected Display Joint's angle is surfaced here in the editor instead.
+        openSimAngleTitle = std::make_unique<Label> ("openSimAngleTitle", "Live Angle");
+        openSimAngleTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        openSimAngleTitle->setBounds (col6, 108, 110, 12);
+        addAndMakeVisible (openSimAngleTitle.get());
+
+        openSimAngleLabel = std::make_unique<Label> ("openSimAngleLabel", "--.- deg");
+        openSimAngleLabel->setBounds (col6, 122, comboW, 20);
+        openSimAngleLabel->setColour (Label::backgroundColourId, Colours::black);
+        openSimAngleLabel->setColour (Label::textColourId, Colours::orange);
+        openSimAngleLabel->setJustificationType (Justification::centred);
+        openSimAngleLabel->setTooltip ("Live angle of the selected Display Joint, streamed back "
+                                       "from OpenSim on UDP 5001. Updates ~10x/sec while streaming.");
+        addAndMakeVisible (openSimAngleLabel.get());
+
+        openSimAngleTimer.owner = this;
+        openSimAngleTimer.startTimer (100);   // ~10 Hz UI refresh
+
         setSize (getWidth(), 185);
 
         if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
@@ -1312,6 +1332,37 @@ void DeviceEditor::syncOpenSimDisplayJointToBoard()
 
     if (displayJointCombo != nullptr)
         rp->setDisplayJointIndex (displayJointCombo->getSelectedId() - 1);
+}
+
+/*
+    refreshOpenSimAngleReadout() — fired ~10x/sec by openSimAngleTimer.
+
+    Drains the non-blocking UDP-5001 angle feed that opensim_live_realtime.py sends
+    every frame, then shows the selected Display Joint's angle in openSimAngleLabel.
+    This is the in-Open-Ephys readout for the joint angle: OpenSim 4.5's Python
+    bindings expose no way to render live text inside the Simbody 3D viewport
+    (no DecorationGenerator class, updDecoration returns a base type with no setText,
+    no usable setWindowTitle), so the value is surfaced here where the operator works.
+
+    Shows "--.- deg" until a valid packet for the current displayJointIndex arrives.
+*/
+void DeviceEditor::refreshOpenSimAngleReadout()
+{
+    if (openSimAngleLabel == nullptr)
+        return;
+
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    rp->pollOpenSimAngleFeedback();   // non-blocking drain of UDP 5001
+
+    float angleDeg = 0.0f;
+    if (rp->getLiveDisplayAngle (angleDeg))
+        openSimAngleLabel->setText (String (angleDeg, 1) + " deg", dontSendNotification);
+    else
+        openSimAngleLabel->setText ("--.- deg", dontSendNotification);
 }
 
 /*

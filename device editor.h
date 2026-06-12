@@ -265,6 +265,32 @@ private:
     std::unique_ptr<Label>    displayJointTitle;
     std::unique_ptr<ComboBox> displayJointCombo;
 
+    // --- Col 6: live joint-angle readout (UDP 5001 feedback from opensim_live_realtime.py) ---
+    std::unique_ptr<Label>    openSimAngleTitle;
+    std::unique_ptr<Label>    openSimAngleLabel;   // live value, e.g. "37.4 deg"
+
+    /** Drains the board's UDP-5001 angle feedback and updates openSimAngleLabel.
+        OpenSim 4.5's Python bindings cannot render live text in the 3D viewport,
+        so the selected Display Joint's angle is shown here in the editor instead. */
+    void refreshOpenSimAngleReadout();
+
+    /*
+        OpenSimAngleTimer — drives refreshOpenSimAngleReadout() on a ~10 Hz UI tick.
+        A dedicated Timer member (mirroring DigitalOutputTimer) so we do not disturb
+        the base VisualizerEditor/GenericEditor timer. juce::Timer stops itself on
+        destruction, so no explicit teardown is needed in ~DeviceEditor.
+    */
+    struct OpenSimAngleTimer : public Timer
+    {
+        DeviceEditor* owner = nullptr;
+        void timerCallback() override
+        {
+            if (owner != nullptr)
+                owner->refreshOpenSimAngleReadout();
+        }
+    };
+    OpenSimAngleTimer openSimAngleTimer;
+
     /*
         AudioChannel — which DAC output the audio monitor is routed to.
         LEFT and RIGHT correspond to the two DAC channels (indices 0 and 1).
