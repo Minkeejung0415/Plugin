@@ -1697,6 +1697,20 @@ void AcqBoardRedPitaya::launchOpenSimLive()
     writeOpenSimDisplayJoint();
     const juce::String workDir = kOpenSimWorkDir;
     const juce::String scriptPath = workDir + "\\opensim_live_realtime.py";
+
+    const File repoRoot = File::getCurrentWorkingDirectory();
+    const File catalogSrc = repoRoot.getChildFile ("opensim_joint_catalog.py");
+    const File catalogDst = File (workDir).getChildFile ("opensim_joint_catalog.py");
+
+    if (catalogSrc.existsAsFile())
+        catalogSrc.copyFileTo (catalogDst);
+
+    const File liveSrc = repoRoot.getChildFile ("opensim_live_realtime.py");
+    const File liveDst = File (workDir).getChildFile ("opensim_live_realtime.py");
+
+    if (liveSrc.existsAsFile())
+        liveSrc.copyFileTo (liveDst);
+
     juce::File batFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
                              .getChildFile ("opensim_live_visible.bat");
 
@@ -1724,19 +1738,6 @@ void AcqBoardRedPitaya::launchOpenSimLive()
     }
 
     std::cout << "OpenSim Live: launched visible console (py -3.8 -u)." << std::endl;
-
-    const File repoRoot = File::getCurrentWorkingDirectory();
-    const File catalogSrc = repoRoot.getChildFile ("opensim_joint_catalog.py");
-    const File catalogDst = File (workDir).getChildFile ("opensim_joint_catalog.py");
-
-    if (catalogSrc.existsAsFile())
-        catalogSrc.copyFileTo (catalogDst);
-
-    const File liveSrc = repoRoot.getChildFile ("opensim_live_realtime.py");
-    const File liveDst = File (workDir).getChildFile ("opensim_live_realtime.py");
-
-    if (liveSrc.existsAsFile())
-        liveSrc.copyFileTo (liveDst);
 
     openSimSocket = std::make_unique<DatagramSocket>();
     openSimAngleSocket = std::make_unique<DatagramSocket>();

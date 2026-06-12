@@ -1,0 +1,27 @@
+menu "STEP ESP32-S3 Node"
+
+config ESP_WIFI_SSID
+    string "Wi-Fi SSID"
+    default "STEP_ESP32"
+
+config ESP_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default "changeme"
+
+config STEP_ENABLE_ESPNOW
+    bool "Enable ESP-NOW multi-node sync"
+    default n
+    help
+        Off by default. Enable when using two or more boards.
+        Single-board v1 bench tests do not need ESP-NOW.
+
+config STEP_NODE_MASTER
+    bool "ESP-NOW sync master (when ESP-NOW enabled)"
+    depends on STEP_ENABLE_ESPNOW
+    default y
+
+config STEP_DIO_GPIO
+    int "DIO input GPIO"
+    default 1
+
+endmenu

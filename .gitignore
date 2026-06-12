@@ -1,2 +1,6 @@
 # Claude Code internal worktree scratch space
 .claude/worktrees/
+
+# Python generated files
+__pycache__/
+*.py[cod]

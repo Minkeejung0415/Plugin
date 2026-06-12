@@ -633,9 +633,6 @@ def get_display_filter_joints():
         joints = list(_display_filter_joints)
     if not joints:
         joints = [opensim_joint_catalog.DEFAULT_DISPLAY_JOINT]
-    default = opensim_joint_catalog.DEFAULT_DISPLAY_JOINT
-    if default not in joints:
-        joints = opensim_joint_catalog.validate_joints([default] + joints)
     return joints
 
 
@@ -699,21 +696,9 @@ def _init_screen_text_hud(viz):
 
 
 def _pick_hud_strategy(viz):
-    methods = sorted(m for m in dir(viz) if not m.startswith("_"))
-    text_related = sorted(
-        m for m in methods
-        if any(token in m.lower() for token in ("text", "status", "label", "title", "caption", "decor"))
-    )
-    print(f"[JOINT-DISPLAY-SPIKE] SimbodyVisualizer methods: {text_related}")
-    if "addDecoration" in methods:
-        try:
-            _init_screen_text_hud(viz)
-            return "screen_text"
-        except Exception as exc:
-            print(f"[JOINT-DISPLAY-SPIKE] screen_text failed: {exc}")
-            global _hud_screen_text
-            _hud_screen_text = None
-    print("[JOINT-DISPLAY-SPIKE] chosen strategy=window_title (screen text unavailable)")
+    # Prefer the window title because Simbody copies DecorativeText decorations
+    # on addDecoration(), so mutating the Python object can leave stale text.
+    print("[JOINT-DISPLAY-SPIKE] chosen strategy=window_title (screen text disabled)")
     return "window_title"
 
 

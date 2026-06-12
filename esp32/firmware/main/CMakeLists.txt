@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "icm20948.c"
+        "open_ephys_stream.c"
+        "dio_input.c"
+        "espnow_sync.c"
+        "sd_logger.c"
+        "camera_verify.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        lwip
+        driver
+        fatfs
+        sdmmc
+        esp_timer
+)

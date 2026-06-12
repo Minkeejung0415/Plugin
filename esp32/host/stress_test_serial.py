@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""Automated serial sample-rate stress sweep for STEP ESP32 bench firmware."""
+from __future__ import annotations
+
+import argparse
+import re
+import struct
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import serial
+import serial.tools.list_ports
+import platform
+import subprocess
+
+from serial.serialutil import SerialException
+
+
+ROOT = Path(__file__).resolve().parent
+ANALYZER = ROOT / "analyze_sample_rate.py"
+RESULTS_DIR = ROOT / "stress_results"
+
+DEFAULT_HZ = [50, 100, 150, 200, 250, 300, 400, 500, 750, 1000, 1500, 2000]
+ESP32_HINTS = (
+    "ch340",
+    "cp210",
+    "cp2102",
+    "usb serial",
+    "silicon labs",
+    "usb jtag",
+    "esp32",
+    "uart",
+    "enhanced com",
+)
+
+HEADER_FMT = "<iiHiii"
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
+PAYLOAD_SIZE = 11 * 2  # NUM_CHANNELS * int16
+FRAME_SIZE = HEADER_SIZE + PAYLOAD_SIZE
+
+CSV_LINE = re.compile(r"^\s*(\d+)\s*,")
+
+
+
+
+def format_port_busy_help(port: str) -> str:
+    lines = [
+        f"Could not open {port!r}: Access is denied (port busy or blocked).",
+        "",
+        "Common causes:",
+        "  - Arduino IDE Serial Monitor left open on this COM port",
+        "  - host\\serial_tcp_bridge.py or run_usb_plugin_bridge.ps1 still running",
+        "  - Another Python process (stress test, logger, REPL)",
+        "  - Cursor / VS Code serial monitor or debug extension",
+        "  - Firmware still rebooting after flash/upload (wait 3-5 s)",
+        "",
+        "On ESP32-S3 native USB (VID 0x303A): upload briefly locks the port.",
+        "Close the IDE monitor before running host tools.",
+        "",
+    ]
+    if platform.system() == "Windows":
+        lines.append(_windows_port_holder_report())
+    lines.extend(
+        [
+            "",
+            "Quick checks:",
+            f'  python -c "import serial; s=serial.Serial({port!r},115200,timeout=1); s.close(); print(\"ok\")"',
+            "  powershell -File host\\diagnose_com_port.ps1",
+            f"  python host/stress_test_serial.py --port {port} --wait-s 5",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _windows_port_holder_report() -> str:
+    """Document-only: processes that often hold serial ports (no kill)."""
+    names = (
+        "python",
+        "python3",
+        "Arduino",
+        "Code",
+        "Cursor",
+        "putty",
+        "PuTTY",
+        "serial",
+        "mobaxterm",
+    )
+    ps = (
+        "Get-Process -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.ProcessName -match 'python|Arduino|Code|Cursor|putty|PuTTY|serial' } | "
+        "Select-Object Id,ProcessName | Format-Table -AutoSize | Out-String -Width 200"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            encoding="utf-8",
+            errors="replace",
+        )
+        body = (proc.stdout or proc.stderr or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        body = f"(could not enumerate processes: {exc})"
+    if not body:
+        body = "(no matching processes found by name; port may be held by another app)"
+    return (
+        "Windows: processes that often hold COM ports (informational only):\n"
+        + body
+    )
+
+
+def open_serial_port(port: str, baud: int, wait_s: float) -> serial.Serial:
+    attempts = 10 if wait_s > 0 else 1
+    interval = 0.5
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return serial.Serial(port, baud, timeout=0.05)
+        except SerialException as exc:
+            last = exc
+            msg = str(exc).lower()
+            busy = "denied" in msg or "access" in msg or "permission" in msg
+            if not busy or attempt >= attempts:
+                break
+            time.sleep(interval)
+    print(format_port_busy_help(port), file=sys.stderr)
+    assert last is not None
+    raise last
+
+
+@dataclass
+class RateResult:
+    hz: int
+    mean_hz: float | None
+    dup_seq: int
+    gap_seq: int
+    rows: int
+    passed: bool
+    gap_time: int = 0
+    note: str = ""
+
+
+def list_ports_verbose() -> list[serial.tools.list_ports.ListPortInfo]:
+    return list(serial.tools.list_ports.comports())
+
+
+def pick_port(explicit: str | None) -> str | None:
+    if explicit:
+        return explicit
+    ports = list_ports_verbose()
+    if not ports:
+        return None
+    scored: list[tuple[int, str]] = []
+    for p in ports:
+        blob = f"{p.description} {p.manufacturer or ''} {p.hwid}".lower()
+        score = 0
+        for hint in ESP32_HINTS:
+            if hint in blob:
+                score += 10
+        if p.device.upper().startswith("COM"):
+            score += 1
+        scored.append((score, p.device))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return scored[0][1]
+
+
+def drain_serial(ser: serial.Serial, seconds: float) -> None:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        n = ser.in_waiting
+        if n:
+            ser.read(n)
+        else:
+            time.sleep(0.02)
+
+
+def send_line(ser: serial.Serial, line: str) -> None:
+    ser.write((line.rstrip("\n") + "\n").encode("ascii", errors="replace"))
+    ser.flush()
+
+
+def wait_for_text(ser: serial.Serial, timeout: float) -> str:
+    buf = bytearray()
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        chunk = ser.read(ser.in_waiting or 1)
+        if chunk:
+            buf.extend(chunk)
+            text = buf.decode("utf-8", errors="replace")
+            if "ERROR" in text or "Sample rate set" in text or "OK FREQ" in text:
+                return text
+        else:
+            time.sleep(0.02)
+    return buf.decode("utf-8", errors="replace")
+
+
+def capture_text_csv(ser: serial.Serial, seconds: float, out_path: Path) -> int:
+    end = time.monotonic() + seconds
+    lines: list[str] = []
+    buf = ""
+    while time.monotonic() < end:
+        raw = ser.read(ser.in_waiting or 1)
+        if not raw:
+            time.sleep(0.001)
+            continue
+        buf += raw.decode("utf-8", errors="replace")
+        while "\n" in buf:
+            line, buf = buf.split("\n", 1)
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if CSV_LINE.match(line):
+                lines.append(line)
+    out_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return len(lines)
+
+
+def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) -> tuple[int, float | None]:
+    """Parse Open Ephys binary frames; write seq,time_s (hw_us when offset!=0 else host)."""
+    end = time.monotonic() + seconds
+    pending = bytearray()
+    rows: list[str] = []
+    host_t0: float | None = None
+    last_host_s: float | None = None
+    last_hw_us32: int | None = None
+    hw_t0_us: int | None = None
+    dts: list[float] = []
+
+    while time.monotonic() < end:
+        chunk = ser.read(max(ser.in_waiting, 256))
+        if chunk:
+            pending.extend(chunk)
+        else:
+            time.sleep(0.001)
+
+        while len(pending) >= FRAME_SIZE:
+            if pending[0:1] in (b"#", b"S", b"F", b"C") or pending[0:1].isalpha():
+                try:
+                    nl = pending.index(0x0A)
+                except ValueError:
+                    break
+                del pending[: nl + 1]
+                continue
+            hdr = pending[:HEADER_SIZE]
+            try:
+                offset, num_bytes, *_rest = struct.unpack(HEADER_FMT, hdr)
+            except struct.error:
+                del pending[0:1]
+                continue
+            if num_bytes != PAYLOAD_SIZE:
+                del pending[0:1]
+                continue
+            del pending[:FRAME_SIZE]
+            seq = len(rows)
+            if offset != 0:
+                hw_us32 = offset & 0xFFFFFFFF
+                if hw_t0_us is None:
+                    hw_t0_us = hw_us32
+                if last_hw_us32 is not None:
+                    dts.append(((hw_us32 - last_hw_us32) & 0xFFFFFFFF) / 1e6)
+                last_hw_us32 = hw_us32
+                t_sec = (hw_us32 - hw_t0_us) / 1e6
+            else:
+                now = time.perf_counter()
+                if host_t0 is None:
+                    host_t0 = now
+                t_sec = now - host_t0
+                if last_host_s is not None:
+                    dts.append(t_sec - last_host_s)
+                last_host_s = t_sec
+            rows.append(f"{seq},{t_sec:.6f}")
+
+    out_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+    mean_hz = None
+    if dts:
+        mean_dt = sum(dts) / len(dts)
+        if mean_dt > 0:
+            mean_hz = 1.0 / mean_dt
+    return len(rows), mean_hz
+
+
+def run_analyzer(path: Path, time_col: int | None = None) -> tuple[int, int, float | None, int]:
+    if not path.is_file() or path.stat().st_size == 0:
+        return 0, 0, None, 0
+    cmd = [sys.executable, str(ANALYZER), str(path)]
+    if time_col is not None:
+        cmd.extend(["--time-col", str(time_col)])
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    out = proc.stdout + proc.stderr
+    dup = gap = gap_time = 0
+    mean_hz = None
+    m = re.search(r"Duplicate sequence values \(consecutive\): (\d+)", out)
+    if m:
+        dup = int(m.group(1))
+    m = re.search(r"Lost samples \(seq jumps > 1\): (\d+)", out)
+    if m:
+        gap = int(m.group(1))
+    m = re.search(r"Timestamp gaps \(dt > [^)]+\): (\d+)", out)
+    if m:
+        gap_time = int(m.group(1))
+    m = re.search(r"Mean rate \(from timestamp\): ([0-9.]+) Hz", out)
+    if m:
+        mean_hz = float(m.group(1))
+    return dup, gap, mean_hz, gap_time
+
+
+def test_one_rate(
+    ser: serial.Serial,
+    hz: int,
+    capture_s: float,
+    binary_mode: bool | None,
+) -> tuple[RateResult, bool | None]:
+    send_line(ser, "FILTER ON")
+    time.sleep(0.15)
+    send_line(ser, f"FREQ:{hz}")
+    wait_for_text(ser, 2.0)
+    drain_serial(ser, 0.2)
+    send_line(ser, "START")
+    time.sleep(0.1)
+
+    out_path = RESULTS_DIR / f"rate_{hz}.csv"
+    if binary_mode is False:
+        rows = capture_text_csv(ser, capture_s, out_path)
+        dup, gap, mean_hz, gap_time = run_analyzer(out_path)
+        mode = False
+    else:
+        rows, mean_hz_bin = capture_binary_to_csv(ser, capture_s, out_path)
+        dup, gap, mean_hz_a, gap_time = run_analyzer(out_path, time_col=1)
+        mean_hz = mean_hz_bin or mean_hz_a
+        mode = True
+        expected = int(hz * capture_s * 0.85)
+        if rows < expected:
+            gap += max(0, int(hz * capture_s) - rows)
+
+    expected = int(hz * capture_s * 0.85)
+    rate_ok = mean_hz is not None and (0.95 * hz <= mean_hz <= 1.15 * hz)
+    passed = dup == 0 and gap == 0 and rows >= expected and rate_ok  # host USB bursts inflate gap_time
+    note = ""
+    if binary_mode is None:
+        note = "auto"
+    if rows < 2:
+        note = (note + "; " if note else "") + "insufficient rows"
+    return (
+        RateResult(hz, mean_hz, dup, gap, rows, passed, note, gap_time),
+        mode,
+    )
+
+
+def detect_mode(ser: serial.Serial) -> bool:
+    """Return True if binary frames dominate in a short sniff."""
+    send_line(ser, "FREQ:100")
+    time.sleep(0.2)
+    sample = ser.read(4096)
+    if b"Format: CSV" in sample or CSV_LINE.search(sample.decode("utf-8", errors="replace")):
+        return False
+    if sample.count(bytes([0, 0, 0, 0])) > 5 and HEADER_SIZE in range(20, 24):
+        return True
+    text = sample.decode("utf-8", errors="replace")
+    if "Open Ephys binary" in text or "BIN:" in text:
+        return True
+    return True  # default firmware USB_OPEN_EPHYS_MODE
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--port", help="Serial port (e.g. COM3)")
+    p.add_argument("--baud", type=int, default=115200)
+    p.add_argument("--capture-s", type=float, default=8.0, help="Seconds per rate (max total bounded)")
+    p.add_argument("--hz", type=int, nargs="*", default=DEFAULT_HZ)
+    p.add_argument("--csv-mode", action="store_true", help="Force text CSV parsing")
+    p.add_argument("--binary-mode", action="store_true", help="Force binary frame parsing")
+    p.add_argument("--list-ports", action="store_true")
+    p.add_argument(
+        "--wait-s",
+        type=float,
+        default=0,
+        help="Retry open up to 10 times (0.5 s apart) when port is busy; e.g. 5",
+    )
+    args = p.parse_args()
+
+    if args.list_ports:
+        ports = list_ports_verbose()
+        if not ports:
+            print("No serial ports found.")
+            return 1
+        espressif = [x for x in ports if x.vid == 0x303A]
+        if espressif:
+            print("# Espressif (VID 0x303A) - use CDC USB Serial for bench @115200:")
+            for x in espressif:
+                print(f"  {x.device}\t{x.description}\tpid=0x{(x.pid or 0):04X}\t{x.hwid}")
+            print("# If multiple 303A ports: use the one that shows boot text in Serial Monitor.")
+        for x in ports:
+            tag = " [303A]" if x.vid == 0x303A else ""
+            print(f"{x.device}\t{x.description}{tag}\t{x.hwid}")
+        return 0
+
+    port = pick_port(args.port)
+    if not port:
+        print("No serial ports detected. Connect ESP32 USB and re-run.")
+        print("  python host/stress_test_serial.py --list-ports")
+        return 2
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    per_test = min(args.capture_s, 120.0)
+    if per_test * len(args.hz) > 600:
+        print("Warning: many frequencies; keep capture-s modest.", file=sys.stderr)
+
+    print(f"Using port {port} @ {args.baud}")
+    results: list[RateResult] = []
+    binary_mode: bool | None = None
+    if args.csv_mode:
+        binary_mode = False
+    elif args.binary_mode:
+        binary_mode = True
+
+    try:
+        ser = open_serial_port(port, args.baud, args.wait_s)
+    except SerialException:
+        return 3
+    try:
+        time.sleep(2.0)
+        drain_serial(ser, 1.0)
+        if binary_mode is None:
+            binary_mode = detect_mode(ser)
+            print(f"Detected {'binary' if binary_mode else 'CSV'} serial stream")
+
+        for hz in args.hz:
+            t_start = time.monotonic()
+            res, binary_mode = test_one_rate(ser, hz, per_test, binary_mode)
+            results.append(res)
+            elapsed = time.monotonic() - t_start
+            if elapsed > 120:
+                print(f"Stopping early: {hz} Hz exceeded 120 s")
+                break
+            print(
+                f"Hz={hz}: rows={res.rows} mean_hz={res.mean_hz} dup={res.dup_seq} "
+                f"gap={res.gap_seq} gap_t={res.gap_time} pass={res.passed}"
+            )
+
+        print("\n| Hz | mean_hz | dup_seq | gap_seq | pass |")
+        print("|----|---------|---------|---------|------|")
+        last_good = 0
+        for r in results:
+            mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
+            pf = "PASS" if r.passed else "FAIL"
+            print(f"| {r.hz} | {mh} | {r.dup_seq} | {r.gap_seq} | {pf} |")
+            if r.passed:
+                last_good = r.hz
+
+        recommended = int(last_good * 0.8) if last_good else 0
+        print(f"\nHighest passing Hz: {last_good}")
+        print(f"Recommended cap (80%): {recommended} Hz")
+
+        summary = RESULTS_DIR / "SUMMARY.md"
+        lines = [
+            "# Stress sweep summary",
+            "",
+            f"Port: `{port}` baud {args.baud}",
+            "",
+            "| Hz | mean_hz | dup_seq | gap_seq | pass |",
+            "|----|---------|---------|---------|------|",
+        ]
+        for r in results:
+            mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
+            lines.append(
+                f"| {r.hz} | {mh} | {r.dup_seq} | {r.gap_seq} | {'PASS' if r.passed else 'FAIL'} |"
+            )
+        lines.extend(
+            [
+                "",
+                "Pass rule: `mean_hz` must be within **95%–115%** of requested Hz "
+                "(e.g. 1500 Hz @ 1320 Hz → **FAIL**; USB/loop ceiling ~1.3 kHz on this path).",
+                "",
+                f"Highest passing Hz: **{last_good}**",
+                f"Recommended cap (80% of highest pass): **{recommended} Hz**",
+            ]
+        )
+        summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    finally:
+        ser.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
