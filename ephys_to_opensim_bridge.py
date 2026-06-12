@@ -1,9 +1,34 @@
+"""
+ephys_to_opensim_bridge.py — Batch IMU-to-OpenSim pipeline (Python 3.8 only).
+
+HOW THIS SCRIPT DIFFERS FROM opensim_live_realtime.py:
+  - This script is the "record then replay" path (like a VCR).
+  - It collects a burst of UDP packets, processes them offline, then opens
+    the OpenSim GUI showing the resulting motion.
+  - opensim_live_realtime.py is the live streaming path (like a projector).
+
+PIPELINE:
+  1. Bind UDP port 5000 and listen for Open Ephys IMU packets.
+  2. Collect packets for N seconds (--seconds) or until idle (--until-idle).
+  3. For each sensor, run Fusion AHRS on the collected accel/gyro → quaternions.
+     (If the plugin sent v2 pre-fused quaternions, skip AHRS entirely.)
+  4. Write an OpenSim quaternion orientation file (.sto format).
+  5. Write an IMU IK tool setup XML.
+  6. Run opensim-cmd.exe to solve IK on the .sto file → motion .sto.
+  7. Launch OpenSim64.exe GUI to visualise the resulting skeleton motion.
+
+SUPPORTED PACKET FORMATS (same as opensim_live_realtime.py):
+  - v2 quaternion: [t_f32, 2.0, N, N×{qw,qx,qy,qz}]
+  - legacy raw:    [N×6 floats] or [t_f32, N×6 floats]  (no version tag)
+"""
+
 import sys
 import os
 import sys
 
 # Register OpenSim DLL directories BEFORE any other imports.
 # Python 3.8+ ignores PATH for extension-module DLL loading; add_dll_directory is mandatory.
+# os.add_dll_directory tells the runtime loader where to find OpenSim's native .dll files.
 if hasattr(os, "add_dll_directory"):
     for _dll_dir in [
         r"C:\OpenSim 4.5\bin",
@@ -185,13 +210,24 @@ def _find_opensim_gui():
 # ── AHRS + STO helpers ────────────────────────────────────────────────────────
 
 def ahrs_to_quaternions(accel_list, gyro_list):
-    """Run Fusion AHRS on one sensor's accel/gyro lists -> list of [w,x,y,z]."""
+    """Run Fusion AHRS on one sensor's entire accel/gyro history → list of quaternions.
+
+    This is the offline (batch) equivalent of what _udp_ahrs_thread does in
+    real-time.  It processes all collected samples sequentially.
+
+    Steps per sample:
+      1. imufusion.Offset removes slow gyro drift (runs a high-pass filter).
+      2. ahrs.update_no_magnetometer integrates gyro + corrects with accel.
+      3. Read the resulting quaternion [w, x, y, z].
+
+    Returns: list of [w, x, y, z] quaternions, one per input sample.
+    """
     ahrs   = imufusion.Ahrs()
-    offset = imufusion.Offset(int(SAMPLE_RATE))
-    dt     = 1.0 / SAMPLE_RATE
+    offset = imufusion.Offset(int(SAMPLE_RATE))  # built-in gyro offset estimator
+    dt     = 1.0 / SAMPLE_RATE                   # seconds per sample
     quats  = []
     for acc, gyr in zip(accel_list, gyro_list):
-        gyr_cal = offset.update(np.array(gyr, dtype=np.float64))
+        gyr_cal = offset.update(np.array(gyr, dtype=np.float64))  # offset-corrected gyro
         ahrs.update_no_magnetometer(
             np.array(gyr_cal, dtype=np.float64),
             np.array(acc,     dtype=np.float64),
@@ -210,7 +246,16 @@ def _fmt_quat(q):
 
 
 def samples_to_sto(timestamps, quats_per_sensor, sensor_names, path):
-    """Write an N-sensor quaternion STO file."""
+    """Write a quaternion orientation file in OpenSim STO format.
+
+    STO (Storage) is OpenSim's tab-separated data format.  The header section
+    specifies DataRate and DataType so the IK tool knows how to interpret the
+    columns.  Each data row is:  time <TAB> qw,qx,qy,qz <TAB> qw,qx,qy,qz ...
+    one quaternion column per sensor, labelled by the IMU frame name.
+
+    This file is passed to IMUInverseKinematicsTool via the XML setup file
+    written by ensure_ephys_xml().
+    """
     n = len(sensor_names)
     header_sensors = "\t".join(sensor_names)
     print(f"Writing STO with {n} IMU columns: {', '.join(sensor_names)}")
@@ -541,6 +586,16 @@ def listen_udp_until_idle(idle_s=2.0):
 # ── Setup XML ──────────────────────────────────────────────────────────────────
 
 def ensure_ephys_xml(sensor_names, model_file=MODEL_FILE):
+    """Write (or overwrite) the IMU IK setup XML file that opensim-cmd.exe reads.
+
+    The XML tells OpenSim:
+      - Which .osim model to use
+      - Which .sto orientation file contains the sensor data
+      - Where to write the output motion .sto
+      - The sensor-to-OpenSim rotation (-90° around X = IMU frame convention)
+    The sensor_names argument is informational only (logged for debugging);
+    the actual sensor-to-model mapping comes from the labels in the .sto file.
+    """
     path = os.path.join(WORK_DIR, EPHYS_SETUP_XML)
     content = f"""<?xml version="1.0" encoding="UTF-8" ?>
 <OpenSimDocument Version="40000">

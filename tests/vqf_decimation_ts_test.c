@@ -2,10 +2,43 @@
  * Regression test: VQF must integrate with each sensor's effective
  * (decimated) sample rate, not the hardware tick rate.
  *
- * run_stream() decimates sensors below g_stream_hw_hz via sample/hold,
- * so fusion_update_sensor() only runs every Nth tick. If VQF's Ts is the
- * tick period, gyro integration under-rotates by the decimation factor
- * (FusionSensorConfig.imu_sample_rate_hz fixes this).
+ * -------------------------------------------------------------------------
+ * THE BUG THIS TEST GUARDS AGAINST
+ * -------------------------------------------------------------------------
+ * The Red Pitaya FPGA ticks at g_stream_hw_hz (e.g. 1000 Hz).  Some IMU
+ * sensors are physically read at a lower rate (e.g. 100 Hz) because they
+ * cannot sample faster.  The firmware calls fusion_update_sensor() only on
+ * the ticks when a real sensor reading is available.
+ *
+ * VQF integrates the gyro as:  angle_change = gyro_reading × Ts
+ * where Ts is the time between consecutive calls.
+ *
+ * If Ts is set to the tick period (1/1000 s) but calls actually come at
+ * 100 Hz (every 10th tick = every 0.01 s), each call integrates as if only
+ * 1 ms passed when in reality 10 ms passed.  Result: the orientation spins
+ * 10× too slowly — the "under-rotation" bug.
+ *
+ * FIX: set FusionSensorConfig.imu_sample_rate_hz = 100 for that sensor.
+ * initialize_sensor_filter() then sets VQF's Ts = 1/100 = 0.01 s, which
+ * is the correct per-call time step.
+ *
+ * -------------------------------------------------------------------------
+ * WHAT THE TEST DOES
+ * -------------------------------------------------------------------------
+ * Simulates a sensor spinning at exactly 90 deg/s about the Z axis.
+ *
+ * Test A (decimated sensor):
+ *   imu_sample_rate_hz = 10 Hz, 10 updates.
+ *   10 updates × (1/10 s each) = 1 real second.
+ *   Expected yaw ≈ 90 deg/s × 1 s = 90°.
+ *
+ * Test B (full-rate sensor):
+ *   imu_sample_rate_hz = 0 (use module rate = 100 Hz), 100 updates.
+ *   100 updates × (1/100 s each) = 1 real second.
+ *   Expected yaw ≈ 90°.
+ *
+ * Both must come out near 90° to confirm the decimation fix works.
+ * -------------------------------------------------------------------------
  *
  * Build and run (from repo root):
  *   cc -std=c99 -Wall -Wextra -I. -o /tmp/vqf_decim_test tests/vqf_decimation_ts_test.c sensor_fusion.c vqf.c -lm && /tmp/vqf_decim_test
@@ -20,20 +53,29 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Rotate at ~90 deg/s about z (gravity axis) and return fused yaw in degrees. */
+/* Simulate a sensor spinning at 90 deg/s about the Z axis for n_updates steps.
+ * Returns the fused yaw in degrees so the test can check it against 90°.
+ *
+ * imu_sample_rate_hz: per-sensor effective rate to give VQF (0 = module rate).
+ * n_updates:          how many times to call fusion_update_sensor.
+ *
+ * Raw values chosen to produce exactly 90 deg/s spin:
+ *   acc = {0, 0, 16384}  →  0.0, 0.0, 9.807 m/s²  (gravity pointing +Z)
+ *   gyr = {0, 0, 11790}  →  0.0, 0.0, 90.0 °/s    (11790 × 1/131 = 90.0)
+ */
 static double yaw_after_updates(float imu_sample_rate_hz, int n_updates)
 {
     FusionSensorConfig cfg;
     fusion_get_default_sensor_config(FUSION_SENSOR_TYPE_GENERIC, false, &cfg);
     cfg.has_mag = false;
-    cfg.imu_sample_rate_hz = imu_sample_rate_hz;
+    cfg.imu_sample_rate_hz = imu_sample_rate_hz;  /* <-- the key field being tested */
 
-    fusion_init(1, 100.0f);
+    fusion_init(1, 100.0f);        /* module rate = 100 Hz (irrelevant when imu_sample_rate_hz set) */
     fusion_register_sensor_ex(0, &cfg);
     fusion_set_enabled(true);
 
-    int16_t acc[3] = { 0, 0, 16384 };  /* 1 g along z at default +/-2g scale */
-    int16_t gyr[3] = { 0, 0, 11790 };  /* 90 deg/s at default 131 LSB/(deg/s) */
+    int16_t acc[3] = { 0, 0, 16384 };  /* 1 g along z at default ±2g scale (16384 LSB/g) */
+    int16_t gyr[3] = { 0, 0, 11790 };  /* 90 deg/s at default 131 LSB/(deg/s): 131×90 = 11790 */
     int16_t q15[4];
 
     for (int i = 0; i < n_updates; i++) {
@@ -44,6 +86,9 @@ static double yaw_after_updates(float imu_sample_rate_hz, int n_updates)
     fusion_get_quaternion_float(0, q);
     fusion_shutdown();
 
+    /* Extract yaw from the quaternion.
+     * For a pure Z-axis rotation: yaw = 2 × atan2(qz, qw).
+     * q[0] = w, q[3] = z in our {w,x,y,z} ordering.                       */
     return 2.0 * atan2((double)q[3], (double)q[0]) * 180.0 / M_PI;
 }
 
