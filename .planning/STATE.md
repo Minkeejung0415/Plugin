@@ -3,22 +3,21 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 06
-status: phase_planned
-last_updated: 2026-06-12T00:00:00.000Z
+status: awaiting-hardware-uat
+last_updated: "2026-06-12T19:05:00Z"
 progress:
   total_phases: 6
   completed_phases: 5
-  total_plans: 9
-  completed_plans: 8
-  percent: 89
-stopped_at: Phase 6 (HUD live-update remediation) planned + verified — ready for /gsd:execute-phase 06
+  total_plans: 8
+  completed_plans: 7
+  percent: 90
 ---
 
 # Project State
 
 **Project:** Joint Angle Display on Trigger  
-**Current phase:** 6 — HUD Live-Update Fix (planned, ready to execute)  
-**Status:** v1.0 shipped; Phase 6 remediation opened after hardware UAT exposed a frozen HUD (DISP-02)
+**Current phase:** 06
+**Status:** Executing Phase 06
 
 ## Progress
 
@@ -29,9 +28,9 @@ stopped_at: Phase 6 (HUD live-update remediation) planned + verified — ready f
 | 3 | Trigger Wiring | ✓ Complete | 1/1 |
 | 4 | Filtered Display | ✓ Complete | 1/1 |
 | 5 | Integration Verify | ✓ Complete | 1/1 |
-| 6 | HUD Live-Update Fix | ◷ Planned + verified | 0/1 |
+| 6 | HUD Live-Update Fix | ◷ Code complete; Task 4 hardware UAT pending | 0/1 (partial) |
 
-**Overall:** 5/6 phases complete; Phase 6 planned
+**Overall:** 5/6 phases complete; Phase 6 code complete, hardware UAT pending
 
 ## Pending Manual UAT
 
@@ -39,13 +38,26 @@ stopped_at: Phase 6 (HUD live-update remediation) planned + verified — ready f
 - Plugin rebuild in Open Ephys GUI (C++ changes)
 - **Phase 6:** operator moves knee → live angle tracks on active readout (window title bar or Open Ephys UDP-5001 UI); switching selected joint changes the label
 
+## Decisions
+
+- Runtime capability probe (_probe_hud_capabilities) replaces hard-coded strategy; uses only hasattr/dir, no viz mutation
+- window_title attempted via osim.String(title) SWIG-wrap before plain str; falls through to udp_feedback on dual failure
+- _init_screen_text_hud gated by probe (upd_decoration_text=False on OpenSim 4.5); addDecoration path unreachable at runtime
+- Both file copies overwritten to byte-identical via Copy-Item; SHA256 verified (c8ee2aca...)
+- Startup window-title call changed to _try_set_window_title_wrapped so probe flag is set before _pick_hud_strategy reads it
+
 ## Blockers
 
-None — Phase 6 plan verified (0 blockers). Root cause of the frozen HUD: Simbody `addDecoration` stores DecorativeText by value, so per-frame `setText` on the retained handle never reaches the renderer; option 1 (DecorationGenerator) is unbuildable on the installed OpenSim 4.5 bindings → layered window_title→udp_feedback fix planned.
+None — code complete. Awaiting Task 4 hardware UAT (live Red Pitaya + OpenSim window). Operator must:
+1. Run start_opensim_live.bat
+2. Confirm [JOINT-DISPLAY] strategy=... line at startup
+3. Move knee, confirm readout tracks console [HUD-DIAG] value
+4. Change selected joint, confirm label changes
+5. Confirm ~20 Hz no-freeze
 
 ## Analysis artifacts
 
 - **VQF + IK pipeline map (optimization):** `.planning/analysis/vqf-ik-pipeline-map.md` — bottlenecks, timing table, tunables, ranked optimization matrix.
 
 ---
-*State updated: 2026-06-10 — added VQF/IK pipeline analysis*
+*State updated: 2026-06-12 — Phase 6 Tasks 1-3 code complete, Task 4 hardware UAT pending*
