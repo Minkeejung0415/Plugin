@@ -29,7 +29,13 @@
 #include "devices/redpitaya/AcqBoardRedPitaya.h"
 #include "devices/simulated/AcqBoardSim.h"
 
-/** Set to true to test simulation mode with boards connected */
+/*
+    forceSimulationMode — set to true when you want to test the plugin UI and
+    signal-chain wiring without real hardware attached. When true, detectBoard()
+    skips all hardware probes and immediately creates an AcqBoardSim that
+    generates synthetic sine-wave data. Useful for CI testing or UI development.
+    Leave false for normal lab use.
+*/
 static const bool forceSimulationMode = false;
 
 BoardType DeviceThread::boardType = ACQUISITION_BOARD; // initialize static member
@@ -71,24 +77,43 @@ std::unique_ptr<GenericEditor> DeviceThread::createEditor (SourceNode* sn)
     return editor;
 }
 
+/*
+    detectBoard() — the hardware detection waterfall.
+
+    Works like checking each drawer for a key: tries each board type in order
+    and returns the first one that answers. The order matters — faster/more
+    common boards are tried first to avoid unnecessary delays.
+
+    Waterfall order:
+      1. OpalKelly (USB FPGA) — classic Intan RHD2000 board, tried first
+      2. ONI (Open Neuro Interface) — newer USB3 platform
+      3. RedPitaya (TCP handshake to rp-*.local or a configured IP) — our wireless IMU board
+      4. If none found: asks the user whether to run in simulation mode
+
+    Returns a heap-allocated AcquisitionBoard* (caller takes ownership), or nullptr
+    if the user declines simulation mode.
+*/
 AcquisitionBoard* DeviceThread::detectBoard()
 {
+    // Developer override: skip all hardware and use the fake board immediately
     if (forceSimulationMode)
     {
         return new AcqBoardSim();
     }
 
+    // --- Try OpalKelly USB FPGA board (classic Intan RHD2000 hardware) ---
     std::unique_ptr<AcqBoardOpalKelly> opalKellyBoard = std::make_unique<AcqBoardOpalKelly>();
 
     if (opalKellyBoard->detectBoard())
     {
-        return opalKellyBoard.release();
+        return opalKellyBoard.release(); // found it — hand ownership to caller
     }
     else
     {
-        opalKellyBoard.reset();
+        opalKellyBoard.reset(); // not found — clean up before trying next type
     }
 
+    // --- Try ONI (Open Neuro Interface) USB3 board ---
     std::unique_ptr<AcqBoardONI> oniBoard = std::make_unique<AcqBoardONI>();
 
     if (oniBoard->detectBoard())
@@ -100,6 +125,9 @@ AcquisitionBoard* DeviceThread::detectBoard()
         oniBoard.reset();
     }
 
+    // --- Try Red Pitaya / ESP32-S3 STEP node (TCP handshake on port 5000) ---
+    // AcqBoardRedPitaya::detectBoard() tries rp-*.local mDNS names first,
+    // then falls back to any user-configured IP from the nodeHostLabel.
     std::unique_ptr<AcqBoardRedPitaya> redPitayaBoard = std::make_unique<AcqBoardRedPitaya>();
 
     if (redPitayaBoard->detectBoard())
@@ -111,6 +139,7 @@ AcquisitionBoard* DeviceThread::detectBoard()
         redPitayaBoard.reset();
     }
 
+    // --- No hardware found — ask the user if they want a fake board ---
     bool response = AlertWindow::showOkCancelBox (AlertWindow::NoIcon,
                                                   "No device found.",
                                                   "An acquisition board could not be found. Do you want to run this plugin in simulation mode?",
@@ -236,6 +265,15 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
             }
         }
 
+        /*
+            ADC channel naming differs between board types:
+              - ESP32-S3 STEP node: 11 fixed-purpose channels with semantic names
+                (ax, ay, az = accelerometer; gx, gy, gz = gyroscope; dio = digital I/O;
+                qw, qx, qy, qz = VQF quaternion output). These come pre-defined in esp32Names[].
+              - Red Pitaya: many raw IMU channels named "Channel N", with the last two
+                renamed "AnalogInput1 / AnalogInput2" for the waveform capture channels.
+              - All other boards (OpalKelly, ONI): plain "Channel N" ADC naming.
+        */
         if (acquisitionBoard->getBoardType() == AcquisitionBoard::BoardType::RedPitaya
             && acquisitionBoard->areAdcChannelsEnabled())
         {
@@ -249,6 +287,9 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
 
                 if (esp32Layout)
                 {
+                    // ESP32-S3 STEP node has 11 columns with fixed meanings:
+                    // ax/ay/az = accel (g), gx/gy/gz = gyro (dps), dio = digital IO,
+                    // qw/qx/qy/qz = quaternion from VQF sensor fusion
                     static const char* esp32Names[] = {
                         "ax", "ay", "az", "gx", "gy", "gz", "dio", "qw", "qx", "qy", "qz"
                     };
@@ -258,6 +299,8 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
                 }
                 else
                 {
+                    // Red Pitaya: last ANALOG_WAVEFORM_CHANNELS are the analog voltage inputs;
+                    // all preceding channels are IMU data named sequentially.
                     const int analogStartChannel = jmax (0, numadcchannels - AcqBoardRedPitaya::ANALOG_WAVEFORM_CHANNELS);
                     name = ch >= analogStartChannel
                                ? "AnalogInput" + String (ch - analogStartChannel + 1)
@@ -327,6 +370,26 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
     otherChannels.clearQuick (false);
 }
 
+/*
+    handleBroadcastMessage() — receives inter-plugin broadcast messages.
+
+    Other Open Ephys plugins (e.g. a stimulus controller or a keyboard-shortcut
+    plugin) can send text messages to all other plugins via CoreServices::sendStatusMessage.
+    We listen for the "ACQBOARD TRIGGER <line> <ms>" message format.
+
+    What "ACQBOARD TRIGGER" does:
+      1. Fires a TTL pulse on the specified digital output line for <ms> milliseconds.
+         This creates a real electrical pulse on the hardware BNC output, used to
+         synchronise external equipment.
+      2. If the board is a Red Pitaya, also calls writeJointDisplayConfig() so the
+         Python OpenSim visualizer (opensim_live_realtime.py) immediately updates its
+         HUD to show only the operator's pre-selected joint angles.
+
+    Message format: "ACQBOARD TRIGGER <line> <durationMs>"
+      <line>       = TTL output line number, 1-based (UI labels from 1; we subtract 1
+                     here because internal hardware indexing starts at 0)
+      <durationMs> = pulse width in milliseconds (clamped 10–5000 ms)
+*/
 void DeviceThread::handleBroadcastMessage (const String& msg, const int64 messageTimeMilliseconds)
 {
     StringArray parts = StringArray::fromTokens (msg, " ", "");
@@ -341,20 +404,27 @@ void DeviceThread::handleBroadcastMessage (const String& msg, const int64 messag
             {
                 if (parts.size() == 4)
                 {
+                    // UI shows lines as 1-8; hardware wants 0-7 — subtract 1 to convert
                     int ttlLine = parts[2].getIntValue() - 1;
 
                     if (ttlLine < 0 || ttlLine > 7)
-                        return;
+                        return; // ignore out-of-range line numbers
 
                     int eventDurationMs = parts[3].getIntValue();
 
+                    // Sanity check: pulse must be at least 10 ms (reliable hardware timing)
+                    // and at most 5 seconds (anything longer is probably a bug)
                     if (eventDurationMs < 10 || eventDurationMs > 5000)
                         return;
 
                     acquisitionBoard->triggerDigitalOutput (ttlLine, eventDurationMs);
 
+                    // dynamic_cast safely checks if the board is a RedPitaya at runtime.
+                    // If it is not a RedPitaya, the cast returns nullptr and we skip this.
+                    // If it IS a RedPitaya, rp points to the real object and we can call
+                    // Red-Pitaya-specific methods that don't exist on AcquisitionBoard.
                     if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (acquisitionBoard.get()))
-                        rp->writeJointDisplayConfig();
+                        rp->writeJointDisplayConfig(); // snapshot joint selection to JSON for Python
                 }
             }
         }

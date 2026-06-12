@@ -7,6 +7,41 @@ Receives UDP from Open Ephys on port 5000:
   - legacy acc/gyro IMU packets (no version tag)
 Accel/gyro baseline calibration runs in this process: first 3 s still per session,
 average a,g per sensor slot is subtracted before AHRS → IK.
+
+=============================================================================
+ HOW THIS SCRIPT WORKS — BIG PICTURE
+=============================================================================
+ Three things run concurrently (two daemon threads + main thread):
+
+   Thread 1: _udp_ahrs_thread
+     Listens on UDP port 5000 forever.
+     For every packet received it:
+       1. Parses the packet format (v3 / v2 / legacy).
+       2. Detects session resets (timestamp jump, source change, long gap).
+       3. Accumulates 3 s of still data for accel/gyro baseline calibration.
+       4. Runs imufusion.Ahrs per sensor (v3/legacy only) to get quaternions.
+       5. Applies the OpenSim frame rotation (_Q_OPENSIM_FRAME).
+       6. Pushes the latest frame into _frame_queue (cleared each push so
+          the main thread always gets the NEWEST frame, never stale ones).
+
+   Thread 2: _joint_display_watcher_thread
+     Polls opensim_joint_display_config.json every 50 ms.
+     When the file's modification time changes it re-reads and validates the
+     joint list, then updates _display_filter_joints under a lock.
+     This is how the Open Ephys plugin triggers a HUD change without needing
+     an extra network port: it writes the file; this thread notices within 50 ms.
+
+   Main thread: run_live
+     Loads the OpenSim model, sets up the IK solver, starts the other two
+     threads, then loops at up to LIVE_VISUALIZER_RATE (default 20 Hz):
+       1. Pop latest frame from _frame_queue.
+       2. Build an OrientationsReference from the quaternions.
+       3. Call ikSolver.assemble(state) — OpenSim solves for joint angles.
+       4. Read selected joint angles from model.getCoordinateSet().
+       5. Update the HUD (DecorativeText in the viewport or window title).
+       6. Call model.getVisualizer().show(state) to render the skeleton.
+
+=============================================================================
 """
 
 import sys
@@ -42,10 +77,16 @@ import json
 
 import opensim_joint_catalog
 
-UDP_PACKET_VERSION_QUAT = 2.0
-UDP_PACKET_VERSION_IMU = 3.0
-UDP_PACKET_VERSION_ANGLES = 3.1
-ANGLE_FEEDBACK_IP = "127.0.0.1"
+# ── UDP packet version tags ───────────────────────────────────────────────────
+# Packets start with: [timestamp_f32, version_f32, n_sensors_f32, ...data...]
+# These constants identify which format the rest of the payload uses.
+UDP_PACKET_VERSION_QUAT   = 2.0   # payload = N×{qw,qx,qy,qz}  (pre-fused quaternions)
+UDP_PACKET_VERSION_IMU    = 3.0   # payload = N×{ax,ay,az,gx,gy,gz}  (raw accel+gyro)
+UDP_PACKET_VERSION_ANGLES = 3.1   # outgoing angle feedback sent TO port 5001
+
+# Angle feedback: after each IK solve, the selected joint angle is sent here
+# so the Open Ephys plugin (or any listener) can log/display the raw value.
+ANGLE_FEEDBACK_IP   = "127.0.0.1"
 ANGLE_FEEDBACK_PORT = 5001
 
 JOINT_OPTIONS = [
@@ -94,28 +135,40 @@ REAL_SOURCE_LABELS   = ("real", "real_redpitaya", "redpitaya", "rp")
 CALIB_DURATION_S = float(os.environ.get("OPENSIM_CALIB_DURATION", "3.0"))
 OPENSIM_SKIP_CALIB = os.environ.get("OPENSIM_SKIP_CALIB", "0") == "1"
 
+# ── Sensor slot layout ────────────────────────────────────────────────────────
+# SENSORS is the canonical ordered list of IMU frame names used by the OpenSim
+# model (Rajagopal2015_opensense_calibrated.osim).  Slot 0 is torso, slot 7 is
+# left calcaneous.  All arrays that hold per-sensor data are indexed by these
+# slot numbers.
+#
+# The IK solver requires that orientation labels in the TimeSeriesTableRotation
+# exactly match frame names in the .osim model — use these exact strings.
 SENSORS = [
-    "torso_imu",
-    "pelvis_imu",
-    "femur_r_imu",
-    "tibia_r_imu",
-    "calcn_r_imu",
-    "femur_l_imu",
-    "tibia_l_imu",
-    "calcn_l_imu",
+    "torso_imu",     # slot 0 — trunk / thorax
+    "pelvis_imu",    # slot 1 — pelvis / sacrum
+    "femur_r_imu",   # slot 2 — right thigh
+    "tibia_r_imu",   # slot 3 — right shank
+    "calcn_r_imu",   # slot 4 — right foot / heel
+    "femur_l_imu",   # slot 5 — left thigh
+    "tibia_l_imu",   # slot 6 — left shank
+    "calcn_l_imu",   # slot 7 — left foot / heel
 ]
 N_SENSORS = len(SENSORS)
 
-# Distal → proximal: RP sensor index 0 = shank/tibia, 1 = thigh, 2 = hip, 3 = trunk, ...
+# SENSOR_CHAIN_UP: the physical attachment order on the body from distal
+# (foot) upward to torso.  When fewer than 8 sensors are connected, the
+# firmware assigns them starting from the most distal sensor (index 0 = shin)
+# and works upward.  This list maps physical RP slot 0,1,2,... to OpenSim
+# frame names for that reduced-sensor scenario.
 SENSOR_CHAIN_UP = [
-    "tibia_r_imu",
-    "femur_r_imu",
-    "pelvis_imu",
-    "torso_imu",
-    "calcn_r_imu",
-    "femur_l_imu",
-    "tibia_l_imu",
-    "calcn_l_imu",
+    "tibia_r_imu",   # physical slot 0 = right shin (most common single-sensor use)
+    "femur_r_imu",   # physical slot 1 = right thigh
+    "pelvis_imu",    # physical slot 2 = pelvis
+    "torso_imu",     # physical slot 3 = trunk
+    "calcn_r_imu",   # physical slot 4 = right foot
+    "femur_l_imu",   # physical slot 5 = left thigh
+    "tibia_l_imu",   # physical slot 6 = left shin
+    "calcn_l_imu",   # physical slot 7 = left foot
 ]
 
 
@@ -208,20 +261,38 @@ def _quat_distance(q1, q2):
     return 1.0 - min(1.0, abs(_quat_dot(q1, q2)))
 
 
-_ag_calib_lock = threading.Lock()
-_ag_offsets = None
-_ag_calib_session = None
-_ag_calib_t_end = 0.0
-_ag_calib_sums = None
-_ag_calib_counts = None
+# ── Accel/Gyro baseline calibration state ────────────────────────────────────
+# Every IMU chip has a tiny constant error called "bias" or "zero-g offset":
+# even when perfectly still, the sensor reports a small non-zero value.
+# We measure this during the first CALIB_DURATION_S (3 s) of each session
+# while the subject stands still, then subtract it from all future readings.
+#
+# Without this correction, the AHRS would accumulate orientation error at
+# roughly 1-2°/min from the gyro bias alone.
+#
+# Storage layout: _ag_offsets[slot] = [ax, ay, az, gx, gy, gz]
+#   where slot indexes into SENSORS (0=torso … 7=calcn_l).
+_ag_calib_lock    = threading.Lock()
+_ag_offsets       = None     # None = calibration not yet complete
+_ag_calib_session = None     # session ID for which we are accumulating
+_ag_calib_t_end   = 0.0      # wall-clock deadline for accumulation
+_ag_calib_sums    = None     # running sums of raw values per slot
+_ag_calib_counts  = None     # number of samples accumulated per slot
 
 
 def _zero_ag_offsets():
+    """Return a list of per-slot zero offsets (all six channels = 0)."""
     return [[0.0] * 6 for _ in range(N_SENSORS)]
 
 
 def _reset_ag_calib_for_session(session_id):
-    """Start a 3 s still capture; averages are subtracted from later a,g samples."""
+    """Start a fresh 3 s still capture for a new streaming session.
+
+    The subject should stand still during this window.  Once it expires,
+    _accumulate_ag_calib will compute the averages and store them in
+    _ag_offsets, after which _apply_ag_offsets subtracts them from every
+    subsequent packet.
+    """
     global _ag_offsets, _ag_calib_session, _ag_calib_t_end, _ag_calib_sums, _ag_calib_counts
     with _ag_calib_lock:
         _ag_calib_session = session_id
@@ -290,7 +361,16 @@ def _apply_ag_offsets(values, offsets):
     return corrected
 
 
-_Q_OPENSIM_FRAME = _qx(-math.pi / 2.0)
+# ── OpenSim coordinate-frame rotation ────────────────────────────────────────
+# The Red Pitaya IMU firmware outputs quaternions in its own sensor frame.
+# OpenSim uses a different convention for its "world" frame (Y-up vs Z-up).
+# _Q_OPENSIM_FRAME is a -90° rotation around the X-axis that transforms from
+# the firmware's frame into the OpenSim IK solver's expected frame.
+# Every quaternion passed to the IK solver must be pre-multiplied by this.
+_Q_OPENSIM_FRAME = _qx(-math.pi / 2.0)  # [cos(-45°), sin(-45°), 0, 0]
+
+# Pre-rotate the hardcoded neutral pose quaternions into the OpenSim frame
+# so they can be used directly to assemble the initial neutral skeleton pose.
 _NEUTRAL_QUATS_OPENSIM = [_quat_mul(_Q_OPENSIM_FRAME, q) for q in _NEUTRAL_QUATS_8IMU]
 
 _STRUCT_1F = struct.Struct("<f")
@@ -370,7 +450,18 @@ def _load_display_joint(reload=False):
 
 
 def _read_coord_value(model, state, joint_name):
-    """Read IK coordinate value in degrees; resolves HUD abbrevs to model names."""
+    """Read a joint coordinate value from the current IK state, in degrees.
+
+    Accepts either a full OpenSim coordinate name ("knee_angle_r") or a
+    HUD abbreviation ("knee_r") — the catalog resolves abbreviations first.
+
+    Steps:
+      1. Resolve abbreviation → full coordinate name via opensim_joint_catalog.
+      2. Call model.realizePosition(state) to ensure the state is up-to-date.
+      3. Find the Coordinate object in the model's CoordinateSet.
+      4. Read the value in radians, convert to degrees.
+    Returns float("nan") if anything goes wrong (unknown name, IK failure, etc.).
+    """
     coord_name = opensim_joint_catalog.coordinate_for(joint_name)
     try:
         model.realizePosition(state)
@@ -399,6 +490,17 @@ def _read_coord_value(model, state, joint_name):
 
 
 def _send_angle_feedback(t_stream, joint_index, angle_deg):
+    """Send the selected joint angle back to the Open Ephys plugin on UDP port 5001.
+
+    Packet format (4 × float32, little-endian):
+      [0] t_stream    — stream timestamp in seconds since session start
+      [1] 3.1         — version tag (UDP_PACKET_VERSION_ANGLES)
+      [2] joint_index — which joint (matches JOINT_OPTIONS index)
+      [3] angle_deg   — computed angle in degrees (or NaN on failure)
+
+    The plugin optionally reads this port to display the real-time angle in
+    the Open Ephys UI or to log it alongside neural data.
+    """
     global _angle_feedback_sock
     if _angle_feedback_sock is None:
         try:
@@ -492,6 +594,19 @@ def _read_joint_display_config():
 
 
 def _joint_display_watcher_thread():
+    """File-watcher thread: polls opensim_joint_display_config.json every 50 ms.
+
+    When the file changes (detected via OS modification timestamp), reads the
+    JSON and updates _display_filter_joints under _display_filter_lock.
+
+    The 'seq' field in the JSON is a monotonically increasing counter written
+    by the Open Ephys plugin.  We only apply updates where seq > last seen,
+    so stale file writes (e.g. on reconnect) can never revert a newer selection.
+
+    Why a file instead of a UDP command?
+    Writing a JSON sidecar requires no protocol changes and is atomic on all
+    major file systems.  The 50 ms poll latency is imperceptible for a trigger.
+    """
     global _display_filter_joints, _display_filter_seq
     path = os.path.join(WORK_DIR, JOINT_DISPLAY_CONFIG)
     last_mtime = None
@@ -539,6 +654,17 @@ def _hud_screen_transform():
 
 
 def _build_joint_hud_lines(model, state, last_known=None):
+    """Read angle values for every selected joint and format them as HUD lines.
+
+    filter_joints comes from _display_filter_joints (updated by the watcher
+    thread).  For each joint:
+      - Read the current IK angle via _read_coord_value.
+      - If reading fails (NaN), fall back to the last known good value.
+      - Format as "abbrev: XX.X°".
+
+    last_known is a dict {coord_name: degrees} that persists the last valid
+    angle so the HUD does not go blank during transient IK failures.
+    """
     lines = []
     filter_joints = get_display_filter_joints()
     for name in filter_joints:
@@ -741,6 +867,25 @@ def _active_imu_summary(values, slot_map, previous_values=None):
 
 
 def _udp_ahrs_thread():
+    """UDP receiver + AHRS fusion thread (runs as a daemon thread).
+
+    Lifecycle:
+      - Bind UDP port 5000.
+      - Loop forever reading packets until _udp_running is set False.
+      - For each packet:
+          1. Drain the socket buffer (take only the newest frame if multiple
+             arrived since last check — prevents the visualiser from lagging
+             behind when IK is slow).
+          2. Detect packet format (v3 / v2 / legacy).
+          3. Detect session reset (timestamp jump, source change, long gap).
+          4. Run accel/gyro baseline calibration for the first 3 s.
+          5. Run imufusion.Ahrs per sensor (v3/legacy only) → quaternions.
+          6. Apply neutral-pose correction and OpenSim frame rotation.
+          7. Push result to _frame_queue (replace previous frame, not append).
+
+    Session reset resets: AHRS filters, calibration, frame queue, counters.
+    A "session" corresponds to one continuous streaming run from Open Ephys.
+    """
     ahrs_list = [imufusion.Ahrs() for _ in range(N_SENSORS)]
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1222,6 +1367,30 @@ def _apply_tibia_only_locks(coord_set, state, enabled, default_locks):
 
 
 def run_live():
+    """Main entry point: load model, set up IK solver, run the visualisation loop.
+
+    Sequence:
+      1. Delete stale .sto files from previous runs.
+      2. Load the OpenSim model (Rajagopal2015_opensense_calibrated.osim).
+      3. Write a neutral-pose .sto file and assemble the initial IK state so
+         the skeleton appears immediately before any sensor data arrives.
+      4. Start _udp_ahrs_thread (receives UDP, pushes frames to queue).
+      5. Start _joint_display_watcher_thread (watches the JSON sidecar).
+      6. Wait up to MAX_WAIT_S for the first UDP frame.
+      7. Main loop (up to LIVE_VISUALIZER_RATE Hz):
+           a. Pop latest frame from _frame_queue.
+           b. Build OrientationsReference → rebuild IK solver → assemble.
+           c. Read selected joint angles → update HUD.
+           d. model.getVisualizer().show(state).
+      8. On KeyboardInterrupt: clean up sockets and threads.
+
+    Note on IK solver rebuild:
+      Ideally we would call ikSolver.track(state) to update orientations in
+      place.  On this OpenSim 4.5 Python build, however, the solver's internal
+      reference cache does not update between assemble() calls.  Rebuilding
+      the solver from a fresh OrientationsReference each frame is the workaround
+      that makes the skeleton actually follow the live sensor data.
+    """
     for _stale in ("ephys_live_orientations.sto", "ephys_live_motion.sto", "_neutral_frame.sto"):
         _p = os.path.join(WORK_DIR, _stale)
         if os.path.exists(_p):

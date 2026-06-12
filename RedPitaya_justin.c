@@ -1,3 +1,19 @@
+/*
+    ============================================================
+    RedPitaya_justin.c — IMU streaming firmware for Red Pitaya ARM
+    ============================================================
+
+    This C program runs on the Red Pitaya's ARM processor (Linux).
+    It does five things:
+      1. Scans up to 4 AXI I2C buses + 2 AXI SPI buses to find attached IMU chips.
+      2. Calibrates each sensor's DC bias (gyro/accel offset) with 3000 still samples.
+      3. Runs VQF sensor fusion on each IMU to produce orientation quaternions.
+      4. Packs all sensor data into 22-byte-header binary frames.
+      5. Streams those frames over a TCP socket (port 5000) to the Open Ephys plugin on the PC.
+
+    The PC plugin sends ASCII commands back (START, STOP, RECORD ON/OFF, FILTER ON/OFF,
+    FREQ:<hz>, CFG <si> ACC/GYR/SRATE <val>) to control streaming and sensor configuration.
+*/
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
@@ -27,16 +43,16 @@
 #include "vqf.h"
 
 // --- Hardware Constants ---
-#define AXI_GPIO_ADDRESS  0x41200000
-#define RANGE             64000
-#define IIC_RANGE         64000
-#define PORT              5000
-#define DESIRED_SAMPLE_RATE_HZ 100
-#define CTR_CLK_RATE      125000000
-#define HEADER_SIZE       22
-#define ANALOG_WAVEFORM_CHANNELS 2
-#define GYRO_BIAS_CALIBRATION_SAMPLES 3000
-#define IMU_BIAS_CALIBRATION_SLEEP_US 1000
+#define AXI_GPIO_ADDRESS  0x41200000  /* Physical memory address of the AXI GPIO block (FPGA hardware timer) */
+#define RANGE             64000       /* mmap size for the GPIO block (bytes) */
+#define IIC_RANGE         64000       /* mmap size for each AXI IIC or SPI block (bytes) */
+#define PORT              5000        /* TCP port Open Ephys connects to */
+#define DESIRED_SAMPLE_RATE_HZ 100   /* Default hardware tick rate at startup (Hz); FREQ: command changes it */
+#define CTR_CLK_RATE      125000000  /* FPGA clock speed (125 MHz); used to compute ticks_per_sample */
+#define HEADER_SIZE       22          /* Every frame starts with a 22-byte binary header (see write_stream_header) */
+#define ANALOG_WAVEFORM_CHANNELS 2   /* Red Pitaya CH1/CH2 oscilloscope inputs appended to each frame */
+#define GYRO_BIAS_CALIBRATION_SAMPLES 3000  /* ~3 seconds of still samples used to estimate sensor DC bias */
+#define IMU_BIAS_CALIBRATION_SLEEP_US 1000  /* 1 ms sleep between calibration samples so we don't spam the I2C bus */
 #define ICM20948_BANK_0 0x00
 #define ICM20948_BANK_2 0x02
 #define ICM20948_BANK_3 0x03
@@ -71,41 +87,57 @@ static int current_stream_hw_hz(void)
     return clamp_stream_hw_hz(g_stream_hw_hz);
 }
 
+/*
+    ticks_for_stream_hz() — converts a desired sample rate (Hz) into the number of
+    FPGA hardware clock ticks between samples.
+
+    Math: ticks_per_sample = CTR_CLK_RATE / sample_rate_hz
+    Example: at 100 Hz → 125,000,000 / 100 = 1,250,000 ticks between samples.
+    The main stream loop spin-waits on the GPIO counter until this many ticks pass,
+    pacing the stream at the exact desired rate without a software sleep.
+*/
 static uint32_t ticks_for_stream_hz(int hz)
 {
     uint32_t ticks = (uint32_t)(CTR_CLK_RATE / clamp_stream_hw_hz(hz));
     return ticks > 0 ? ticks : 1;
 }
 
-// --- Discovery Logic Structures ---
+/*
+    SensorInstance — one IMU chip (one physical sensor board).
+    Up to 6 of these can be active at once (4 I2C + 2 SPI).
+*/
 typedef struct {
-    char name[16];
-    void *axi_map;
-    uint8_t i2c_addr;
-    int num_channels;
-    uint8_t data_reg_start;
-    bool active;
-    bool split_read;
-    bool is_spi; // NEW: Flag to tell run_stream which protocol to use
-    int16_t gyro_bias[3];
-    int16_t acc_bias[3];
-    bool mag_is_fresh;
-    int16_t mag_cache[3];
-    int mag_skip_counter;
+    char name[16];       /* chip model string: "MPU6050", "MPU9250", "ICM20948", or "BNO055" */
+    void *axi_map;       /* mmap pointer to the AXI IP block (IIC or SPI) for this sensor's bus */
+    uint8_t i2c_addr;    /* I2C slave address (e.g. 0x68 for MPU6050); unused for SPI */
+    int num_channels;    /* 6 for accel+gyro only, 9 for accel+gyro+mag */
+    uint8_t data_reg_start; /* first data register to burst-read (e.g. 0x3B on MPU6050) */
+    bool active;         /* true if this slot holds a detected sensor */
+    bool split_read;     /* true if temperature register sits between accel and gyro (MPU6050) */
+    bool is_spi;         /* true = SPI protocol via axi_spi_*, false = I2C via axi_iic_* */
+    int16_t gyro_bias[3]; /* 3-axis gyroscope DC offset (raw counts); subtracted before VQF */
+    int16_t acc_bias[3];  /* 3-axis accelerometer DC offset (raw counts); subtracted before VQF */
+    bool mag_is_fresh;   /* true if the magnetometer reading in mag_cache was updated this tick */
+    int16_t mag_cache[3]; /* last valid magnetometer reading, held until the mag updates again */
+    int mag_skip_counter; /* counts hardware ticks between magnetometer reads (mag runs slower) */
     /* Per-sensor UI config (CFG lines from Open Ephys); applied during stream */
-    int cfg_acc_id;
-    int cfg_gyr_id;
-    int cfg_target_hz; /* desired effective sample rate for this sensor (<= hw rate) */
+    int cfg_acc_id;      /* 0=±2g, 1=±4g, 2=±8g, 3=±16g (chosen by operator in device editor) */
+    int cfg_gyr_id;      /* 0=±250°/s, 1=±500, 2=±1000, 3=±2000 */
+    int cfg_target_hz;   /* desired effective sample rate for this sensor (firmware decimates to achieve it) */
 } SensorInstance;
 
+/*
+    HardwareContext — the entire system state, passed around to most functions.
+*/
 typedef struct {
-    void *axi_gpio_map;
-    volatile uint32_t *gpio_counter;
-    volatile uint32_t *gpio_reset;
+    void *axi_gpio_map;              /* mmap pointer to the FPGA GPIO block */
+    volatile uint32_t *gpio_counter; /* hardware counter register — increments at 125 MHz;
+                                        we spin-wait until it advances by ticks_per_sample */
+    volatile uint32_t *gpio_reset;   /* writing 1 then 0 resets the counter to zero */
 
-    SensorInstance sensors[6]; // UPDATED: 4 I2C slots + 2 SPI slots
-    int active_sensor_count;
-    int total_channels;
+    SensorInstance sensors[6]; /* up to 4 I2C slots + 2 SPI slots */
+    int active_sensor_count;   /* how many sensors were actually found during init */
+    int total_channels;        /* sum of num_channels+4 (fusion) for all active sensors + 2 analog */
 } HardwareContext;
 
 // Global jump buffer for the watchdog
@@ -117,17 +149,21 @@ static long long timespec_diff_ns(const struct timespec *start, const struct tim
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
            (long long)(end->tv_nsec - start->tv_nsec);
 }
-/* --- AXI IIC bus recovery (Xilinx core register map) --- */
-#define XIIC_RESETR_OFFSET           0x40u
-#define XIIC_CR_REG_OFFSET           0x100u
-#define XIIC_SR_REG_OFFSET           0x104u
-#define XIIC_DRR_REG_OFFSET          0x10Cu
-#define XIIC_RESET_MASK              0x0Au
-#define XIIC_CR_ENABLE_DEVICE_MASK   0x01u
-#define XIIC_CR_TX_FIFO_RESET_MASK   0x02u
-#define XIIC_SR_BUS_BUSY_MASK        0x04u
-#define XIIC_SR_RX_FIFO_EMPTY_MASK   0x40u
-#define XIIC_SR_TX_FIFO_EMPTY_MASK   0x80u
+/*
+    AXI IIC register offsets — from the Xilinx AXI IIC data sheet (PG090).
+    We mmap the core's register block and access these offsets as volatile uint32_t pointers.
+    This is the standard Xilinx I2C IP core used in FPGA designs.
+*/
+#define XIIC_RESETR_OFFSET           0x40u   /* Software Reset Register — write 0x0A to reset the core */
+#define XIIC_CR_REG_OFFSET           0x100u  /* Control Register — enable/reset/configure the core */
+#define XIIC_SR_REG_OFFSET           0x104u  /* Status Register — read to check bus/FIFO state */
+#define XIIC_DRR_REG_OFFSET          0x10Cu  /* Data Receive Register — read to drain the RX FIFO */
+#define XIIC_RESET_MASK              0x0Au   /* Magic value required by Xilinx spec to trigger core reset */
+#define XIIC_CR_ENABLE_DEVICE_MASK   0x01u   /* CR bit 0: set to 1 to enable the I2C core */
+#define XIIC_CR_TX_FIFO_RESET_MASK   0x02u   /* CR bit 1: set to 1 to flush the TX FIFO */
+#define XIIC_SR_BUS_BUSY_MASK        0x04u   /* SR bit 2: 1 = another master is on the wire (or bus hung) */
+#define XIIC_SR_RX_FIFO_EMPTY_MASK   0x40u   /* SR bit 6: 1 = RX FIFO is empty (nothing stuck in receive queue) */
+#define XIIC_SR_TX_FIFO_EMPTY_MASK   0x80u   /* SR bit 7: 1 = TX FIFO is empty (all pending sends completed) */
 
 static uint32_t axi_iic_read_sr(void *axi_map)
 {
@@ -135,6 +171,18 @@ static uint32_t axi_iic_read_sr(void *axi_map)
     return *sr;
 }
 
+/*
+    axi_iic_force_reset() — recovers a hung AXI IIC (I2C) core.
+
+    I2C buses can get stuck if a transaction is interrupted mid-way (e.g. power glitch,
+    firmware crash) and the slave device is still driving SDA low. This function performs
+    a full Xilinx software recovery sequence:
+      Step 1: Write the reset value (0x0A) to the Reset Register — tells the core to reinitialise.
+      Step 2: Set TX_FIFO_RESET bit in the Control Register — flushes any bytes stuck in TX queue.
+      Step 3: Drain the RX FIFO by reading the DRR register up to 256 times until
+              the RX_FIFO_EMPTY bit is set — clears any garbage received before the hang.
+      Step 4: Set ENABLE_DEVICE bit in Control Register — brings the core back online.
+*/
 static void axi_iic_force_reset(void *axi_map)
 {
     if (axi_map == NULL)
@@ -144,19 +192,19 @@ static void axi_iic_force_reset(void *axi_map)
     volatile uint8_t *cr = (volatile uint8_t *)((uint8_t *)axi_map + XIIC_CR_REG_OFFSET);
     volatile uint32_t *drr = (volatile uint32_t *)((uint8_t *)axi_map + XIIC_DRR_REG_OFFSET);
 
-    *reset_reg = XIIC_RESET_MASK;
+    *reset_reg = XIIC_RESET_MASK;   /* Step 1: software reset the core */
     usleep(2000);
 
-    *cr = XIIC_CR_TX_FIFO_RESET_MASK;
+    *cr = XIIC_CR_TX_FIFO_RESET_MASK;  /* Step 2: flush the TX FIFO */
     usleep(200);
 
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < 256; i++) {    /* Step 3: drain the RX FIFO */
         if (axi_iic_read_sr(axi_map) & XIIC_SR_RX_FIFO_EMPTY_MASK)
             break;
-        (void)*drr;
+        (void)*drr;  /* read and discard one byte from RX FIFO */
     }
 
-    *cr = XIIC_CR_ENABLE_DEVICE_MASK;
+    *cr = XIIC_CR_ENABLE_DEVICE_MASK;  /* Step 4: re-enable the I2C core */
     usleep(500);
 }
 
@@ -200,6 +248,18 @@ static void axi_iic_recover_bus(void *axi_map, const char *reason)
     usleep(500);
 }
 
+/*
+    iic_read_n_bytes_recovering() — a fault-tolerant I2C read.
+
+    I2C buses are fragile: a sensor that misses a clock edge can lock up the bus.
+    We use a two-check pattern:
+      Check 1 (PRE-READ):  if the bus looks stuck before we try, reset it first.
+                           This prevents sending a doomed transaction.
+      Do the read.
+      Check 2 (POST-READ): if the bus looks stuck AFTER the read, the transaction
+                           may have partially hung mid-way. Reset and retry once.
+    This handles both "bus was already stuck" and "bus hung mid-transaction" cases.
+*/
 static void iic_read_n_bytes_recovering(void *axi_map, uint8_t slave_addr, uint8_t reg_addr,
                                         uint8_t *buffer, int num_bytes)
 {
@@ -207,13 +267,13 @@ static void iic_read_n_bytes_recovering(void *axi_map, uint8_t slave_addr, uint8
         return;
 
     if (axi_iic_bus_looks_stuck(axi_map))
-        axi_iic_recover_bus(axi_map, "pre-read");
+        axi_iic_recover_bus(axi_map, "pre-read");  /* check 1: clean up before attempting */
 
     axi_iic_read_n_bytes(axi_map, slave_addr, reg_addr, buffer, num_bytes);
 
     if (axi_iic_bus_looks_stuck(axi_map)) {
-        axi_iic_recover_bus(axi_map, "post-read");
-        axi_iic_read_n_bytes(axi_map, slave_addr, reg_addr, buffer, num_bytes);
+        axi_iic_recover_bus(axi_map, "post-read"); /* check 2: transaction may have hung mid-way */
+        axi_iic_read_n_bytes(axi_map, slave_addr, reg_addr, buffer, num_bytes); /* retry once */
     }
 }
 
@@ -378,6 +438,21 @@ static int prompt_capture_duration_seconds(void) {
     }
 }
 
+/*
+    write_stream_header() — fills the 22-byte binary frame header.
+
+    Every frame starts with this header so the PC plugin knows how to decode it.
+    We use memcpy() instead of struct assignment to avoid any compiler-added padding
+    bytes that would corrupt the layout when the PC reads it as a flat byte array.
+
+    Header layout (all little-endian):
+      bytes 0-3:   offset (int32)  = 0 (always)
+      bytes 4-7:   bytes_per_frame (int32) — payload size in bytes
+      bytes 8-9:   dtype (int16)   = 3 (meaning int16 payload)
+      bytes 10-13: elm (int32)     = 2 (element size in bytes = sizeof(int16_t))
+      bytes 14-17: total_channels (int32) — number of int16 values in the payload
+      bytes 18-21: ns (int32)      — monotonically increasing frame counter (sample number)
+*/
 static void write_stream_header(uint8_t *packet, int bytes_per_frame, int total_channels, int32_t ns)
 {
     int32_t offset = 0;
@@ -385,12 +460,12 @@ static void write_stream_header(uint8_t *packet, int bytes_per_frame, int total_
     int32_t elm = 2;
     int16_t dtype = 3;
 
-    memcpy(packet + 0,  &offset, 4);
-    memcpy(packet + 4,  &bpb, 4);
-    memcpy(packet + 8,  &dtype, 2);
-    memcpy(packet + 10, &elm, 4);
-    memcpy(packet + 14, &total_channels, 4);
-    memcpy(packet + 18, &ns, 4);
+    memcpy(packet + 0,  &offset, 4);   /* byte offset from start of payload (always 0) */
+    memcpy(packet + 4,  &bpb, 4);      /* payload size in bytes */
+    memcpy(packet + 8,  &dtype, 2);    /* data type code: 3 = int16 */
+    memcpy(packet + 10, &elm, 4);      /* bytes per element: 2 */
+    memcpy(packet + 14, &total_channels, 4); /* number of channels in this frame */
+    memcpy(packet + 18, &ns, 4);       /* sample/frame counter */
 }
 
 static void build_measurement_path(char *buffer, size_t buffer_size, const char *prefix, const char *extension) {
@@ -569,6 +644,21 @@ static void get_sensor_gyro_from_channels(const SensorInstance *s, const int16_t
     }
 }
 
+/*
+    calibrate_imu_biases() — measures each sensor's DC offset (bias) before streaming.
+
+    Gyroscopes always output a small non-zero value even when perfectly still because
+    of chip-level imperfections. This is called "gyro drift" or "bias". If we don't
+    subtract it, the VQF orientation filter will think the sensor is slowly rotating
+    and the 3D model will drift over time.
+
+    Method: take GYRO_BIAS_CALIBRATION_SAMPLES (3000) readings while the sensors
+    are completely still, then average them. That average IS the bias. Store it in
+    s->gyro_bias and s->acc_bias so fusion_update_from_channels() can subtract it.
+
+    Keep the sensors still during the ~3-second calibration window or the bias
+    estimate will include real motion and the fusion will be off.
+*/
 static void calibrate_imu_biases(HardwareContext *ctx) {
     int16_t raw_channels[16];
     int64_t gyro_sums[6][3] = {0};
@@ -704,21 +794,47 @@ static void update_fusion_state(bool *with_fusion) {
     *with_fusion = fusion_is_enabled();
 }
 
-/* Decimation interval for a sensor at the given hardware tick rate.
-   Must stay in sync with init_sensor_decimation(), which uses it. */
+/*
+    sensor_decim_interval_for_hz() — computes how many hardware ticks to skip between
+    VQF updates for a sensor.
+
+    Example: if hw_hz = 1000 and the sensor's cfg_target_hz = 100, we want to run VQF
+    only every 10 ticks. The interval = ceiling(hw_hz / target_hz) = 10.
+
+    Ceiling division (hw + t - 1) / t is used instead of plain hw/t to handle cases
+    where the target doesn't divide evenly (e.g. hw=1000, target=300 → interval=4,
+    giving ~250 Hz actual, which is the best we can do with whole-tick steps).
+
+    Must stay in sync with init_sensor_decimation(), which uses the same formula.
+*/
 static int sensor_decim_interval_for_hz(const SensorInstance *s, int hw_hz)
 {
     int t = s->cfg_target_hz;
     if (t < 1) t = 1;
     if (t > hw_hz) t = hw_hz;
-    int inv = (t >= hw_hz) ? 1 : (hw_hz + t - 1) / t;
+    int inv = (t >= hw_hz) ? 1 : (hw_hz + t - 1) / t;  /* ceiling division */
     return inv < 1 ? 1 : inv;
 }
 
-/* Runs fusion for one sensor from its freshly read raw channels and writes
-   the Q15 quaternion after the raw channels. Returns elapsed time in ns. */
+/*
+    fusion_update_from_channels() — runs one VQF update step for a single sensor.
+
+    Before calling fusion_update_sensor() (VQF), we subtract the calibrated bias from
+    each axis. This is the key step that prevents drift: without bias removal, the VQF
+    filter would integrate a constant offset into the orientation estimate, causing the
+    simulated limb to slowly rotate even when the real limb is still.
+
+    We wrap the VQF call in clock_gettime() to measure filter latency in nanoseconds.
+    The timing is reported periodically (maybe_report_vqf_stats) so we can verify
+    that VQF stays fast enough for the target sample rate.
+
+    The quaternion result (4 × int16, Q15 scaled) is written directly after the raw
+    channel data in channel_out. So if num_channels=6 (accel+gyro), the quaternion
+    occupies indices [6], [7], [8], [9].
+*/
 static long long fusion_update_from_channels(SensorInstance *s, int sensor_index, int16_t *channel_out)
 {
+    /* Subtract calibrated DC offsets so VQF sees zero when the sensor is still */
     int16_t raw_acc[3] = {
         (int16_t)(channel_out[0] - s->acc_bias[0]),
         (int16_t)(channel_out[1] - s->acc_bias[1]),
@@ -741,17 +857,17 @@ static long long fusion_update_from_channels(SensorInstance *s, int sensor_index
         mag_is_fresh = s->mag_is_fresh;
     }
 
-    raw_gyr[0] -= s->gyro_bias[0];
+    raw_gyr[0] -= s->gyro_bias[0];  /* remove calibrated gyro bias */
     raw_gyr[1] -= s->gyro_bias[1];
     raw_gyr[2] -= s->gyro_bias[2];
 
     struct timespec vqf_start;
     struct timespec vqf_end;
-    clock_gettime(CLOCK_MONOTONIC, &vqf_start);
+    clock_gettime(CLOCK_MONOTONIC, &vqf_start);  /* measure VQF execution time */
     fusion_update_sensor(sensor_index, raw_acc, raw_gyr, raw_mag, mag_is_fresh,
-                         channel_out + s->num_channels);
+                         channel_out + s->num_channels);  /* quaternion written here */
     clock_gettime(CLOCK_MONOTONIC, &vqf_end);
-    return timespec_diff_ns(&vqf_start, &vqf_end);
+    return timespec_diff_ns(&vqf_start, &vqf_end);  /* return latency in nanoseconds */
 }
 
 static void acquire_sensor_samples(
@@ -787,11 +903,23 @@ static void acquire_sensor_samples(
     read_analog_waveform_channels((int16_t*)(((uint8_t*)frame_buffer) + current_byte_offset));
 }
 
+/*
+    Decimation state — one counter and one interval per sensor slot.
+
+    g_decim_counter[i]: counts hardware ticks since the last real read for sensor i.
+                         Incremented every tick in sensor_worker().
+    g_decim_interval[i]: how many ticks to wait between real reads (computed by
+                          sensor_decim_interval_for_hz). E.g. interval=10 means one
+                          real VQF update every 10 hardware ticks.
+    g_sensor_hold[i]:    the most recent channel data for sensor i. When we skip a tick
+                          (counter < interval), we copy the held data into the frame
+                          instead of doing a real read, so the PC still gets a full frame.
+*/
 #define HOLD_SLOTS 6
 #define HOLD_INT16 32
-static int16_t g_sensor_hold[HOLD_SLOTS][HOLD_INT16];
-static int g_decim_counter[HOLD_SLOTS];
-static int g_decim_interval[HOLD_SLOTS];
+static int16_t g_sensor_hold[HOLD_SLOTS][HOLD_INT16];   /* last good reading per sensor */
+static int g_decim_counter[HOLD_SLOTS];                  /* ticks since last real read */
+static int g_decim_interval[HOLD_SLOTS];                 /* ticks between real reads */
 
 static void init_sensor_decimation(HardwareContext *ctx, int hw_hz)
 {
@@ -841,6 +969,17 @@ static void *sensor_thread_loop(void *arg)
     return NULL;
 }
 
+/*
+    sensor_threads_init() — creates N-1 worker threads for parallel sensor reads.
+
+    Threading pattern: with N sensors we create N-1 permanent worker threads.
+    Each frame, we send the first N-1 sensors to these threads while the main
+    thread reads the last sensor simultaneously. All finish at roughly the same
+    time, cutting total read latency by a factor of ~N compared to sequential reads.
+
+    The threads are pre-created here (not per-frame) so there is no thread
+    creation overhead inside the hot path. They block on semaphores between frames.
+*/
 static void sensor_threads_init(HardwareContext *ctx, int n)
 {
     g_sensor_thread_count = (n > 1) ? n - 1 : 0;
@@ -867,6 +1006,17 @@ static void sensor_threads_shutdown(void)
     g_sensor_thread_count = 0;
 }
 
+/*
+    sensor_worker() — reads one sensor for one frame, applying decimation.
+
+    Called on either a worker thread (sensors 0..N-2) or the main thread (sensor N-1).
+    Each call either does a REAL read (counter reached interval, VQF runs) or a HOLD
+    copy (counter not yet at interval, return last value instead of waking the I2C bus).
+
+    Why hold? Because the decimated sensor must still contribute data to every frame
+    (the frame layout is fixed at stream start). Holding the last value is far better
+    than sending zeros, which would look like a sensor dropout.
+*/
 static void *sensor_worker(void *arg)
 {
     SensorWorkArgs *a = (SensorWorkArgs *)arg;
@@ -880,7 +1030,7 @@ static void *sensor_worker(void *arg)
     if (i < HOLD_SLOTS) {
         g_decim_counter[i]++;
         if (g_decim_counter[i] >= g_decim_interval[i]) {
-            g_decim_counter[i] = 0;
+            g_decim_counter[i] = 0;  /* reset counter — time for a real read */
             read_sensor_raw_channels(s, channel_out);
 
             if (a->with_fusion) {
@@ -1194,6 +1344,28 @@ static void reinit_fusion_for_hz(HardwareContext *ctx, float hz)
     }
 }
 
+/*
+    process_stream_commands() — non-blocking poll for ASCII commands on the TCP socket.
+
+    Called once per frame loop. Uses MSG_DONTWAIT so it returns immediately if no
+    command is waiting (returns EAGAIN), keeping the stream loop from blocking.
+
+    Commands understood:
+      STOP           — flush/close recording files, break the stream loop.
+      RECORD ON      — start writing frames to SD card (bin + csv files).
+      RECORD OFF     — stop writing; flush any buffered data.
+      FILTER ON/OFF  — enable/disable VQF sensor fusion.
+      AIN_GAIN:<f>   — set analog input gain (float).
+      AOUT:<v>       — set analog output voltage (float).
+      FREQ:<hz>      — change hardware tick rate; also resets decimation intervals
+                       and re-initialises VQF for the new rate so filter continuity
+                       is maintained.
+      CFG <si> ACC <0-3>   — accelerometer full-scale range preset for sensor si.
+      CFG <si> GYR <0-3>   — gyroscope full-scale range preset for sensor si.
+      CFG <si> SRATE <hz>  — per-sensor effective sample rate (ODR + decimation update).
+
+    Returns: 0 = continue streaming, 1 = client sent STOP, -1 = TCP disconnected.
+*/
 static int process_stream_commands(
     int client_fd,
     HardwareContext *ctx,
@@ -1248,6 +1420,11 @@ static int process_stream_commands(
         }
 
         if (strstr(cmd, "FREQ:")) {
+            /* FREQ: changes the hardware tick rate mid-stream. We must also:
+               - Apply the new ODR to all sensors (write hardware registers).
+               - Reset decimation intervals because the number of ticks per second changed.
+               - Reinitialise VQF because VQF's internal sample-rate assumption changed.
+                 Without reinit, VQF would integrate with the wrong time step and drift. */
             int frequency_hz = atoi(strstr(cmd, "FREQ:") + 5);
             g_stream_hw_hz = clamp_stream_hw_hz(frequency_hz);
             for (int si = 0; si < ctx->active_sensor_count; si++) {
@@ -1260,6 +1437,11 @@ static int process_stream_commands(
         }
 
         if (strstr(cmd, "CFG ")) {
+            /* CFG changes sensor hardware registers on the fly.
+               ACC preset 0-3 → ±2g / ±4g / ±8g / ±16g (writes to chip ACCEL_CONFIG register).
+               GYR preset 0-3 → ±250 / ±500 / ±1000 / ±2000 °/s (writes to GYRO_CONFIG register).
+               SRATE <hz>     → per-sensor effective rate: applies ODR to chip registers AND
+                                recomputes decimation interval. */
             int si = -1, val = -1;
             if (sscanf(cmd, "CFG %d ACC %d", &si, &val) == 2) {
                 if (si >= 0 && si < ctx->active_sensor_count && val >= 0 && val <= 3) {
@@ -1402,7 +1584,21 @@ static int run_timed_csv_capture(HardwareContext *ctx, int base_channels, int du
     return 0;
 }
 
-// --- Helper: Sensor Identification ---
+/*
+    identify_and_add_sensor() — configures a newly discovered sensor and adds it to ctx.
+
+    The `id` byte comes from the WHO_AM_I register of the IMU chip. Each chip has a
+    unique ID so we can identify the chip model from a single byte read:
+      0x68 = MPU6050  (6-axis: accel + gyro only, I2C only)
+      0x71 = MPU9250  (9-axis: accel + gyro + magnetometer AK8963)
+      0xEA = ICM20948 (9-axis: accel + gyro + magnetometer AK09916, newer chip)
+      0xA0 = BNO055   (9-axis with internal fusion, I2C only)
+
+    For MPU9250 (I2C path): we set register 0x37 bit 1 (I2C_BYPASS_EN) to enable
+    "bypass mode", which connects the auxiliary I2C bus directly to the main I2C pins.
+    This lets us talk to the AK8963 magnetometer as a normal I2C slave without going
+    through the MPU's I2C master engine.
+*/
 static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id, uint8_t addr, bool is_spi) {
     SensorInstance *s = &ctx->sensors[ctx->active_sensor_count];
     s->axi_map = map;
@@ -1410,7 +1606,7 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
     s->is_spi = is_spi;
     s->active = true;
 
-    if (id == 0x68 && !is_spi) { // MPU6050
+    if (id == 0x68 && !is_spi) { // MPU6050 — 6-axis (accel+gyro), I2C only
         strcpy(s->name, "MPU6050");
         s->split_read = true;
         s->num_channels = 6;
@@ -1420,7 +1616,7 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
         axi_iic_write_byte(map, addr, 0x6B, 0x01);
         usleep(5000);  // 5ms Wake delay
     }
-    else if (id == 0x71) { // MPU9250
+    else if (id == 0x71) { // MPU9250 — 9-axis (accel+gyro+mag); SPI or I2C
         strcpy(s->name, "MPU9250");
         s->split_read = false;
         s->num_channels = 9;
@@ -1435,9 +1631,11 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
             axi_iic_write_byte(map, addr, 0x6B, 0x01); // Wake
             usleep(5000);
 
-            // Disable I2C Master and Enable Bypass to see the Magnetometer (0x0C)
-            axi_iic_write_byte(map, addr, 0x6A, 0x00);
-            axi_iic_write_byte(map, addr, 0x37, 0x02);
+            /* Enable I2C bypass mode so the AK8963 magnetometer (at 0x0C) is visible
+               directly on the external I2C bus. Reg 0x6A bit 5 = 0 disables I2C master.
+               Reg 0x37 bit 1 = 1 connects the auxiliary I2C bus to the external pins. */
+            axi_iic_write_byte(map, addr, 0x6A, 0x00); /* disable MPU I2C master */
+            axi_iic_write_byte(map, addr, 0x37, 0x02); /* enable I2C bypass for AK8963 */
             usleep(5000);
 
             uint8_t ak_wia = 0;
@@ -1453,7 +1651,7 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
             printf("  -> MPU9250 (I2C) initialized (9-axis enabled).\n");
         }
     }
-    else if (id == 0xEA) { // ICM20948
+    else if (id == 0xEA) { // ICM20948 — 9-axis (accel+gyro+mag AK09916); SPI or I2C
         strcpy(s->name, "ICM20948");
         s->split_read = false;
         s->num_channels = 9;
@@ -1471,7 +1669,7 @@ static void identify_and_add_sensor(HardwareContext *ctx, void *map, uint8_t id,
             usleep(10000);
         }
     }
-    else if (id == 0xA0 && !is_spi) { // BNO055
+    else if (id == 0xA0 && !is_spi) { // BNO055 — 9-axis with onboard fusion engine; I2C only
         strcpy(s->name, "BNO055");
         s->split_read = false;
         s->num_channels = 9;

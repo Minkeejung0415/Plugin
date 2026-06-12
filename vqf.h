@@ -5,6 +5,56 @@
 // Pure C conversion for Red Pitaya embedded use.
 // Original C++ implementation by Daniel Laidig.
 
+/*
+ * ============================================================================
+ *  VQF — Versatile Quaternion-based Filter
+ * ============================================================================
+ *
+ *  WHAT THIS FILE IS:
+ *  This header describes a single-sensor orientation filter. You feed it
+ *  raw measurements from a gyroscope, accelerometer, and optionally a
+ *  magnetometer, and it continuously tells you "which way is this sensor
+ *  pointing?" as a quaternion (four numbers: w, x, y, z).
+ *
+ *  WHY QUATERNIONS?
+ *  A quaternion is a compact, gimbal-lock-free way to represent a 3-D
+ *  rotation. Think of it as four numbers that together encode the axis you
+ *  rotated around and how far you rotated.  Euler angles (pitch/roll/yaw)
+ *  are intuitive but break down in certain orientations (gimbal lock).
+ *  Quaternions avoid that entirely.
+ *
+ *  THE THREE SENSOR ROLES:
+ *    Gyroscope    → measures how fast you are spinning right now (rad/s).
+ *                   Very accurate for short bursts but drifts over time.
+ *    Accelerometer → measures gravity's pull direction (m/s²).
+ *                   Tells you which way "down" is — corrects tilt drift.
+ *    Magnetometer  → measures Earth's magnetic field.
+ *                   Tells you which way is north — corrects yaw drift.
+ *
+ *  HOW VQF COMBINES THEM:
+ *    1. Integrate gyro readings each time step → fast but drifty orientation
+ *    2. Compare accelerometer "down" vector to filter's predicted "down"
+ *       → gently pull the orientation back toward true vertical (tauAcc)
+ *    3. (Optional) Compare magnetometer heading to filter's heading
+ *       → gently pull yaw toward true north (tauMag)
+ *    4. Estimate and subtract gyro bias so drift shrinks over time
+ *    5. Detect when the sensor is still (rest) for faster, more accurate
+ *       bias convergence
+ *
+ *  OUTPUT MODES:
+ *    3D  — gyro strapdown only (raw integration, no correction)
+ *    6D  — gyro + accel (tilt-corrected, no heading reference)
+ *    9D  — gyro + accel + mag (full orientation with heading)
+ *
+ *  USAGE PATTERN:
+ *    VQF vqf;
+ *    vqf_init(&vqf, gyr_Ts, acc_Ts, mag_Ts);   // one-time setup
+ *    // every sample:
+ *    vqf_update(&vqf, gyr, acc);                // 6D update
+ *    vqf_get_quat_6d(&vqf, out_quat);           // read result
+ * ============================================================================
+ */
+
 #ifndef VQF_H
 #define VQF_H
 
@@ -33,11 +83,30 @@ typedef float vqf_real_t;
 #endif
 #endif
 
+/*
+ * ----------------------------------------------------------------------------
+ *  VQFParams — Tuning knobs for the filter
+ * ----------------------------------------------------------------------------
+ *  All fields have sensible defaults (set by vqf_params_init).  You only
+ *  need to change them if you know why.
+ *
+ *  The two most important tunables are tauAcc and tauMag:
+ *    • Larger tauAcc  → smoother tilt correction, less reactive to real motion
+ *    • Smaller tauAcc → faster tilt correction, but motion noise bleeds in
+ *    • Same idea for tauMag with respect to heading correction
+ * ----------------------------------------------------------------------------
+ */
 /**
  * @brief Tuning parameters for the VQF algorithm.
  */
 typedef struct {
+    /* How quickly to trust the accelerometer for tilt correction.
+     * 3 s means the filter blends 63% of the accel correction over 3 s.
+     * Increase if the body moves fast (reduces false tilt corrections).  */
     vqf_real_t tauAcc;                   /**< Accelerometer low-pass filter time constant (default: 3.0 s) */
+
+    /* How quickly to trust the magnetometer for heading correction.
+     * 9 s means slow, stable heading convergence.  Increase near metal.  */
     vqf_real_t tauMag;                   /**< Magnetometer update time constant (default: 9.0 s) */
 
 #ifndef VQF_NO_MOTION_BIAS_ESTIMATION
@@ -72,12 +141,36 @@ typedef struct {
     vqf_real_t magRejectionFactor;       /**< Factor to slow heading correction during long disturbances (default: 2.0) */
 } VQFParams;
 
+/*
+ * ----------------------------------------------------------------------------
+ *  VQFState — Everything the filter remembers between samples
+ * ----------------------------------------------------------------------------
+ *  VQF splits the total orientation into two quaternions that are multiplied
+ *  together at output time:
+ *
+ *    gyrQuat  — "Where gyro integration says I am pointing"
+ *    accQuat  — "The correction that aligns gyrQuat with gravity"
+ *    delta    — Additional yaw correction from the magnetometer
+ *
+ *  Final 6D output  = accQuat * gyrQuat
+ *  Final 9D output  = rotate(6D output, delta)
+ *
+ *  The remaining fields (bias, Kalman covariance P, low-pass filter states,
+ *  magnetometer tracking) are internal bookkeeping.  You do not normally
+ *  need to read them; use the getter functions instead.
+ * ----------------------------------------------------------------------------
+ */
 /**
  * @brief Filter state of the VQF algorithm.
  */
 typedef struct {
+    /* The raw gyro-only orientation: integrated spin, no corrections yet. */
     vqf_real_t gyrQuat[4];               /**< Gyroscope strapdown integration quaternion */
+
+    /* The tilt correction quaternion: rotates gyrQuat so "down" matches accel. */
     vqf_real_t accQuat[4];               /**< Inclination correction quaternion */
+
+    /* Additional yaw (compass heading) offset applied on top of 6D result. */
     vqf_real_t delta;                    /**< Heading difference between Ei and E */
     bool restDetected;                   /**< True if rest is detected */
     bool magDistDetected;                /**< True if magnetic disturbance is detected */
@@ -162,29 +255,43 @@ typedef struct {
 
 /* ---- Initialization ---- */
 
-/** @brief Initialize VQFParams with default values. */
+/** @brief Fill *params with safe default values (call before vqf_init_params). */
 void vqf_params_init(VQFParams *params);
 
+/* Call vqf_init once per sensor before the data loop.
+ * gyrTs / accTs / magTs = 1.0 / sample_rate_Hz for each sensor.
+ * If the sensor has no magnetometer, pass 0 for magTs. */
 /** @brief Initialize VQF with default parameters. */
 void vqf_init(VQF *vqf, vqf_real_t gyrTs, vqf_real_t accTs, vqf_real_t magTs);
 
-/** @brief Initialize VQF with custom parameters. */
+/** @brief Initialize VQF with custom parameters (call vqf_params_init first). */
 void vqf_init_params(VQF *vqf, const VQFParams *params, vqf_real_t gyrTs, vqf_real_t accTs, vqf_real_t magTs);
 
-/* ---- Update steps ---- */
+/* ---- Update steps (call once per sample in the data loop) ---- */
 
-/** @brief Perform gyroscope update step. */
+/* gyr[3] = angular velocity in rad/s, axes x/y/z.
+ * This integrates the spin to advance gyrQuat by one time step.
+ * Must be called every sample even when accel/mag are unavailable. */
+/** @brief Perform gyroscope update step (always required). */
 void vqf_update_gyr(VQF *vqf, const vqf_real_t gyr[3]);
 
-/** @brief Perform accelerometer update step. */
+/* acc[3] = linear acceleration in m/s², axes x/y/z.
+ * Compares the predicted gravity direction to the measured one and
+ * gently corrects accQuat.  Also feeds the gyro bias estimator. */
+/** @brief Perform accelerometer update step (tilt correction). */
 void vqf_update_acc(VQF *vqf, const vqf_real_t acc[3]);
 
-/** @brief Perform magnetometer update step. */
+/* mag[3] = magnetic field in any consistent unit (e.g. µT), axes x/y/z.
+ * Corrects the yaw angle (delta) toward magnetic north.
+ * Automatically skipped when magnetic disturbance is detected. */
+/** @brief Perform magnetometer update step (heading correction). */
 void vqf_update_mag(VQF *vqf, const vqf_real_t mag[3]);
 
+/* Convenience: run vqf_update_gyr then vqf_update_acc in one call. */
 /** @brief Perform 6D update (gyroscope + accelerometer). */
 void vqf_update(VQF *vqf, const vqf_real_t gyr[3], const vqf_real_t acc[3]);
 
+/* Convenience: run all three updates in one call. */
 /** @brief Perform 9D update (gyroscope + accelerometer + magnetometer). */
 void vqf_update_9d(VQF *vqf, const vqf_real_t gyr[3], const vqf_real_t acc[3], const vqf_real_t mag[3]);
 
@@ -193,15 +300,20 @@ void vqf_update_batch(VQF *vqf, const vqf_real_t gyr[], const vqf_real_t acc[], 
                       size_t N, vqf_real_t out6D[], vqf_real_t out9D[], vqf_real_t outDelta[],
                       vqf_real_t outBias[], vqf_real_t outBiasSigma[], bool outRest[], bool outMagDist[]);
 
-/* ---- Output getters ---- */
+/* ---- Output getters (read after each update) ---- */
 
-/** @brief Get 3D quaternion (gyro strapdown only). */
+/* out[4] = {w, x, y, z}.  All three functions write a unit quaternion.
+ * Choose the one that matches your update mode:
+ *   3D: gyro only — drifts over time, useful for fast motions only
+ *   6D: gyro + accel — stable tilt, yaw drifts slowly (no north reference)
+ *   9D: all three — fully stable when mag is reliable              */
+/** @brief Get 3D quaternion (gyro strapdown only, no drift correction). */
 void vqf_get_quat_3d(const VQF *vqf, vqf_real_t out[4]);
 
-/** @brief Get 6D quaternion (magnetometer-free). */
+/** @brief Get 6D quaternion (tilt-corrected, yaw drifts slowly). */
 void vqf_get_quat_6d(const VQF *vqf, vqf_real_t out[4]);
 
-/** @brief Get 9D quaternion (with magnetometer). */
+/** @brief Get 9D quaternion (full orientation, requires magnetometer). */
 void vqf_get_quat_9d(const VQF *vqf, vqf_real_t out[4]);
 
 /** @brief Get heading difference delta. */

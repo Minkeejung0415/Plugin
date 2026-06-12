@@ -41,6 +41,33 @@ class ChannelCanvas;
 
 struct ImpedanceData;
 
+/*
+    ============================================================
+    DeviceEditor — the control panel the user sees in Open Ephys
+    ============================================================
+
+    This is the JUCE GUI panel attached to the acquisition board plugin.
+    When a Red Pitaya (or ESP32-S3 STEP node) is connected, the panel
+    expands to 800 px wide and shows 6 vertical columns of controls:
+
+      Col 1 (x=6):   Sample rate (editable Hz label), OpenSim Live button,
+                      RECORD button
+      Col 2 (x=135): Hardware FILTER toggle, Analog In gain, Analog Out voltage
+      Col 3 (x=275): Sensor config — Accel range, Gyro range, Sensor Hz (decimation)
+      Col 4 (x=420): Sensor select (dropdown populated after acquisition starts),
+                      Body segment assignment, Gen Motion button
+      Col 5 (x=555): Joint HUD checkboxes — 7 joints from kOpenSimJointCatalog,
+                      laid out in a 2-column grid (max 6 can be active at once)
+      Col 6 (x=690): Node IP label (editable), Display Joint dropdown
+
+    For non-Red-Pitaya boards (OpalKelly, ONI, Simulated) the panel is 340 px
+    wide and shows only the standard headstage/bandwidth/DSP controls.
+
+    DeviceEditor listens to button clicks (buttonClicked), combo box changes
+    (comboBoxChanged), and editable label changes (labelTextChanged) — all via
+    JUCE listener callbacks.
+*/
+
 class DeviceEditor : public VisualizerEditor,
                      public ComboBox::Listener,
                      public Button::Listener,
@@ -106,10 +133,22 @@ public:
 
     void paint (Graphics& g) override;
 
+    /** Refreshes sensor-select and sensor-rate combos after a stream starts and
+        the board reports which sensors are active (SENSORS: line from firmware). */
     void refreshRedPitayaSensorCombosFromBoard();
+
+    /** Turns joint toggle labels orange when an active sensor covers that joint's
+        body segment — gives the operator a visual hint about which joints are "live". */
     void refreshJointDisplayHighlights();
+
+    /** Reads the board's jointDisplaySelected[] array and applies it to the 7 toggle
+        checkboxes in the UI, so saved state is reflected when loading a session. */
     void syncJointDisplayTogglesFromBoard();
+
+    /** Rebuilds the Sensor Hz combo with 7 decimation choices relative to hwHz.
+        Called when the hardware rate label changes or a new stream starts. */
     void repopulateSensorRateComboForHwHz (int hwHz);
+
     int getSelectedStreamSensorIndex() const;
 
     /** Keeps AcquisitionBoard::settings.boardSampleRate in sync with the Red Pitaya
@@ -138,17 +177,21 @@ private:
 
     std::unique_ptr<MemoryMonitorUsage> memoryUsage = nullptr;
 
+    // --- Headstage controls (for OpalKelly/ONI boards with Intan headstages) ---
     OwnedArray<HeadstageOptionsInterface> headstageOptionsInterfaces;
     OwnedArray<ElectrodeButton> electrodeButtons;
 
+    // --- Legacy bandwidth / DSP / sample-rate interfaces (not shown for Red Pitaya) ---
     std::unique_ptr<SampleRateInterface> sampleRateInterface;
     std::unique_ptr<BandwidthInterface> bandwidthInterface;
     std::unique_ptr<DSPInterface> dspInterface;
 
+    // --- Legacy audio and clock-divide interfaces (not shown for Red Pitaya) ---
     std::unique_ptr<AudioInterface> audioInterface;
     std::unique_ptr<ClockDivideInterface> clockInterface;
 
-    std::unique_ptr<UtilityButton> recordButton;
+    // --- Col 1 controls: record, sample rate, OpenSim Live ---
+    std::unique_ptr<UtilityButton> recordButton;   // sends RECORD ON / RECORD OFF to firmware
     std::unique_ptr<UtilityButton> rescanButton, dacTTLButton;
     std::unique_ptr<UtilityButton> auxButton;
     std::unique_ptr<UtilityButton> adcButton;
@@ -157,44 +200,76 @@ private:
     std::unique_ptr<UtilityButton> dspoffsetButton;
     std::unique_ptr<ComboBox> ttlSettleCombo, dacHPFcombo;
     std::unique_ptr<Label> audioLabel, ttlSettleLabel, dacHPFlabel;
-    std::unique_ptr<Label> noBoardsDetectedLabel;
+    std::unique_ptr<Label> noBoardsDetectedLabel;  // shown when board == nullptr
 
+    // --- Col 1: sample rate label (user edits this to change Hz; sends FREQ: command) ---
     std::unique_ptr<Label> sampleRateTitle;
-    std::unique_ptr<Label> sampleRateLabel;
+    std::unique_ptr<Label> sampleRateLabel;  // editable; changing it sends FREQ: to firmware
 
+    // --- Col 6: node IP / hostname (user types ESP32 IP here to re-detect) ---
     std::unique_ptr<Label> nodeHostTitle;
-    std::unique_ptr<Label> nodeHostLabel;
+    std::unique_ptr<Label> nodeHostLabel;   // user types in the ESP32 IP here; triggers re-detection when changed
 
-    std::unique_ptr<UtilityButton> filterButton;
+    // --- Col 2: filter and analog controls ---
+    std::unique_ptr<UtilityButton> filterButton;  // sends FILTER ON / FILTER OFF to firmware
     std::unique_ptr<Label> filterTitle;
 
     std::unique_ptr<Label> analogInTitle;
-    std::unique_ptr<Label> analogInLabel;
+    std::unique_ptr<Label> analogInLabel;   // editable ADC gain (0.1–100); sends AIN_GAIN: command
 
     std::unique_ptr<Label> analogOutTitle;
-    std::unique_ptr<Label> analogOutLabel;
+    std::unique_ptr<Label> analogOutLabel;  // editable DAC voltage (0–1.8 V); sends AOUT: command
 
-    bool redPitayaSensorUiBuilt = false;
+    // --- Col 3 & 4: Red Pitaya sensor configuration (only built when isRedPitaya) ---
+    bool redPitayaSensorUiBuilt = false;  // guards against rebuilding the sensor UI twice
+
+    // Col 3: Accel range dropdown (±2g / ±4g / ±8g / ±16g) — sends CFG <si> ACC <preset>
     std::unique_ptr<Label> sensorCfgAccelTitle;
     std::unique_ptr<ComboBox> sensorCfgAccelCombo;
+
+    // Col 3: Gyro range dropdown (±250 / ±500 / ±1000 / ±2000 °/s) — sends CFG <si> GYR <preset>
     std::unique_ptr<Label> sensorCfgGyroTitle;
     std::unique_ptr<ComboBox> sensorCfgGyroCombo;
+
+    // Col 3: Per-sensor effective sample rate (decimated from hw Hz) — sends CFG <si> SRATE <hz>
     std::unique_ptr<Label> sensorCfgRateTitle;
     std::unique_ptr<ComboBox> sensorCfgRateCombo;
+
+    // Col 4: Which sensor is currently being configured (populated after acquisition starts)
     std::unique_ptr<Label> sensorSelectTitle;
     std::unique_ptr<ComboBox> sensorSelectCombo;
 
+    // Col 4: OpenSim body segment this sensor is mounted on (written to opensim_sensor_map.json)
     std::unique_ptr<Label>    sensorBodySegmentTitle;
     std::unique_ptr<ComboBox> sensorBodySegmentCombo;
 
-    std::unique_ptr<UtilityButton> openSimMotionButton;
-    std::unique_ptr<UtilityButton> openSimLiveButton;
+    // Col 4: Buttons to launch OpenSim workflows
+    std::unique_ptr<UtilityButton> openSimMotionButton;  // runs offline IK batch job
+    std::unique_ptr<UtilityButton> openSimLiveButton;    // starts live Python visualizer
+
+    // --- Col 5: Joint HUD toggles ---
     std::unique_ptr<Label> jointDisplayTitle;
+
+    /*
+        jointDisplayToggles — 7 checkboxes, one per entry in kOpenSimJointCatalog:
+          pelvis_tilt, hip_flexion_r, hip_flexion_l,
+          knee_angle_r, knee_angle_l, ankle_angle_r, ankle_angle_l.
+        The operator checks the joints they want to see on the OpenSim viewer.
+        Maximum 6 can be active at once (enforced in buttonClicked()).
+        When toggled, the board's jointDisplaySelected[] is updated and
+        writeJointDisplayConfig() is called to write the JSON sidecar file.
+    */
     std::array<std::unique_ptr<ToggleButton>, kOpenSimJointCatalogSize> jointDisplayToggles;
 
+    // --- Col 6: Display joint dropdown (single joint shown by Python legacy path) ---
     std::unique_ptr<Label>    displayJointTitle;
     std::unique_ptr<ComboBox> displayJointCombo;
 
+    /*
+        AudioChannel — which DAC output the audio monitor is routed to.
+        LEFT and RIGHT correspond to the two DAC channels (indices 0 and 1).
+        activeAudioChannel tracks which one a button press will configure.
+    */
     enum AudioChannel
     {
         LEFT = 0,
@@ -206,12 +281,10 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceEditor);
 };
 
-/** 
-    Holds buttons for headstages on one port.
-
-    If a 32-channel headstages is detected, it 
-    allows the user to toggle between 16 and 32-channel mode
-
+/*
+    HeadstageOptionsInterface — shows the per-port headstage buttons.
+    For a 32-channel headstage it lets the user toggle between 16-ch and 32-ch mode.
+    One of these is created per physical port (up to 4 ports).
 */
 class HeadstageOptionsInterface : public Component,
                                   public Button::Listener
@@ -255,9 +328,10 @@ private:
     std::unique_ptr<UtilityButton> hsButton2;
 };
 
-/** 
-    Holds settings for RHD chip analog filters
-
+/*
+    BandwidthInterface — two editable labels for the RHD chip's analog bandpass filter.
+    Upper cutoff (default 7500 Hz) and lower cutoff (default 1 Hz) set the recording
+    bandwidth for all electrode channels. Calls board->setUpperBandwidth / setLowerBandwidth.
 */
 class BandwidthInterface : public Component,
                            public Label::Listener
@@ -302,9 +376,10 @@ private:
     double actualLowerBandwidth;
 };
 
-/** 
-    Holds settings for digital on-chip filters
-    
+/*
+    DSPInterface — controls the Intan chip's on-chip digital high-pass filter.
+    The DSP filter removes slow electrode drift (DC offset) without touching the
+    analog hardware. cutoffFreq defaults to 0.5 Hz. Calls board->setDspCutoffFreq.
 */
 class DSPInterface : public Component,
                      public Label::Listener
@@ -339,10 +414,11 @@ private:
     double actualDspCutoffFreq = 0.5;
 };
 
-/**
-
-   Holds sample rate settings
-
+/*
+    SampleRateInterface — dropdown for choosing the global sample rate.
+    Used by OpalKelly and ONI boards (which have fixed rate choices like
+    1, 1.25, 1.5 kHz … 30 kHz). Red Pitaya uses the free-form sampleRateLabel
+    instead, so this interface is not shown for it.
 */
 class SampleRateInterface : public Component,
                             public ComboBox::Listener
@@ -380,9 +456,10 @@ private:
     StringArray sampleRateOptions;
 };
 
-/** 
-    Holds settings for audio output
-    
+/*
+    AudioInterface — controls the board's audio monitor output.
+    The noise slicer threshold gate is set here; signals below the threshold
+    are silenced so the operator hears only genuine spikes.
 */
 class AudioInterface : public Component,
                        public Label::Listener
@@ -420,15 +497,10 @@ private:
     int actualNoiseSlicerLevel;
 };
 
-/** 
-    Holds settings for clock divider 
-
-    The clock divider set the ratio of the sample rate
-    at which the digital output on the sync BNC is updated
-
-    For example, if the sample rate is 30 kHz and the clock
-    divider is set to 10, the sync output will be updated at 3 kHz
-
+/*
+    ClockDivideInterface — sets the divide ratio for the clock output on the sync BNC.
+    Example: if sample rate = 30 kHz and ratio = 10, the BNC outputs a 3 kHz square wave.
+    This is useful for synchronising external equipment with the recording.
 */
 class ClockDivideInterface : public Component,
                              public Label::Listener

@@ -1,4 +1,4 @@
-﻿/*
+/*
     ------------------------------------------------------------------
 
     This file is part of the Open Ephys GUI
@@ -14,16 +14,39 @@
 
 #include <array>
 
-/**
-    Interface for a network-based Red Pitaya device acting as an
-    Open Ephys Acquisition Board compatible source.
+/*
+    ============================================================
+    AcqBoardRedPitaya — the fully filled-in board for Red Pitaya / ESP32-S3
+    ============================================================
 
-    This implementation currently provides a basic skeleton:
-    - It exposes only ADC channels (no headstages).
-    - Streaming logic is implemented in run(), which can be adapted
-      to receive samples over UDP or another transport.
+    This is the concrete (fully implemented) version of AcquisitionBoard
+    that knows how to talk to a Red Pitaya Linux computer or an ESP32-S3
+    STEP wireless node over TCP.
 
-    @see DataThread, SourceNode
+    Connection flow:
+      detectBoard()     — opens a TCP socket on port 5000 and sends "REDPITAYA\n".
+                          The board replies with "OK CHANNELS:N\n". We parse N.
+      initializeBoard() — sets sample rate and clears any stale state.
+      startAcquisition()— sends "FREQ:<hz>\n" then "START\n". Board replies
+                          "STARTED BIN:... CSV:...\n" then streams binary frames.
+      run()             — the background thread that continuously reads frames,
+                          unpacks int16 payload, scales to floats, and writes to
+                          the shared DataBuffer.
+      stopAcquisition() — sends "STOP\n". Board flushes its recording and replies
+                          "STOPPED\n".
+
+    ASCII commands sent to board during acquisition:
+      FILTER ON/OFF        — enables/disables VQF sensor fusion on the firmware side
+      RECORD ON/OFF        — starts/stops local SD-card or ESP32 CSV recording
+      FREQ:<hz>            — changes hardware tick rate on the fly
+      CFG <si> ACC <0-3>   — sets accelerometer full-scale range for sensor index si
+      CFG <si> GYR <0-3>   — sets gyroscope full-scale range for sensor index si
+      CFG <si> SRATE <hz>  — sets per-sensor effective sample rate (firmware decimates)
+      AIN_GAIN:<f>         — sets analog input gain
+      AOUT:<v>             — sets analog output DAC voltage
+
+    The board also sends back "SENSORS:0,MPU9250;1,ICM20948\n" immediately after
+    STARTED so we know which physical sensors are active.
 */
 
 class AcqBoardRedPitaya : public AcquisitionBoard
@@ -199,22 +222,50 @@ public:
 
     void saveJointDisplayToXml (XmlElement& parent) const;
 
-    /** Atomic write of opensim_joint_display_config.json to OpenSim work dir. */
+    /*
+        writeJointDisplayConfig() — atomically writes opensim_joint_display_config.json.
+
+        Python (opensim_live_realtime.py) polls this file every ~50 ms. Whenever the
+        operator toggles a joint checkbox OR a trigger fires (via handleBroadcastMessage),
+        we write a fresh JSON snapshot of which joints the HUD should show.
+
+        Writing atomically (write to tmp file, then rename) prevents Python from
+        reading a half-written file mid-write.
+    */
     bool writeJointDisplayConfig();
 
-    /** Fills data buffer */
+    /** Fills data buffer — runs on the background acquisition thread */
     void run();
 
-    /** Maximum samples per buffer for Red Pitaya ADC */
+    /*
+        MAX_SAMPLES_PER_BUFFER — how many samples we collect before calling
+        buffer->addToBuffer(). Larger = less overhead per call; smaller = lower
+        latency. 128 samples at 100 Hz = 1.28 seconds of buffering capacity.
+    */
     static constexpr int MAX_SAMPLES_PER_BUFFER = 128;
 
-    /** Maximum Red Pitaya channels, including reserved filtered/fusion outputs */
+    /*
+        MAX_CHANNELS — maximum number of channels we ever expect from a Red Pitaya.
+        Sized generously to include IMU raw channels + 4 VQF quaternion channels per
+        sensor + 2 analog waveform channels. Actual channel count depends on
+        how many sensors the board reports.
+    */
     static constexpr int MAX_CHANNELS = 64;
 
-    /** Red Pitaya analog voltage waveform channels appended to the stream */
+    /*
+        ANALOG_WAVEFORM_CHANNELS — the Red Pitaya's two oscilloscope-style analog
+        inputs (CH1 and CH2) are always appended at the end of each frame.
+        These measure real voltages (e.g. from an EMG amplifier) rather than IMU data.
+    */
     static constexpr int ANALOG_WAVEFORM_CHANNELS = 2;
 
-    /** Data buffers */
+    /*
+        Ring buffers the run() thread fills each iteration.
+        samples[]       — interleaved float channel data for all channels × MAX_SAMPLES_PER_BUFFER
+        sampleNumbers[] — monotonically increasing sample index (used as the "timestamp" Open Ephys stores)
+        timestamps[]    — wall-clock time in seconds (unused for Red Pitaya; Open Ephys derives from sampleNumbers)
+        event_codes[]   — packed TTL event bits per sample (8 bits = 8 digital input lines)
+    */
     float samples[MAX_CHANNELS * MAX_SAMPLES_PER_BUFFER];
     int64 sampleNumbers[MAX_SAMPLES_PER_BUFFER];
     double timestamps[MAX_SAMPLES_PER_BUFFER];
@@ -252,23 +303,46 @@ public:
     float analogInGain = 1.0f;
     float analogOutVoltage = 0.0f;
 
+    /*
+        commandSocket — the persistent TCP connection to the Red Pitaya / ESP32.
+        We keep this open throughout the session so we can send ASCII commands
+        at any time (not just during streaming). nullptr when disconnected.
+    */
     StreamingSocket* commandSocket = nullptr;
 
-    /** Host that answered the last successful REDPITAYA handshake (e.g. rp-f0f85a.local). */
+    /*
+        activeRedPitayaHost — the hostname or IP that successfully answered our
+        REDPITAYA handshake. E.g. "rp-f0f85a.local" or "192.168.4.1".
+        Stored so we can reconnect after a disconnect without re-scanning.
+    */
     String activeRedPitayaHost;
 
     /** Optional ESP32-S3 node host (editor or ESP32_NODE_HOST env). Tried after rp-*.local. */
     String configurableNodeHost;
 
-    /** True when handshake matched ESP32 STEP firmware (TCP stream, 11 ch default @ 100 Hz). */
+    /*
+        isEsp32Node — true when the device that answered the handshake is an
+        ESP32-S3 STEP node running the STEP firmware, not a Red Pitaya.
+        The ESP32 has a different default channel layout (11 channels) and
+        stores recordings on the host PC rather than on-device SD card.
+    */
     bool isEsp32Node = false;
 
+    /** Set/clear user-configured node IP or hostname (e.g. 192.168.4.1). */
     void setNodeHost (const String& host) { configurableNodeHost = host.trim(); }
 
     String getNodeHost() const { return configurableNodeHost; }
 
     bool getIsEsp32Node() const { return isEsp32Node; }
 
+    /*
+        ESP32_DEFAULT_CHANNELS = 11 — the ESP32-S3 STEP node always sends exactly
+        11 channels per frame in this order:
+          0=ax (accel X, g)   1=ay   2=az
+          3=gx (gyro X, dps)  4=gy   5=gz
+          6=dio (digital I/O bitmask)
+          7=qw  8=qx  9=qy  10=qz  (VQF quaternion, scaled Q15)
+    */
     static constexpr int ESP32_DEFAULT_CHANNELS = 11;
 
     void resetCommandSocket();
@@ -276,6 +350,7 @@ public:
     bool connectCommandSocketToBoard();
     bool performDetectionHandshake();
 
+    /** Re-run detection (e.g. after user sets Node IP in editor). */
     bool retryDetection();
 
     String lastRecordingPath;
@@ -284,12 +359,17 @@ public:
     /** Populated after STARTED + SENSORS: snapshot from board. */
     Array<String> streamSensorNames;
 
-    /** Per-sensor range presets, updated when CFG commands are sent.
-     *  Index matches streamSensorNames. Used by run() to scale raw counts. */
-    int sensorAccPreset[6] = {};   /* 0=Â±2g, 1=Â±4g, 2=Â±8g,  3=Â±16g       */
-    int sensorGyrPreset[6] = {};   /* 0=Â±250Â°/s, 1=Â±500, 2=Â±1000, 3=Â±2000 */
+    /*
+        sensorAccPreset[] / sensorGyrPreset[] — remember the current full-scale range
+        setting for each sensor so run() can scale raw int16 counts to physical units.
+        Index matches streamSensorNames (sensor 0, 1, 2, ...).
+        ACC presets: 0=±2g, 1=±4g, 2=±8g, 3=±16g
+        GYR presets: 0=±250°/s, 1=±500, 2=±1000, 3=±2000
+    */
+    int sensorAccPreset[6] = {};   /* 0=±2g, 1=±4g, 2=±8g,  3=±16g       */
+    int sensorGyrPreset[6] = {};   /* 0=±250°/s, 1=±500, 2=±1000, 3=±2000 */
 
-    /** Per-sensor OpenSim body segment assignment â€” index into getBodySegmentName().
+    /** Per-sensor OpenSim body segment assignment — index into getBodySegmentName().
      *  Written to opensim_sensor_map.json when changed or just before launching the bridge. */
     int sensorBodySegment[6] = {};  /* default 0 = tibia_r_imu for every sensor */
 
@@ -326,15 +406,42 @@ public:
     /** Non-blocking read of angle feedback on UDP port 5001. */
     void pollOpenSimAngleFeedback();
 
-    /** UDP v2: quats is numSensorsÃ—4 floats (qw,qx,qy,qz per sensor, unit quaternion). */
+    /*
+        sendOpenSimQuaternionPacket() — sends a UDP v2 packet to opensim_live_realtime.py.
+
+        Packet format (all floats, little-endian):
+          [timestamp, 2.0 (version tag), numSensors,
+           qw0, qx0, qy0, qz0,   <- sensor 0 quaternion (unit length)
+           qw1, qx1, qy1, qz1,   <- sensor 1 quaternion
+           ...]
+        Python reassembles the quaternions into body-segment orientations and feeds
+        them to the OpenSim InverseKinematicsSolver every frame.
+    */
     void sendOpenSimQuaternionPacket (float timestamp, const float* quats, int numSensors);
 
     /** UDP v3: imu6 is numSensors×6 floats (ax,ay,az,gx,gy,gz in g and deg/s per sensor). */
     void sendOpenSimImuPacket (float timestamp, const float* imu6, int numSensors);
 
+    /*
+        openSimSocket — UDP socket used to send quaternion packets to Python on port 5000.
+        Created in startAcquisition() when OpenSim Live is enabled, closed in stopAcquisition().
+    */
     std::unique_ptr<DatagramSocket> openSimSocket;
+
+    /** UDP socket for receiving angle feedback from Python (port 5001). */
     std::unique_ptr<DatagramSocket> openSimAngleSocket;
+
+    /*
+        openSimEnabled — true once the operator clicks "OpenSim Live" and Python starts.
+        When true, run() calls sendOpenSimQuaternionPacket() every frame.
+    */
     bool openSimEnabled { false };
+
+    /*
+        openSimProcess — ChildProcess handle for the offline IK batch ("Gen Motion") job.
+        openSimLiveProcess — ChildProcess handle for the live Python visualizer.
+        Both are started with juce::ChildProcess::start() and run independently.
+    */
     std::unique_ptr<juce::ChildProcess> openSimProcess;
     std::unique_ptr<juce::ChildProcess> openSimLiveProcess;
 
@@ -342,7 +449,20 @@ public:
     std::unique_ptr<juce::FileOutputStream> esp32RecordStream;
     juce::CriticalSection esp32RecordLock;
     int esp32RecordSampleCount = 0;
+
+    /*
+        jointDisplaySelected[] — one boolean per entry in kOpenSimJointCatalog (7 joints).
+        true = the operator wants this joint shown on the OpenSim HUD.
+        Persisted to XML on session save/load. Reflected in the joint toggle checkboxes.
+        Maximum 6 can be true at once (enforced in setJointDisplaySelected()).
+    */
     std::array<bool, kOpenSimJointCatalogSize> jointDisplaySelected {};
+
+    /*
+        jointDisplayConfigSeq — incrementing sequence number written into the JSON file.
+        Python can detect that the file was updated by checking if the number changed,
+        avoiding a full file parse every poll cycle if it has not changed.
+    */
     int jointDisplayConfigSeq = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AcqBoardRedPitaya);
