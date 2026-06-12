@@ -32,11 +32,16 @@ progress:
 
 **Overall:** 5/6 phases complete; Phase 6 code complete, hardware UAT pending
 
+## Hardware Topology (confirmed 2026-06-12)
+
+Live source is **ESP32-S3 (ICM-20948), not a physical Red Pitaya**, run via the **RP-compat gateway** path (`esp32/host/rp_compat_gateway.py` or `serial_tcp_bridge.py --plugin`): ESP32 USB → gateway presents as Red Pitaya (TCP :5000 + UDP :55001, `rp-f0f85a.local`→127.0.0.1) → **Open Ephys GUI plugin** (VQF fusion) → UDP quaternions → `opensim_live_realtime.py` (IK) → HUD. ESP is protocol-parity with RP, so `OPENSIM_LIVE_SOURCE=real_redpitaya` stays correct and the Phase 6 render-path fix is unaffected by the source swap. The Open Ephys GUI IS in the loop, so the `udp_feedback` (port-5001) fallback has a candidate consumer.
+
 ## Pending Manual UAT
 
-- Live OpenSim 4.5 + Red Pitaya hardware: trigger → HUD filter, IK continuity (DISP-04)
+- Live OpenSim 4.5 + ESP32-via-RP-compat-gateway: trigger → HUD filter, IK continuity (DISP-04)
 - Plugin rebuild in Open Ephys GUI (C++ changes)
-- **Phase 6:** operator moves knee → live angle tracks on active readout (window title bar or Open Ephys UDP-5001 UI); switching selected joint changes the label
+- **Phase 6 (ESP/Topology B):** start the RP-compat gateway + Open Ephys GUI (plugin) + `start_opensim_live.bat`; move knee → live angle tracks the OpenSim-console `[HUD-DIAG]`/`[HUD-UPDATE]` value on the active readout; switching selected joint changes the label.
+  - **Residual gap (not fixed this phase):** whether the Open Ephys plugin UI actually *renders* the port-5001 angle packet is UNVERIFIED (plugin C++ untouched). If active strategy is `udp_feedback` and the plugin UI shows nothing, the `[HUD-UPDATE]` console line is the ground-truth that the fix works; plugin-side rendering would be a separate follow-up.
 
 ## Decisions
 
