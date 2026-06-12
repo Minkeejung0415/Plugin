@@ -1,129 +1,83 @@
-# Open Ephys Red Pitaya Plugin — Joint Angle Display on Trigger
+# Open Ephys ESP32 Acquisition Reliability
 
 ## What This Is
 
-An Open Ephys acquisition-board plugin for Red Pitaya hardware that streams IMU orientation data to OpenSim Live for real-time musculoskeletal visualization. Multiple IMU sensors are attached to body segments; IK solves joint coordinates continuously. **Today, too many joint angles appear on the OpenSim Live display and create visual noise.** This milestone lets the operator **select which joint angles to show**, **apply that filter when a trigger fires** (or on demand), and **render the filtered values beside the Simbody simulation timer/clock**.
+This project is an Open Ephys acquisition-board plugin and ESP32-S3 acquisition stack for streaming IMU/filter data into Open Ephys while also supporting direct on-device recording. The current live path can move samples through ESP32 firmware, a serial/TCP bridge, the Open Ephys buffer, and optional downstream consumers. That path is useful for visualization, but it is not enough for experimental data integrity because host transport, Open Ephys buffering, or UDP-style side channels can stall or drop data.
 
-The plugin already launches OpenSim Live, forwards quaternion UDP packets on port 5000, and supports TTL/broadcast triggers via `ACQBOARD TRIGGER`. The new work connects joint selection in the plugin → trigger/config event → filtered on-screen joint-angle readout in OpenSim Live.
+The v1.1 milestone pivots from OpenSim HUD work to acquisition fundamentals: record samples directly to SD card on the acquisition device, prove whether any samples are lost, and quantify the maximum reliable sample rate with filter processing and SD logging enabled.
 
 ## Core Value
 
-When an experiment trigger fires during live acquisition, the operator sees **only the pre-selected joint angles** (e.g. right knee flexion, left hip flexion) **beside the sim timer** — not the full noisy coordinate dump from every model joint.
+The operator can run acquisition without trusting a lossy host path: samples are saved on SD card with sequence/timestamp continuity, and stress-test reports identify the highest safe frequency plus the exact layer responsible for stalls or drops.
 
 ## Requirements
 
 ### Validated
 
-- ✓ Red Pitaya IMU acquisition and quaternion streaming to OpenSim (UDP v2 on port 5000) — existing
-- ✓ OpenSim Live launch from device editor (`OpenSim Live` button) — existing
-- ✓ Simbody visualizer with simulation time display (`setShowSimTime(True)`) — existing in `opensim_live_realtime.py`
-- ✓ IK produces joint coordinate values from IMU orientations — existing
-- ✓ Sensor → body-segment mapping — existing
-- ✓ Digital output / broadcast trigger path — existing
-- ✓ Device editor persistence via XML settings — existing pattern
-- ✓ Operator joint multi-select in device editor (Phase 2)
-- ✓ Joint selection persists in plugin XML (Phase 2)
-- ✓ Trigger and Apply Display write `opensim_joint_display_config.json` (Phase 3)
-- ✓ OpenSim Live filtered HUD beside sim clock (Phases 1, 4)
-- ✓ Operator documentation (Phase 5)
+- ESP32-S3 firmware exists under `esp32/firmware/main`.
+- Firmware sample structure already carries `timestamp_us`, monotonic `seq`, and 8 int16 channels in `open_ephys_stream.h`.
+- Acquisition loop currently calls `icm20948_read_scaled()`, updates DIO/camera verification fields, then calls both `open_ephys_stream_set_sample()` and `sd_logger_append()` in `main.c`.
+- SD logger scaffold exists in `sd_logger.c`, currently opening `/sdcard/step_session.bin`.
+- Host stress harness exists at `esp32/host/stress_test_serial.py`.
+- Host analyzer exists at `esp32/host/analyze_sample_rate.py` and already detects duplicate sequence values, sequence gaps, row duplicates, and timestamp gaps.
+- Open Ephys/plugin streaming path exists and can be tested separately from SD logging.
+- Prior OpenSim/HUD work is set aside for this milestone.
 
 ### Active
 
-- [ ] Manual hardware UAT: live trigger → HUD filter, IK continuity (DISP-04 sign-off)
+- [ ] Implement SD-card recording as a measured, buffered acquisition sink rather than a synchronous `fwrite()`/`fflush()` inside the acquisition loop.
+- [ ] Store enough metadata and per-sample counters to prove generated, saved, and streamed sample counts.
+- [ ] Improve `stress_test_serial.py` so it can sweep frequency with filter on/off, SD logging on/off, and streaming path on/off.
+- [ ] Report max sustainable acquisition rate, SD write latency, loop latency, buffer high-water mark, sequence gaps, duplicates, and stalls.
+- [ ] Isolate whether observed stalls come from sensor hardware/I2C, filter CPU, SD card writes, USB/TCP/Open Ephys buffering, or UDP/host-side transport.
 
 ### Out of Scope
 
-- **Camera/view angle presets** — prior assumption; explicitly not this milestone
-- Custom free-rotate camera control from the plugin — Simbody mouse controls remain manual
-- OpenSim Gen Motion offline pipeline changes — scope is **OpenSim Live display** only
-- Multi-monitor or embedded web viewer — Simbody native window only
-- UDP v2 packet format changes — use JSON sidecar for display config
-- Triggering display changes from external software beyond existing `ACQBOARD TRIGGER` broadcast — v1 uses current trigger path only
+- OpenSim HUD/window-title/live-angle display fixes.
+- New OpenSim IK features.
+- Cosmetic Open Ephys editor changes unrelated to acquisition integrity.
+- Treating UDP delivery as ground truth for recorded data.
+- Claiming "no samples lost" without sequence-continuity evidence from the device-side saved file.
 
 ## Context
 
-**Brownfield codebase** (`C:\Users\justi\Plugin`):
-
 | Layer | Technology | Key files |
 |-------|------------|-----------|
-| Plugin (C++/JUCE) | Open Ephys GUI plugin | `device editor.cpp`, `devicethread.cpp`, `acqboard.ccp`, `devices/redpitaya/AcqBoardRedPitaya.h` |
-| OpenSim bridge | Python 3.8 + OpenSim 4.5 SDK | `opensim_live_realtime.py` |
-| Transport | UDP localhost:5000 | `docs/opensim-udp-v2.md` |
-| Sensor mapping | JSON sidecar | `opensim_sensor_map.json` |
-| Triggers | Broadcast `ACQBOARD TRIGGER <ttlLine> <durationMs>` | `devicethread.cpp:340-355` |
+| ESP32 acquisition firmware | ESP-IDF / FreeRTOS | `esp32/firmware/main/main.c` |
+| SD logging | C stdio scaffold today; needs buffered writer | `esp32/firmware/main/sd_logger.c`, `sd_logger.h` |
+| Open Ephys stream | TCP/Open Ephys-compatible packet writer | `esp32/firmware/main/open_ephys_stream.c`, `open_ephys_stream.h` |
+| Host stress test | Python + pyserial | `esp32/host/stress_test_serial.py` |
+| Host analysis | Python CSV analyzer | `esp32/host/analyze_sample_rate.py` |
+| Open Ephys plugin | C++/JUCE acquisition-board plugin | `acqboard.ccp`, `devicethread.cpp`, `device editor.cpp` |
 
-**Sensor → segment mapping today:** Red Pitaya sensor index maps distal → proximal (`tibia_r_imu`, `femur_r_imu`, `pelvis_imu`, `torso_imu`, …). Override via `opensim_sensor_map.json` `sensor_slots`. IK then solves model coordinates (`hip_flexion_r`, `knee_angle_r`, `pelvis_tilt`, etc.) from orientation references.
+## Observed Code Facts
 
-**OpenSim Live display today:** `opensim_live_realtime.py` runs IK at ~20 Hz, calls `viz.setShowSimTime(True)`, and logs sample coordinates to console (`[COORD …]`). No filtered on-screen joint-angle HUD beside the clock exists yet; all coordinates are effectively available and the display is noisy without filtering.
-
-**Trigger flow today:** External or GUI-initiated broadcast → `DeviceThread::handleBroadcastMessage` → `acquisitionBoard->triggerDigitalOutput()`. No coupling to OpenSim display state.
-
-**Scope correction (2026-06-10):** User clarified "angle beside the clock" means **joint angle values**, not Simbody camera presets. Prior camera/view planning is superseded.
-
-| Topic | Decision |
-|-------|----------|
-| "Angle" meaning | **Joint coordinate values** (degrees) from IK — not camera/view presets |
-| Selection unit | OpenSim coordinate names (e.g. `knee_angle_r`, `hip_flexion_l`) |
-| Trigger source | Existing `ACQBOARD TRIGGER` broadcast and plugin TTL output path |
-| Display location | Simbody visualizer window, adjacent to sim time (clock) |
-| Config transport | `opensim_joint_display_config.json` sidecar (atomic write); do not modify UDP v2 |
-| Default joint catalog v1 | **Locked:** curated instrumented-limb list only (primary flexion DOFs); full model enum deferred |
-| Trigger semantics v1 | **Locked:** apply current checkbox selection on trigger (not per-TTL preset maps) |
-| Max joints on screen | **Locked:** 6 joints maximum |
-| DOF per joint | **Locked:** primary flexion only (e.g. `hip_flexion_r`, not adduction/rotation) |
-| Display format | **Locked:** abbreviated labels, 1 decimal, e.g. `knee_r: 42.1°` |
+- `sd_logger_append()` currently performs `fwrite(sample, sizeof(*sample), 1, s_fp)` followed by `fflush(s_fp)` for every sample. That directly couples SD-card latency into the acquisition loop.
+- `open_ephys_stream_set_sample()` stores only the latest sample in `s_latest`. If stream timing lags the acquisition loop, intermediate samples are overwritten before the stream task can send them.
+- `stream_task()` sends one current sample per period. It is a live display/transport path, not a lossless queue.
+- `stress_test_serial.py` currently evaluates host-visible serial/binary output, but it does not yet compare against an SD-saved ground-truth file or collect firmware-side latency counters.
 
 ## Constraints
 
-- **Tech stack**: Must stay on C++/JUCE plugin + Python 3.8 OpenSim 4.5 — no new runtime dependencies
-- **Compatibility**: Must not break existing UDP v2 quaternion packets consumed by `opensim_live_realtime.py`
-- **Platform**: Windows paths hardcoded for OpenSim install (`C:\OpenSim 4.5\...`) — follow existing conventions
-- **OpenSim API**: Simbody text overlay beside sim time may need API spike; window-title or status-line fallback acceptable
-- **Performance**: Display filter update on trigger must not stall the ~20 Hz visualizer loop (`OPENSIM_LIVE_VISUALIZER_RATE`)
+- Keep the system practical for the current ESP32-S3 hardware and Open Ephys plugin setup.
+- Do not use host UDP or Open Ephys export as the only proof of sample integrity.
+- Avoid blocking the acquisition loop on slow SD-card operations.
+- Keep test artifacts machine-readable so repeated sweeps can be compared.
+- Preserve the existing Open Ephys streaming path while adding SD-first reliability.
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Joint angle display, not camera presets | User correction overrides prior camera assumption | — Pending |
-| JSON sidecar for display config (`opensim_joint_display_config.json`) | Avoids breaking UDP v2 packet layout; Python can poll/watch cheaply | — Pending |
-| Coordinate-name selection in plugin | IK output is joint coordinates; sensors map to segments, not display labels directly | — Pending |
-| Hook trigger in plugin broadcast handler + optional UI test button | Reuses proven `ACQBOARD TRIGGER` path | — Pending |
-| OpenSim Live only (not Gen Motion) | Display requirement targets live Simbody window with clock | — Pending |
-| Curated joint list for v1 UI | Full Rajagopal coordinate set is large; start with instrumented-limb coordinates | Locked 2026-06-10 |
-| Trigger applies current selection | User default; per-TTL preset maps deferred to v2 | Locked 2026-06-10 |
-| Max 6 joints, flexion-only, abbreviated HUD | Readability beside sim clock | Locked 2026-06-10 |
-
-## Locked Defaults (2026-06-10)
-
-User approved **proceed with defaults**:
-
-| # | Topic | Decision |
-|---|-------|----------|
-| 1 | Joint catalog | Curated instrumented-limb list only (not all model coordinates) |
-| 2 | Trigger behavior | Apply current checkbox selection on trigger |
-| 3 | Max on screen | 6 joints |
-| 4 | DOF per joint | Primary flexion only |
-| 5 | Display format | Abbreviated labels with 1 decimal, e.g. `knee_r: 42.1°` |
-
-These defaults govern catalog design, UI limits, config schema, and HUD formatting across all phases.
+| SD card is the ground-truth recording path for v1.1 | Host transport can stall/drop and Open Ephys buffering is not proof of acquisition integrity | Locked 2026-06-12 |
+| Sequence numbers and timestamps are required on every saved sample | They make loss, duplication, and timing gaps measurable | Locked 2026-06-12 |
+| SD logging must be buffered/measured | Current per-sample `fflush()` can create acquisition-loop stalls | Pending implementation |
+| Stress testing must compare modes | Need to separate hardware/filter/SD limits from Open Ephys/transport limits | Pending implementation |
+| OpenSim is paused | Reliability must be solved before visualization polish matters | Locked 2026-06-12 |
 
 ## Evolution
 
-This document evolves at phase transitions and milestone boundaries.
-
-**After each phase transition** (via `/gsd-transition`):
-1. Requirements invalidated? → Move to Out of Scope with reason
-2. Requirements validated? → Move to Validated with phase reference
-3. New requirements emerged? → Add to Active
-4. Decisions to log? → Add to Key Decisions
-5. "What This Is" still accurate? → Update if drifted
-
-**After each milestone** (via `/gsd:complete-milestone`):
-1. Full review of all sections
-2. Core Value check — still the right priority?
-3. Audit Out of Scope — reasons still valid?
-4. Update Context with current state
+This document now represents milestone v1.1. Older v1.0 planning artifacts remain in `.planning/phases` and `.planning/milestones` for historical context only.
 
 ---
-*Last updated: 2026-06-10 — scope corrected to joint angle display control*
+*Last updated: 2026-06-12 - v1.1 SD card reliability and lossless acquisition milestone*

@@ -1,153 +1,112 @@
-# Roadmap: Joint Angle Display on Trigger
+# Roadmap: SD Card Reliability and Lossless Acquisition
 
-**Project:** Open Ephys Red Pitaya Plugin  
-**Created:** 2026-06-10  
-**Revised:** 2026-06-12 (Phase 6 remediation added)  
-**Phases:** 6  
-**Requirement coverage:** 14/14 v1 requirements mapped ✓ (DISP-02 reopened in Phase 6)
+**Project:** Open Ephys ESP32 Acquisition Reliability
+**Milestone:** v1.1
+**Created:** 2026-06-12
+**Phases:** 5
+**Requirement coverage:** 21/21 v1.1 requirements mapped
 
 ## Overview
 
 | # | Phase | Goal | Requirements | Status |
 |---|-------|------|--------------|--------|
-| 1 | Display Config Contract & Spike | Schema, catalog, watcher, HUD spike | DISP-03 | Complete 2026-06-10 |
-| 2 | Plugin Joint Selector | Multi-select + XML persistence | JOIN-01–04 | Complete 2026-06-10 |
-| 3 | Trigger Wiring | Trigger + Apply Display → config | TRIG-01–03, OPS-01 | Complete 2026-06-10 |
-| 4 | Filtered Display | HUD polish beside sim clock | DISP-01,02,05 | Complete 2026-06-10 |
-| 5 | Integration Verify | Docs + E2E checklist | DISP-04, OPS-02 | Complete 2026-06-10 |
-| 6 | HUD Live-Update Fix | Make on-screen angle text actually update each frame | DISP-02 | Planned (1 plan) |
+| 1 | Measurement Contract & Baseline | Define file/counter contract and measure today's failure modes | SD-01, SD-03, SD-04, SD-05, LOSS-01, STALL-01, STALL-02 | Planned |
+| 2 | Buffered SD Logger | Make SD recording non-blocking and measurable | SD-01-05, LOSS-01, STALL-01, STALL-02 | Planned |
+| 3 | Stress Harness & Analyzer | Sweep rate/modes and analyze SD/stream continuity | LOSS-02-03, STRESS-01-05 | Planned |
+| 4 | Open Ephys Stall Isolation | Separate device loss from host/Open Ephys/transport buffering | STALL-03, STALL-04 | Planned |
+| 5 | Hardware UAT & Operator Docs | Prove no-loss operating envelope and document checklist | LOSS-04, STRESS-03, OPS-01-03 | Planned |
 
 ---
 
 ## Phase Details
 
-### Phase 1: Display Config Contract & Spike
-**Goal:** Establish the plugin→Python joint-display command contract and prove filtered angle readout can render beside the Simbody sim clock.
+### Phase 1: Measurement Contract & Baseline
 
-**Requirements:** DISP-03
+**Goal:** Define the sample-log/counter contract and run baseline diagnostics against the current synchronous SD logger and latest-sample stream path.
 
 **Success Criteria:**
-1. `opensim_joint_display_config.json` schema documented with `joints` (coordinate name list), `trigger_ts`, `seq` fields
-2. Python watcher in `opensim_live_realtime.py` applies a 2-joint filter when config changes (e.g. only `knee_angle_r`, `hip_flexion_r`)
-3. Filtered values update within 200 ms of file update while live UDP stream continues
+1. Document exact SD sample record format, session metadata, and firmware counters.
+2. Add or identify commands needed to toggle filter, SD logging, and streaming for stress comparisons.
+3. Capture current behavior: acquisition loop latency, SD write behavior, serial/Open Ephys visible gaps, and whether `s_latest` overwrites intermediate samples.
+4. Produce a short baseline report that states which failure layers are already evident from code and logs.
 
-**Locked defaults (2026-06-10):** curated catalog (flexion only), max 6 joints, abbreviated 1-decimal HUD (`knee_r: 42.1°`), trigger applies current selection (Phase 3)
-
-**Key files:** `opensim_live_realtime.py`, new `opensim_joint_catalog.py` (optional module), `docs/opensim-joint-display-config.md`
-
-**Research flags:** Simbody text overlay / status API beside `setShowSimTime` — enumerate in plan-phase
+**Key files:** `esp32/firmware/main/main.c`, `sd_logger.c`, `sd_logger.h`, `open_ephys_stream.c`, `open_ephys_stream.h`, `esp32/host/stress_test_serial.py`
 
 ---
 
-### Phase 2: Plugin Joint Selector & Persistence
-**Goal:** Add operator-facing joint coordinate multi-select in the device editor with save/load support.
+### Phase 2: Buffered SD Logger
 
-**Requirements:** JOIN-01, JOIN-02, JOIN-03, JOIN-04
+**Goal:** Replace per-sample synchronous SD writes with a buffered writer task that preserves acquisition-loop timing and exposes health counters.
 
 **Success Criteria:**
-1. Multi-select UI (checkbox list or equivalent) labeled for joint angle display visible in Red Pitaya device editor
-2. Curated coordinate catalog covers instrumented-limb joints (hips, knees, ankles, pelvis minimum)
-3. Selected joints restore correctly after saving and reloading plugin settings XML
-4. Optional: joints near active `streamSensorNames` segments are visually grouped or pre-checked
+1. Acquisition loop enqueues samples or fixed-size blocks without waiting on card flush latency.
+2. SD writer batches writes and flushes on controlled intervals/session close rather than every sample.
+3. Queue overflow, write failure, max queue depth, max write latency, generated count, saved count, and overrun count are tracked.
+4. Startup and runtime logs make SD status unambiguous.
 
-**Key files:** `device editor.cpp`, `device editor.h`
-
-**UI hint:** yes
+**Key files:** `esp32/firmware/main/sd_logger.c`, `sd_logger.h`, `main.c`, `Kconfig.projbuild`
 
 ---
 
-### Phase 3: Trigger → Display Config Wiring
-**Goal:** Connect acquisition triggers to display config writes so the selected joint filter applies when triggered.
+### Phase 3: Stress Harness & Analyzer
 
-**Requirements:** TRIG-01, TRIG-02, TRIG-03, OPS-01
+**Goal:** Upgrade host stress tests so they can determine the maximum safe frequency with filter and SD modes included.
 
 **Success Criteria:**
-1. Handling `ACQBOARD TRIGGER` writes config with current joint selection to OpenSim work directory (`kOpenSimWorkDir`)
-2. Atomic write pattern prevents partial reads; sequence increments on each event
-3. IMU UDP packet timing unchanged (no measurable sample rate impact)
-4. "Apply Display" utility button writes config without requiring external trigger (debug/preview)
+1. `stress_test_serial.py` runs sweeps over frequency and mode combinations.
+2. Test artifacts include per-rate CSV/JSON/Markdown summaries.
+3. Analyzer can validate SD files and host-visible streams using the same sequence/timestamp rules.
+4. Summary reports highest passing rate and recommended cap with a clear reason for first failure.
 
-**Key files:** `devicethread.cpp`, `acqboard.ccp`, `devices/redpitaya/AcqBoardRedPitaya.h`
+**Key files:** `esp32/host/stress_test_serial.py`, `esp32/host/analyze_sample_rate.py`, `esp32/docs/stress-test-sample-rate.md`
 
 ---
 
-### Phase 4: Filtered Display Beside Sim Clock
-**Goal:** Render only selected joint angle values adjacent to the Simbody simulation timer on the OpenSim Live window.
+### Phase 4: Open Ephys Stall Isolation
 
-**Requirements:** DISP-01, DISP-02, DISP-05
+**Goal:** Determine whether Open Ephys stalls are caused by device acquisition, SD writes, serial/TCP transport, plugin buffering, or host-side processing.
 
 **Success Criteria:**
-1. Only configured coordinates appear in the on-screen readout; unselected joints are hidden
-2. Values update live from IK state (`coord_set.get(name).getValue(state)`) in degrees beside sim time
-3. Empty selection shows no coordinate dump (clean default)
-4. If native Simbody text overlay is unavailable, fallback (window title augmentation or documented alternative) is implemented
+1. Test matrix compares SD-only, stream-only, SD+stream, filter-off, and filter-on runs.
+2. Open Ephys/export results are compared against SD ground truth.
+3. If Open Ephys stalls while SD continuity is clean, classify the issue as downstream buffering/transport rather than acquisition loss.
+4. If SD continuity fails, classify the bottleneck with firmware counters and mode comparisons.
 
-**Key files:** `opensim_live_realtime.py`
-
-**UI hint:** yes
+**Key files:** `acqboard.ccp`, `devicethread.cpp`, `esp32/host/serial_tcp_bridge.py`, `esp32/host/stress_test_serial.py`, SD artifacts from Phase 3
 
 ---
 
-### Phase 5: Integration Verification & Documentation
-**Goal:** Validate end-to-end workflow and confirm no regression to live OpenSim streaming.
+### Phase 5: Hardware UAT & Operator Docs
 
-**Requirements:** DISP-04, OPS-02
-
-**Success Criteria:**
-1. Manual test: select joints → start OpenSim Live → Play acquisition → fire trigger → only selected angles appear beside clock
-2. Live IK skeleton continues updating through display filter changes (no freeze > 1 s)
-3. Operator documentation covers joint catalog, trigger workflow, config path, sensor→segment context, and troubleshooting
-
-**Key files:** `docs/opensim-joint-display-config.md`, `docs/opensim-udp-v2.md` (cross-reference)
-
----
-
-### Phase 6: HUD Live-Update Fix (Remediation)
-**Goal:** Make the in-viewport joint-angle text actually update every frame instead of staying frozen on the `knee_r: --.--°` placeholder.
-
-**Requirements:** DISP-02 (reopened — deferred verification failed in hardware UAT)
-
-**Plans:** 1 plan
-- [ ] 06-01-PLAN.md — Runtime HUD capability probe + layered window_title/udp_feedback render fix; gate dead screen_text path; reconcile both file copies byte-identical
-
-**Defect:** Phase 4 added the HUD via `viz.addDecoration(0, xform, DecorativeText("knee_r: --.--°"))` once at init, then mutates the retained Python handle with `_hud_screen_text.setText(...)` each frame. Simbody's `addDecoration` stores a **copy** by value, so `setText()` on the original handle never reaches the rendered geometry — the readout is frozen at the constructor string. IK and `_read_coord_value()` work correctly; only the render path is dead. DISP-02 verification was `human_needed` (code-inspection PASS) and the live UAT exposed the freeze.
-
-**Chosen approach (LAYERED — option 1 proven unbuildable by Phase 6 research):** In-viewport text is impossible on the installed OpenSim 4.5 bindings (`DecorationGenerator` unwrapped; no decoration text-mutation path). A runtime capability probe selects a strategy: **(1) `window_title`** — revive `setWindowTitle` with a SWIG-wrapped `SimTK.String` and write the live HUD string to the OpenSim window title bar each frame; **(2) `udp_feedback`** — fall through to the already-wired port-5001 `_send_angle_feedback` packet, with the angle read in the Open Ephys plugin UI. Python-only; no C++ plugin rebuild this phase.
+**Goal:** Produce the no-loss operating envelope and the repeatable checklist for real sessions.
 
 **Success Criteria:**
-1. The live IK angle is visible to the operator and verifiably updates each frame as the knee moves — console `[HUD-DIAG]`/`[COORD]` value agrees with the displayed value (window title bar or plugin-UI readout, per the active strategy)
-2. Changing the selected joint (via display config) changes the displayed label, not just the console
-3. `_pick_hud_strategy` performs a real runtime probe and logs the chosen strategy; the dead `addDecoration`+`setText` viewport path is removed/gated so it cannot silently re-freeze
-4. The two copies of `opensim_live_realtime.py` (source-of-truth + executed) end identical (`diff` empty)
-5. No regression to the ~20 Hz visualizer loop or live IK stream
+1. Hardware run proves SD sequence continuity at the chosen operating frequency with filter and required channels enabled.
+2. Recommended frequency cap is documented from the stress results.
+3. Operator checklist covers SD preparation, stress preflight, acquisition run, SD continuity verification, and Open Ephys comparison.
+4. Residual risks are explicit, including SD-card model dependence and host streaming limitations.
 
-**Key files:** `opensim_live_realtime.py` (both the `Documents\Plugin` source-of-truth copy and the executed `C:\Users\justi\Open-Sim--Bio-Mech` copy)
-
-**Research:** `.planning/phases/06-hud-live-update-fix/06-RESEARCH.md` — confirms option 1 is dead on this build and provides the verified probe recipe (Q5) + fallback reasoning (Q3/Q4).
+**Key files:** `esp32/docs/stress-test-sample-rate.md`, `docs/esp32-acqboard-integration.md`, generated stress results
 
 ---
 
 ## Phase Ordering Rationale
 
-1. **Spike first** — Simbody on-screen text beside sim time is the highest display risk  
-2. **UI before trigger** — operator must select joints before trigger can apply a filter  
-3. **Trigger before display polish** — core value is filter-on-trigger; display rendering completes UX  
-4. **Verify last** — integration tests need all components wired  
+1. Define measurements before changing behavior so baseline failures are not hidden.
+2. Make SD logging safe before declaring it ground truth.
+3. Expand stress tests once firmware exposes the counters and modes they need.
+4. Isolate Open Ephys after SD ground truth exists.
+5. Finish with hardware UAT and operator docs because acceptance depends on real card/device behavior.
 
 ## Dependencies
 
-```
-Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
-              │           │                       │
-              └───────────┴── both depend on      └──► Phase 6 (remediates Phase 4 DISP-02)
-                              Phase 1 config contract
+```text
+Phase 1 -> Phase 2 -> Phase 3 -> Phase 4 -> Phase 5
 ```
 
 ## Superseded Planning
 
-Prior roadmap phases for camera/view presets (Simbody camera API, `opensim_view_config.json`, anatomical view labels) are **void**. Do not implement.
+The prior v1.0 roadmap for OpenSim joint-angle display and HUD live-update remediation is historical. Do not continue HUD work inside this milestone unless acquisition reliability is complete and explicitly resumed.
 
 ---
-*Roadmap created: 2026-06-10*  
-*Revised: 2026-06-10 — joint angle display control*
-*Revised: 2026-06-12 — Phase 6 planned (1 plan)*
+*Roadmap created: 2026-06-12 - v1.1 SD card reliability and lossless acquisition*

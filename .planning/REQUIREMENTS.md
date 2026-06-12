@@ -1,84 +1,99 @@
-# Requirements: Joint Angle Display on Trigger
+# Requirements: SD Card Reliability and Lossless Acquisition
 
-**Defined:** 2026-06-10  
-**Revised:** 2026-06-10 (scope correction — joint angles, not camera presets)  
-**Core Value:** When a trigger fires during live acquisition, the operator sees only the pre-selected joint angles beside the sim timer.
+**Defined:** 2026-06-12
+**Milestone:** v1.1
+**Core Value:** Save acquisition data on SD card with verifiable sample continuity, then quantify and document the maximum reliable frequency under realistic filter and streaming loads.
 
-## v1 Requirements
+## v1.1 Requirements
 
-### Joint Selection (Plugin UI)
+### Device-Side SD Recording
 
-- [ ] **JOIN-01**: Operator can select which joint coordinates to display via multi-select controls in the Red Pitaya device editor
-- [ ] **JOIN-02**: Selectable joints come from a curated coordinate catalog derived from the Rajagopal OpenSense model (e.g. `hip_flexion_r`, `knee_angle_r`, `ankle_angle_r`, left-leg equivalents, pelvis angles)
-- [ ] **JOIN-03**: Selected joint list persists when device settings are saved and reloaded (XML)
-- [ ] **JOIN-04**: UI can suggest or highlight joints adjacent to currently active IMU sensor segments (optional convenience, not required for v1 acceptance)
+- [ ] **SD-01**: Firmware mounts/detects SD card at startup and reports whether SD logging is enabled, disabled, or failed.
+- [ ] **SD-02**: Firmware writes acquisition samples to SD without blocking the acquisition loop on per-sample card latency.
+- [ ] **SD-03**: SD file format records `seq`, `timestamp_us`, channel data, and enough session metadata to decode sample rate, channel layout, firmware mode, and logging mode.
+- [ ] **SD-04**: Firmware records generated sample count, saved sample count, SD queue drops, max SD queue depth, max write latency, and acquisition-loop overrun count.
+- [ ] **SD-05**: SD recording can be explicitly enabled/disabled for stress comparisons without changing unrelated firmware behavior.
 
-### Trigger Integration
+### Sample-Loss Accounting
 
-- [ ] **TRIG-01**: When an `ACQBOARD TRIGGER` broadcast is handled, the plugin writes the currently selected joint list to the OpenSim work directory config file
-- [ ] **TRIG-02**: Display config write uses atomic file replace and includes a monotonic sequence number to avoid stale reads
-- [ ] **TRIG-03**: Display config write does not block or delay IMU UDP quaternion streaming
+- [ ] **LOSS-01**: Every generated sample has a monotonic sequence number that is persisted to SD.
+- [ ] **LOSS-02**: Analyzer reports duplicate sequences, missing sequences, timestamp gaps, and duration/rate mismatch from SD files.
+- [ ] **LOSS-03**: Stress output compares generated vs saved vs streamed counts when the firmware exposes those counters.
+- [ ] **LOSS-04**: "No samples lost" is accepted only when SD sequence continuity is clean and firmware counters agree.
 
-### OpenSim Live Display
+### Stress Testing
 
-- [ ] **DISP-01**: OpenSim Live reads the config file and displays **only** the selected joint coordinate values (not all model coordinates)
-- [ ] **DISP-02**: Filtered joint angle values are rendered beside the Simbody simulation time/clock in the visualizer window
-- [ ] **DISP-03**: Display filter changes take effect within 200 ms of the config file update during live streaming
-- [ ] **DISP-04**: Live IK visualization continues without regression when the display filter changes
-- [ ] **DISP-05**: When no joints are selected (or config absent), display shows no joint readout (or a minimal "none" state) — not the full coordinate dump
+- [ ] **STRESS-01**: `esp32/host/stress_test_serial.py` can sweep requested frequency across configurable ranges and durations.
+- [ ] **STRESS-02**: Stress sweep supports mode combinations: filter on/off, SD on/off, Open Ephys/serial streaming on/off when firmware commands support them.
+- [ ] **STRESS-03**: Stress summary reports highest passing frequency and recommended operating cap.
+- [ ] **STRESS-04**: Stress artifacts are saved per run in machine-readable CSV/JSON/Markdown so results can be compared across firmware changes.
+- [ ] **STRESS-05**: Analyzer includes latency and stall metrics, not only sequence gaps.
+
+### Stall Isolation
+
+- [ ] **STALL-01**: Firmware measures acquisition-loop duration and flags loop overruns relative to requested period.
+- [ ] **STALL-02**: Firmware measures SD write latency separately from sensor-read/filter latency.
+- [ ] **STALL-03**: Test workflow distinguishes hardware/sensor/I2C limits from filter CPU cost, SD-card stalls, USB/TCP/Open Ephys buffering, and UDP/host transport loss.
+- [ ] **STALL-04**: Open Ephys buffer stalls are tested as a downstream symptom and not treated as proof that acquisition samples were lost on device.
 
 ### Operator Verification
 
-- [ ] **OPS-01**: Operator can manually apply the current joint selection without a trigger (test/preview control in device editor)
-- [ ] **OPS-02**: Documentation describes joint catalog, trigger workflow, config file location, and display format
+- [ ] **OPS-01**: Documentation explains how to run SD-first acquisition reliability tests.
+- [ ] **OPS-02**: Documentation defines the pass/fail threshold for a safe operating frequency.
+- [ ] **OPS-03**: Documentation includes a minimal field checklist: format SD, run baseline, run filter+SD stress, verify SD continuity, then enable Open Ephys streaming.
 
-## v2 Requirements
+## Deferred Requirements
 
-### Advanced Trigger Mapping
+### OpenSim / Visualization
 
-- **TRIG-10**: Different TTL trigger lines map to different joint display sets
-- **TRIG-11**: Trigger applies a saved preset profile (named joint sets)
+- **HUD-10**: OpenSim HUD/window-title/live-angle display follow-up from v1.0.
+- **HUD-11**: Any new IK or joint-display behavior.
 
-### Display Enhancements
+### Future Acquisition Enhancements
 
-- **DISP-10**: On-screen overlay with semi-transparent background for readability
-- **DISP-11**: User-editable display labels per coordinate
-- **DISP-12**: Auto-select joints from active sensor count / `opensim_sensor_map.json`
+- **ACQ-10**: Multi-board SD log synchronization beyond existing sequence/timestamp fields.
+- **ACQ-11**: Binary-to-host replay from SD into Open Ephys.
+- **ACQ-12**: Automated SD-card benchmark suite across multiple card models.
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Camera/view angle presets | User correction — not the requested feature |
-| Simbody camera API work | Superseded by joint-angle HUD |
-| Gen Motion offline pipeline | Scope is OpenSim Live Simbody window only |
-| UDP v2 packet format changes | Risk to proven live stream; use JSON sidecar |
-| Full model coordinate picker (all 80+ DOFs) | v1 uses curated catalog; expand in v2 if needed |
+| UDP as data-integrity proof | UDP can drop packets and should only be used as a visualization/transport signal |
+| OpenSim HUD fixes | Explicitly paused while acquisition fundamentals are addressed |
+| UI polish unrelated to recording integrity | v1.1 needs measurement and loss accounting first |
+| Claiming lossless streaming through Open Ephys alone | Ground truth must come from device-side SD logs |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| JOIN-01 | Phase 2 | Complete |
-| JOIN-02 | Phase 2 | Complete |
-| JOIN-03 | Phase 2 | Complete |
-| JOIN-04 | Phase 2 | Complete |
-| TRIG-01 | Phase 3 | Complete |
-| TRIG-02 | Phase 3 | Complete |
-| TRIG-03 | Phase 3 | Complete |
-| DISP-01 | Phase 4 | Complete |
-| DISP-02 | Phase 4 | Complete |
-| DISP-03 | Phase 1 | Complete |
-| DISP-04 | Phase 5 | Pending UAT |
-| DISP-05 | Phase 4 | Complete |
-| OPS-01 | Phase 3 | Complete |
-| OPS-02 | Phase 5 | Complete |
+| SD-01 | Phase 1, Phase 2 | Planned |
+| SD-02 | Phase 2 | Planned |
+| SD-03 | Phase 1, Phase 2 | Planned |
+| SD-04 | Phase 1, Phase 2 | Planned |
+| SD-05 | Phase 1, Phase 3 | Planned |
+| LOSS-01 | Phase 1, Phase 2 | Planned |
+| LOSS-02 | Phase 3 | Planned |
+| LOSS-03 | Phase 3 | Planned |
+| LOSS-04 | Phase 5 | Planned |
+| STRESS-01 | Phase 3 | Planned |
+| STRESS-02 | Phase 3 | Planned |
+| STRESS-03 | Phase 3, Phase 5 | Planned |
+| STRESS-04 | Phase 3 | Planned |
+| STRESS-05 | Phase 1, Phase 3 | Planned |
+| STALL-01 | Phase 1, Phase 2 | Planned |
+| STALL-02 | Phase 1, Phase 2 | Planned |
+| STALL-03 | Phase 4 | Planned |
+| STALL-04 | Phase 4 | Planned |
+| OPS-01 | Phase 5 | Planned |
+| OPS-02 | Phase 5 | Planned |
+| OPS-03 | Phase 5 | Planned |
 
 **Coverage:**
-- v1 requirements: 14 total
-- Mapped to phases: 14
-- Unmapped: 0 ✓
+- v1.1 requirements: 21 total
+- Mapped to phases: 21
+- Unmapped: 0
 
 ---
-*Requirements defined: 2026-06-10*  
-*Last updated: 2026-06-10 — rewritten for joint angle display control*
+*Requirements defined: 2026-06-12 - SD card reliability and lossless acquisition*
