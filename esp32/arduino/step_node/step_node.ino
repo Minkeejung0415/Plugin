@@ -120,6 +120,26 @@ struct OeHeader {
 };
 #pragma pack(pop)
 
+#pragma pack(push, 1)
+struct SdLogHeader {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t record_size;
+  uint16_t sample_hz;
+  uint16_t channel_count;
+  int64_t start_time_us;
+};
+
+struct SdLogRecord {
+  uint32_t seq;
+  int64_t time_us;
+  int16_t ch[NUM_CHANNELS];
+};
+#pragma pack(pop)
+
+#define SD_LOG_MAGIC 0x31505453UL  // "STP1" little-endian
+#define SD_LOG_VERSION 1
+
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 bool streaming = false;
@@ -147,6 +167,17 @@ static uint32_t g_sample_last_us = 0;
 static uint8_t g_acc_preset = 0;
 static uint8_t g_gyr_preset = 0;
 static bool g_filter_on = false;
+
+static bool g_sd_ready = false;
+static bool g_sd_recording = false;
+static File g_sd_file;
+static uint64_t g_generated_samples = 0;
+static uint64_t g_sd_saved_samples = 0;
+static uint64_t g_sd_write_errors = 0;
+static uint32_t g_max_sd_write_us = 0;
+static uint32_t g_max_loop_us = 0;
+static uint32_t g_loop_overruns = 0;
+static char g_sd_path[48] = "/step_session.bin";
 
 static const float kAccLsbPerG[4] = {16384.0f, 8192.0f, 4096.0f, 2048.0f};
 static const float kGyrLsbPerDps[4] = {131.072f, 65.536f, 32.768f, 16.384f};
@@ -530,14 +561,132 @@ static void sendSerialBench() {
 
 static void logSd() {
 #if ENABLE_SD
-  if (!SD.begin(PIN_SD_CS)) return;
-  File f = SD.open("/step_session.bin", FILE_APPEND);
-  if (f) {
-    f.write((uint8_t *)&seq, sizeof(seq));
-    f.write((uint8_t *)channels, sizeof(channels));
-    f.close();
+  if (!g_sd_recording || !g_sd_file) return;
+
+  SdLogRecord rec = {};
+  rec.seq = seq;
+  rec.time_us = (int64_t)esp_timer_get_time();
+  memcpy(rec.ch, channels, sizeof(channels));
+
+  uint32_t t0 = micros();
+  size_t written = g_sd_file.write((uint8_t *)&rec, sizeof(rec));
+  uint32_t write_us = (uint32_t)(micros() - t0);
+  if (write_us > g_max_sd_write_us) g_max_sd_write_us = write_us;
+
+  if (written == sizeof(rec)) {
+    g_sd_saved_samples++;
+  } else {
+    g_sd_write_errors++;
   }
 #endif
+}
+
+static bool sdEnsureReady() {
+#if ENABLE_SD
+  if (g_sd_ready) return true;
+  g_sd_ready = SD.begin(PIN_SD_CS);
+  return g_sd_ready;
+#else
+  return false;
+#endif
+}
+
+static bool sdRecordStart(const char *path_or_null) {
+#if ENABLE_SD
+  if (!sdEnsureReady()) {
+    Serial.println("SD_STATUS enabled=1 ready=0 recording=0 error=begin_failed");
+    return false;
+  }
+
+  if (g_sd_recording && g_sd_file) {
+    g_sd_file.flush();
+    g_sd_file.close();
+  }
+
+  if (path_or_null && path_or_null[0]) {
+    strncpy(g_sd_path, path_or_null, sizeof(g_sd_path) - 1);
+    g_sd_path[sizeof(g_sd_path) - 1] = '\0';
+  } else {
+    strncpy(g_sd_path, "/step_session.bin", sizeof(g_sd_path) - 1);
+    g_sd_path[sizeof(g_sd_path) - 1] = '\0';
+  }
+
+  g_sd_file = SD.open(g_sd_path, FILE_WRITE);
+  if (!g_sd_file) {
+    g_sd_recording = false;
+    g_sd_write_errors++;
+    Serial.printf("SD_STATUS enabled=1 ready=1 recording=0 error=open_failed path=%s\n", g_sd_path);
+    return false;
+  }
+
+  g_sd_saved_samples = 0;
+  g_sd_write_errors = 0;
+  g_max_sd_write_us = 0;
+
+  SdLogHeader hdr = {};
+  hdr.magic = SD_LOG_MAGIC;
+  hdr.version = SD_LOG_VERSION;
+  hdr.record_size = sizeof(SdLogRecord);
+  hdr.sample_hz = g_sample_hz;
+  hdr.channel_count = NUM_CHANNELS;
+  hdr.start_time_us = (int64_t)esp_timer_get_time();
+  size_t written = g_sd_file.write((uint8_t *)&hdr, sizeof(hdr));
+  if (written != sizeof(hdr)) {
+    g_sd_write_errors++;
+  }
+
+  g_sd_recording = true;
+  Serial.printf("SD_STATUS enabled=1 ready=1 recording=1 path=%s sample_hz=%u\n",
+                g_sd_path, (unsigned)g_sample_hz);
+  return true;
+#else
+  Serial.println("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled");
+  return false;
+#endif
+}
+
+static void sdRecordStop() {
+#if ENABLE_SD
+  if (g_sd_file) {
+    uint32_t t0 = micros();
+    g_sd_file.flush();
+    uint32_t flush_us = (uint32_t)(micros() - t0);
+    if (flush_us > g_max_sd_write_us) g_max_sd_write_us = flush_us;
+    g_sd_file.close();
+  }
+  g_sd_recording = false;
+  Serial.printf("SD_STATUS enabled=1 ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu\n",
+                g_sd_ready ? 1 : 0,
+                g_sd_path,
+                (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)g_sd_write_errors,
+                (unsigned long)g_max_sd_write_us);
+#else
+  Serial.println("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled");
+#endif
+}
+
+static void printAcqStatus() {
+  Serial.printf("STATUS seq=%lu generated=%llu sample_hz=%u filter=%d streaming=%d "
+                "sd_enabled=%d sd_ready=%d sd_recording=%d sd_saved=%llu sd_errors=%llu "
+                "max_sd_write_us=%lu max_loop_us=%lu loop_overruns=%lu\n",
+                (unsigned long)seq,
+                (unsigned long long)g_generated_samples,
+                (unsigned)g_sample_hz,
+                g_filter_on ? 1 : 0,
+                streaming ? 1 : 0,
+#if ENABLE_SD
+                1,
+#else
+                0,
+#endif
+                g_sd_ready ? 1 : 0,
+                g_sd_recording ? 1 : 0,
+                (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)g_sd_write_errors,
+                (unsigned long)g_max_sd_write_us,
+                (unsigned long)g_max_loop_us,
+                (unsigned long)g_loop_overruns);
 }
 
 static void replyToHost(const char *text) {
@@ -582,6 +731,12 @@ static void handleLine(const String &line) {
   } else if (line.startsWith("FILTER OFF")) {
     g_filter_on = false;
     replyToHost("OK FILTER OFF\n");
+  } else if (line.startsWith("RECORD ON")) {
+    String path = line.substring(9);
+    path.trim();
+    sdRecordStart(path.length() ? path.c_str() : nullptr);
+  } else if (line.startsWith("RECORD OFF")) {
+    sdRecordStop();
   } else if (handleCfgLine(line)) {
     // handled
   } else if (line.startsWith("START")) {
@@ -593,6 +748,7 @@ static void handleLine(const String &line) {
 #endif
   } else if (line.equalsIgnoreCase("AP?") || line.equalsIgnoreCase("WIFI?") ||
              line.equalsIgnoreCase("STATUS")) {
+    printAcqStatus();
     printWifiStatus();
   }
 }
@@ -927,6 +1083,7 @@ void loop() {
   }
 
   uint32_t now = micros();
+  uint32_t loop_start_us = now;
   if (g_sample_hz < 1)
     return;
   const uint32_t period_us = 1000000UL / (uint32_t)g_sample_hz;
@@ -943,6 +1100,11 @@ void loop() {
   packAndSendTcp();
   sendSerialBench();
   logSd();
+
+  g_generated_samples++;
+  uint32_t loop_us = (uint32_t)(micros() - loop_start_us);
+  if (loop_us > g_max_loop_us) g_max_loop_us = loop_us;
+  if (loop_us > period_us) g_loop_overruns++;
 
   seq++;
 }

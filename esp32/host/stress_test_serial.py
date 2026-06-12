@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import itertools
+import json
 import re
 import struct
 import subprocess
@@ -11,12 +13,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import serial
-import serial.tools.list_ports
 import platform
-import subprocess
 
-from serial.serialutil import SerialException
+try:
+    import serial
+    import serial.tools.list_ports
+    from serial.serialutil import SerialException
+except ModuleNotFoundError:
+    serial = None  # type: ignore[assignment]
+    SerialException = OSError  # type: ignore[assignment,misc]
 
 
 ROOT = Path(__file__).resolve().parent
@@ -114,6 +119,9 @@ def _windows_port_holder_report() -> str:
 
 
 def open_serial_port(port: str, baud: int, wait_s: float) -> serial.Serial:
+    if serial is None:
+        raise RuntimeError("pyserial is required for serial stress tests: python -m pip install pyserial")
+
     attempts = 10 if wait_s > 0 else 1
     interval = 0.5
     last: BaseException | None = None
@@ -135,16 +143,25 @@ def open_serial_port(port: str, baud: int, wait_s: float) -> serial.Serial:
 @dataclass
 class RateResult:
     hz: int
+    filter_on: bool
+    sd_on: bool
     mean_hz: float | None
     dup_seq: int
     gap_seq: int
     rows: int
     passed: bool
     gap_time: int = 0
+    sd_saved: int | None = None
+    sd_errors: int | None = None
+    max_sd_write_us: int | None = None
+    max_loop_us: int | None = None
+    loop_overruns: int | None = None
     note: str = ""
 
 
-def list_ports_verbose() -> list[serial.tools.list_ports.ListPortInfo]:
+def list_ports_verbose() -> list[object]:
+    if serial is None:
+        return []
     return list(serial.tools.list_ports.comports())
 
 
@@ -191,11 +208,56 @@ def wait_for_text(ser: serial.Serial, timeout: float) -> str:
         if chunk:
             buf.extend(chunk)
             text = buf.decode("utf-8", errors="replace")
-            if "ERROR" in text or "Sample rate set" in text or "OK FREQ" in text:
+            if (
+                "ERROR" in text
+                or "Sample rate set" in text
+                or "OK FREQ" in text
+                or "STATUS " in text
+                or "SD_STATUS " in text
+                or "OK FILTER" in text
+            ):
                 return text
         else:
             time.sleep(0.02)
     return buf.decode("utf-8", errors="replace")
+
+
+STATUS_RE = re.compile(r"^(?:SD_STATUS|STATUS)\s+(.*)$")
+
+
+def parse_key_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        m = STATUS_RE.search(line.strip())
+        if not m:
+            continue
+        for part in m.group(1).split():
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            values[k.strip()] = v.strip()
+    return values
+
+
+def read_status(ser: serial.Serial, timeout: float = 1.0) -> dict[str, str]:
+    send_line(ser, "STATUS")
+    text = wait_for_text(ser, timeout)
+    return parse_key_values(text)
+
+
+def maybe_int(values: dict[str, str], key: str) -> int | None:
+    try:
+        return int(values[key])
+    except (KeyError, ValueError):
+        return None
+
+
+def first_int(values: dict[str, str], *keys: str) -> int | None:
+    for key in keys:
+        value = maybe_int(values, key)
+        if value is not None:
+            return value
+    return None
 
 
 def capture_text_csv(ser: serial.Serial, seconds: float, out_path: Path) -> int:
@@ -319,16 +381,24 @@ def test_one_rate(
     hz: int,
     capture_s: float,
     binary_mode: bool | None,
+    filter_on: bool,
+    sd_on: bool,
 ) -> tuple[RateResult, bool | None]:
-    send_line(ser, "FILTER ON")
+    send_line(ser, "FILTER ON" if filter_on else "FILTER OFF")
     time.sleep(0.15)
     send_line(ser, f"FREQ:{hz}")
     wait_for_text(ser, 2.0)
     drain_serial(ser, 0.2)
+
+    if sd_on:
+        send_line(ser, "RECORD ON")
+        time.sleep(0.25)
+
     send_line(ser, "START")
     time.sleep(0.1)
 
-    out_path = RESULTS_DIR / f"rate_{hz}.csv"
+    mode_tag = f"filter_{'on' if filter_on else 'off'}__sd_{'on' if sd_on else 'off'}"
+    out_path = RESULTS_DIR / f"rate_{hz}__{mode_tag}.csv"
     if binary_mode is False:
         rows = capture_text_csv(ser, capture_s, out_path)
         dup, gap, mean_hz, gap_time = run_analyzer(out_path)
@@ -342,18 +412,68 @@ def test_one_rate(
         if rows < expected:
             gap += max(0, int(hz * capture_s) - rows)
 
+    status: dict[str, str] = {}
+    if sd_on:
+        send_line(ser, "RECORD OFF")
+        status_text = wait_for_text(ser, 2.0)
+        status.update(parse_key_values(status_text))
+        status.update(read_status(ser, 1.0))
+    else:
+        status.update(read_status(ser, 1.0))
+
     expected = int(hz * capture_s * 0.85)
     rate_ok = mean_hz is not None and (0.95 * hz <= mean_hz <= 1.15 * hz)
-    passed = dup == 0 and gap == 0 and rows >= expected and rate_ok  # host USB bursts inflate gap_time
+    sd_saved = first_int(status, "saved", "sd_saved")
+    sd_errors = first_int(status, "errors", "sd_errors")
+    max_sd_write_us = maybe_int(status, "max_sd_write_us")
+    max_loop_us = maybe_int(status, "max_loop_us")
+    loop_overruns = maybe_int(status, "loop_overruns")
+    sd_ok = True
+    if sd_on:
+        sd_ok = (
+            sd_saved is not None
+            and sd_saved >= expected
+            and (sd_errors or 0) == 0
+            and (loop_overruns or 0) == 0
+        )
+    passed = dup == 0 and gap == 0 and rows >= expected and rate_ok and sd_ok
     note = ""
     if binary_mode is None:
         note = "auto"
     if rows < 2:
         note = (note + "; " if note else "") + "insufficient rows"
+    if sd_on and sd_saved is None:
+        note = (note + "; " if note else "") + "no SD counters"
+    if sd_on and sd_errors:
+        note = (note + "; " if note else "") + f"sd_errors={sd_errors}"
+    if sd_on and loop_overruns:
+        note = (note + "; " if note else "") + f"loop_overruns={loop_overruns}"
     return (
-        RateResult(hz, mean_hz, dup, gap, rows, passed, note, gap_time),
+        RateResult(
+            hz=hz,
+            filter_on=filter_on,
+            sd_on=sd_on,
+            mean_hz=mean_hz,
+            dup_seq=dup,
+            gap_seq=gap,
+            rows=rows,
+            passed=passed,
+            gap_time=gap_time,
+            sd_saved=sd_saved,
+            sd_errors=sd_errors,
+            max_sd_write_us=max_sd_write_us,
+            max_loop_us=max_loop_us,
+            loop_overruns=loop_overruns,
+            note=note,
+        ),
         mode,
     )
+
+
+def expand_mode(value: str) -> list[bool]:
+    if value == "both":
+        return [False, True]
+    return [value == "on"]
 
 
 def detect_mode(ser: serial.Serial) -> bool:
@@ -379,6 +499,23 @@ def main() -> int:
     p.add_argument("--hz", type=int, nargs="*", default=DEFAULT_HZ)
     p.add_argument("--csv-mode", action="store_true", help="Force text CSV parsing")
     p.add_argument("--binary-mode", action="store_true", help="Force binary frame parsing")
+    p.add_argument(
+        "--filter",
+        choices=("on", "off", "both"),
+        default="both",
+        help="Filter mode sweep. Use both to measure filter CPU cost.",
+    )
+    p.add_argument(
+        "--sd",
+        choices=("on", "off", "both"),
+        default="both",
+        help="SD recording mode sweep. Use both to isolate SD write cost.",
+    )
+    p.add_argument(
+        "--sd-file",
+        type=Path,
+        help="Analyze a copied STEP SD binary file and exit.",
+    )
     p.add_argument("--list-ports", action="store_true")
     p.add_argument(
         "--wait-s",
@@ -387,6 +524,10 @@ def main() -> int:
         help="Retry open up to 10 times (0.5 s apart) when port is busy; e.g. 5",
     )
     args = p.parse_args()
+
+    if args.sd_file:
+        cmd = [sys.executable, str(ANALYZER), str(args.sd_file), "--format", "sd-bin"]
+        return subprocess.run(cmd).returncode
 
     if args.list_ports:
         ports = list_ports_verbose()
@@ -425,6 +566,9 @@ def main() -> int:
 
     try:
         ser = open_serial_port(port, args.baud, args.wait_s)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 3
     except SerialException:
         return 3
     try:
@@ -434,26 +578,39 @@ def main() -> int:
             binary_mode = detect_mode(ser)
             print(f"Detected {'binary' if binary_mode else 'CSV'} serial stream")
 
-        for hz in args.hz:
-            t_start = time.monotonic()
-            res, binary_mode = test_one_rate(ser, hz, per_test, binary_mode)
-            results.append(res)
-            elapsed = time.monotonic() - t_start
-            if elapsed > 120:
-                print(f"Stopping early: {hz} Hz exceeded 120 s")
-                break
-            print(
-                f"Hz={hz}: rows={res.rows} mean_hz={res.mean_hz} dup={res.dup_seq} "
-                f"gap={res.gap_seq} gap_t={res.gap_time} pass={res.passed}"
-            )
+        modes = list(itertools.product(expand_mode(args.filter), expand_mode(args.sd)))
+        for filter_on, sd_on in modes:
+            print(f"\n=== Mode: filter={'on' if filter_on else 'off'} sd={'on' if sd_on else 'off'} ===")
+            for hz in args.hz:
+                t_start = time.monotonic()
+                res, binary_mode = test_one_rate(
+                    ser, hz, per_test, binary_mode, filter_on=filter_on, sd_on=sd_on
+                )
+                results.append(res)
+                elapsed = time.monotonic() - t_start
+                if elapsed > 120:
+                    print(f"Stopping early: {hz} Hz exceeded 120 s")
+                    break
+                print(
+                    f"Hz={hz}: rows={res.rows} mean_hz={res.mean_hz} dup={res.dup_seq} "
+                    f"gap={res.gap_seq} sd_saved={res.sd_saved} sd_err={res.sd_errors} "
+                    f"max_sd_us={res.max_sd_write_us} overrun={res.loop_overruns} pass={res.passed}"
+                )
 
-        print("\n| Hz | mean_hz | dup_seq | gap_seq | pass |")
-        print("|----|---------|---------|---------|------|")
+        print("\n| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass |")
+        print("|----|--------|----|---------|------|---------|---------|----------|--------|-----------|---------|------|")
         last_good = 0
         for r in results:
             mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
             pf = "PASS" if r.passed else "FAIL"
-            print(f"| {r.hz} | {mh} | {r.dup_seq} | {r.gap_seq} | {pf} |")
+            print(
+                f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
+                f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
+                f"{r.sd_saved if r.sd_saved is not None else 'n/a'} | "
+                f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "
+                f"{r.max_sd_write_us if r.max_sd_write_us is not None else 'n/a'} | "
+                f"{r.loop_overruns if r.loop_overruns is not None else 'n/a'} | {pf} |"
+            )
             if r.passed:
                 last_good = r.hz
 
@@ -467,13 +624,19 @@ def main() -> int:
             "",
             f"Port: `{port}` baud {args.baud}",
             "",
-            "| Hz | mean_hz | dup_seq | gap_seq | pass |",
-            "|----|---------|---------|---------|------|",
+            "| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass |",
+            "|----|--------|----|---------|------|---------|---------|----------|--------|-----------|---------|------|",
         ]
         for r in results:
             mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
             lines.append(
-                f"| {r.hz} | {mh} | {r.dup_seq} | {r.gap_seq} | {'PASS' if r.passed else 'FAIL'} |"
+                f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
+                f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
+                f"{r.sd_saved if r.sd_saved is not None else 'n/a'} | "
+                f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "
+                f"{r.max_sd_write_us if r.max_sd_write_us is not None else 'n/a'} | "
+                f"{r.loop_overruns if r.loop_overruns is not None else 'n/a'} | "
+                f"{'PASS' if r.passed else 'FAIL'} |"
             )
         lines.extend(
             [
@@ -486,6 +649,11 @@ def main() -> int:
             ]
         )
         summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        json_path = RESULTS_DIR / "SUMMARY.json"
+        json_path.write_text(
+            json.dumps([r.__dict__ for r in results], indent=2) + "\n",
+            encoding="utf-8",
+        )
     finally:
         ser.close()
     return 0
