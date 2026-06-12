@@ -24,4 +24,30 @@ config STEP_DIO_GPIO
     int "DIO input GPIO"
     default 1
 
+config STEP_ENABLE_SD_LOGGER
+    bool "Enable SD acquisition logger"
+    default y
+    help
+        Enables device-side SD logging. Disable for stream-only stress comparisons.
+
+config STEP_SD_LOG_QUEUE_DEPTH
+    int "SD logger queue depth"
+    default 256
+    range 8 4096
+    help
+        Number of samples the acquisition task can enqueue before SD logging reports drops.
+
+config STEP_SD_LOG_FLUSH_INTERVAL_MS
+    int "SD logger flush interval in milliseconds"
+    default 1000
+    range 100 60000
+    help
+        Periodic flush cadence for the SD writer task. Samples are not flushed from the acquisition task.
+
+config STEP_SD_LOG_PATH
+    string "SD log file path"
+    default "/sdcard/step_session.bin"
+    help
+        Path for the binary acquisition log once /sdcard has been mounted.
+
 endmenu

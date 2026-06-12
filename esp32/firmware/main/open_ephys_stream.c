@@ -12,6 +12,7 @@
 #include "freertos/semphr.h"
 #include "lwip/err.h"
 #include "lwip/sockets.h"
+#include "sd_logger.h"
 
 static const char *TAG = "oe_stream";
 
@@ -64,6 +65,16 @@ static void handle_handshake(int fd, const char *line)
     } else if (strncmp(line, "START", 5) == 0) {
         s_streaming = true;
         ESP_LOGI(TAG, "Streaming START");
+    } else if (strncmp(line, "RECORD ON", 9) == 0) {
+        const char *path = line + 9;
+        while (*path == ' ') {
+            path++;
+        }
+        sd_logger_start(*path ? path : NULL);
+        ESP_LOGI(TAG, "Recording command ON");
+    } else if (strncmp(line, "RECORD OFF", 10) == 0) {
+        sd_logger_stop();
+        ESP_LOGI(TAG, "Recording command OFF");
     }
 }
 

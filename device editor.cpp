@@ -658,10 +658,7 @@ void DeviceEditor::syncRecordButtonForBoardType()
     if (rp->getIsEsp32Node())
     {
         recordButton->setEnabled (true);
-        recordButton->setTooltip ("Record IMU data to a CSV file in:\n"
-                                  "Documents\\Arduino\\ESP32-S3-1\\results\\\n"
-                                  "Columns: timestamp_s, ax_g, ay_g, az_g, "
-                                  "gx_dps, gy_dps, gz_dps, dio, qw, qx, qy, qz");
+        recordButton->setTooltip ("Record acquisition data to the ESP32 SD card.");
     }
     else
     {

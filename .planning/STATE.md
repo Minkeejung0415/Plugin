@@ -3,34 +3,34 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: SD Card Reliability and Lossless Acquisition
 current_phase: 02
-status: ready_to_plan
+status: firmware_verification_pending
 last_updated: 2026-06-12T22:03:54.834Z
 progress:
   total_phases: 5
   completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  total_plans: 2
+  completed_plans: 2
   percent: 20
-stopped_at: Phase 01 complete (1/1) — ready to discuss Phase 2
+stopped_at: Phase 02 implemented; ESP-IDF firmware build and hardware SD verification pending
 ---
 
 # Project State
 
 **Project:** Open Ephys ESP32 Acquisition Reliability
 **Current phase:** 2
-**Status:** Ready to plan
+**Status:** Firmware verification pending
 
 ## Progress
 
 | Phase | Name | Status | Plans |
 |-------|------|--------|-------|
-| 1 | Measurement Contract & Baseline | Planned | 0 |
-| 2 | Buffered SD Logger | Planned | 0 |
+| 1 | Measurement Contract & Baseline | Complete | 1 |
+| 2 | Buffered SD Logger | Implementation complete; firmware verification pending | 1 |
 | 3 | Stress Harness & Analyzer | Planned | 0 |
 | 4 | Open Ephys Stall Isolation | Planned | 0 |
 | 5 | Hardware UAT & Operator Docs | Planned | 0 |
 
-**Overall:** 0/5 phases complete. Next step is to plan Phase 1.
+**Overall:** 1/5 phases fully verified. Phase 2 code and plugin build are complete; next verification step is ESP-IDF firmware build and SD-card hardware test.
 
 ## Current Focus
 

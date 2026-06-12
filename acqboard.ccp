@@ -1015,31 +1015,19 @@ bool AcqBoardRedPitaya::sendRecordOnCommand()
 {
     if (isEsp32Node)
     {
-        // ESP32 WiFi nodes have no board-side storage — record to a CSV on the PC instead.
-        const juce::File dir (kEsp32RecordDir);
-        dir.createDirectory();
-
-        const String stamp = Time::getCurrentTime().formatted ("%Y%m%d_%H%M%S");
-        const juce::File file = dir.getChildFile ("recording_" + stamp + ".csv");
-
-        auto stream = std::make_unique<juce::FileOutputStream> (file);
-        if (! stream->openedOk())
-        {
-            std::cout << "ESP32 record: could not open " << file.getFullPathName() << std::endl;
+        if (commandSocket == nullptr)
             return false;
-        }
 
-        stream->writeText ("timestamp_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,dio,qw,qx,qy,qz\n",
-                           false, false, nullptr);
+        const char* msg = "RECORD ON\n";
+        int written = commandSocket->write (msg, (int) strlen (msg));
+        if (written <= 0)
+            return false;
 
-        lastRecordingPath = file.getFullPathName();
+        lastRecordingPath = "/sdcard/step_session.bin";
         lastRecordingCsvPath = {};
-
-        const juce::ScopedLock sl (esp32RecordLock);
-        esp32RecordStream     = std::move (stream);
-        esp32RecordSampleCount = 0;
-        std::cout << "ESP32 record: writing to " << lastRecordingPath << std::endl;
+        std::cout << "ESP32 record: requested board SD recording at " << lastRecordingPath << std::endl;
         return true;
+
     }
 
     // Red Pitaya: tell the board to save locally.
@@ -1068,14 +1056,17 @@ bool AcqBoardRedPitaya::sendRecordOffCommand()
 {
     if (isEsp32Node)
     {
-        const juce::ScopedLock sl (esp32RecordLock);
-        if (esp32RecordStream != nullptr)
-        {
-            esp32RecordStream->flush();
-            esp32RecordStream.reset();
-            std::cout << "ESP32 record: closed " << lastRecordingPath << std::endl;
-        }
+        if (commandSocket == nullptr)
+            return false;
+
+        const char* msg = "RECORD OFF\n";
+        int written = commandSocket->write (msg, (int) strlen (msg));
+        if (written <= 0)
+            return false;
+
+        std::cout << "ESP32 record: requested board SD recording stop" << std::endl;
         return true;
+
     }
 
     if (commandSocket == nullptr)

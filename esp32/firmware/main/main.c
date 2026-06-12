@@ -60,9 +60,12 @@ static void acquisition_task(void *arg)
 {
     (void)arg;
     TickType_t period = pdMS_TO_TICKS(1000 / OE_STREAM_SAMPLE_HZ);
+    const uint32_t period_us = 1000000u / OE_STREAM_SAMPLE_HZ;
     uint32_t seq = 0;
+    int64_t last_status_us = 0;
 
     while (1) {
+        int64_t loop_start_us = esp_timer_get_time();
         oe_sample_t sample = {0};
         sample.seq = seq++;
         sample.timestamp_us = esp_timer_get_time();
@@ -83,6 +86,30 @@ static void acquisition_task(void *arg)
 #endif
         open_ephys_stream_set_sample(&sample);
         sd_logger_append(&sample);
+
+        uint32_t loop_us = (uint32_t)(esp_timer_get_time() - loop_start_us);
+        sd_logger_note_acquisition(loop_us, period_us);
+
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_status_us >= 5000000) {
+            sd_logger_stats_t stats;
+            sd_logger_get_stats(&stats);
+            ESP_LOGI(TAG,
+                     "SD stats generated=%llu enqueued=%llu saved=%llu drops=%llu write_errors=%llu "
+                     "max_queue=%u/%u max_enqueue_us=%u max_write_us=%u acq_overruns=%llu max_acq_us=%u",
+                     (unsigned long long)stats.generated_samples,
+                     (unsigned long long)stats.enqueued_samples,
+                     (unsigned long long)stats.saved_samples,
+                     (unsigned long long)stats.sd_queue_drops,
+                     (unsigned long long)stats.sd_write_errors,
+                     (unsigned)stats.max_sd_queue_depth,
+                     (unsigned)stats.queue_capacity,
+                     (unsigned)stats.max_sd_enqueue_us,
+                     (unsigned)stats.max_sd_write_us,
+                     (unsigned long long)stats.acq_loop_overruns,
+                     (unsigned)stats.max_acq_loop_us);
+            last_status_us = now_us;
+        }
 
         vTaskDelay(period);
     }

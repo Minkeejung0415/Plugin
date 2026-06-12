@@ -37,7 +37,7 @@
 
     ASCII commands sent to board during acquisition:
       FILTER ON/OFF        — enables/disables VQF sensor fusion on the firmware side
-      RECORD ON/OFF        — starts/stops local SD-card or ESP32 CSV recording
+      RECORD ON/OFF        — starts/stops local board SD-card recording
       FREQ:<hz>            — changes hardware tick rate on the fly
       CFG <si> ACC <0-3>   — sets accelerometer full-scale range for sensor index si
       CFG <si> GYR <0-3>   — sets gyroscope full-scale range for sensor index si
@@ -445,7 +445,7 @@ public:
     std::unique_ptr<juce::ChildProcess> openSimProcess;
     std::unique_ptr<juce::ChildProcess> openSimLiveProcess;
 
-    // PC-side CSV recording for ESP32 WiFi mode (written by run(), opened/closed by UI thread).
+    // Legacy PC-side CSV recording path for ESP32 WiFi mode; board SD recording is preferred.
     std::unique_ptr<juce::FileOutputStream> esp32RecordStream;
     juce::CriticalSection esp32RecordLock;
     int esp32RecordSampleCount = 0;

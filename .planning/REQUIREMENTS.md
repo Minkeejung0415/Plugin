@@ -68,12 +68,12 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SD-01 | Phase 1, Phase 2 | Contract defined; implementation pending Phase 2 |
-| SD-02 | Phase 2 | Planned |
-| SD-03 | Phase 1, Phase 2 | Contract defined; implementation pending Phase 2 |
-| SD-04 | Phase 1, Phase 2 | Counter contract defined; implementation pending Phase 2 |
-| SD-05 | Phase 1, Phase 3 | Mode contract defined; tooling pending Phase 3 |
-| LOSS-01 | Phase 1, Phase 2 | Contract defined; persistence implementation pending Phase 2 |
+| SD-01 | Phase 1, Phase 2 | Logger status implemented; full SD mount pin configuration pending hardware confirmation |
+| SD-02 | Phase 2 | Buffered writer implemented; firmware build/hardware verification pending |
+| SD-03 | Phase 1, Phase 2 | Header plus `oe_sample_t` sample records implemented; analyzer pending Phase 3 |
+| SD-04 | Phase 1, Phase 2 | Firmware counters implemented; firmware build/hardware verification pending |
+| SD-05 | Phase 1, Phase 2, Phase 3 | Plugin-triggered RECORD ON/OFF implemented; stress mode tooling pending Phase 3 |
+| LOSS-01 | Phase 1, Phase 2 | Monotonic seq persisted when SD recording is active; firmware build/hardware verification pending |
 | LOSS-02 | Phase 3 | Planned |
 | LOSS-03 | Phase 3 | Planned |
 | LOSS-04 | Phase 5 | Planned |
@@ -82,8 +82,8 @@
 | STRESS-03 | Phase 3, Phase 5 | Planned |
 | STRESS-04 | Phase 3 | Planned |
 | STRESS-05 | Phase 1, Phase 3 | Metric contract defined; analyzer implementation pending Phase 3 |
-| STALL-01 | Phase 1, Phase 2 | Measurement contract defined; firmware implementation pending Phase 2 |
-| STALL-02 | Phase 1, Phase 2 | Measurement contract defined; firmware implementation pending Phase 2 |
+| STALL-01 | Phase 1, Phase 2 | Acquisition-loop overrun counter implemented; firmware build/hardware verification pending |
+| STALL-02 | Phase 1, Phase 2 | SD enqueue/write latency counters implemented; firmware build/hardware verification pending |
 | STALL-03 | Phase 4 | Planned |
 | STALL-04 | Phase 4 | Planned |
 | OPS-01 | Phase 5 | Planned |
