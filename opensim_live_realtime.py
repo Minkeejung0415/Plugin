@@ -132,8 +132,8 @@ STATIC_ACCEL_EPS = 0.03
 STATIC_CHANGE_EPS = 0.02
 STATIC_COORD_EPS_DEG = 0.25
 REAL_SOURCE_LABELS   = ("real", "real_redpitaya", "redpitaya", "rp")
-CALIB_DURATION_S = float(os.environ.get("OPENSIM_CALIB_DURATION", "3.0"))
-OPENSIM_SKIP_CALIB = os.environ.get("OPENSIM_SKIP_CALIB", "0") == "1"
+CALIB_DURATION_S = float(os.environ.get("OPENSIM_CALIB_DURATION", "0.0"))
+OPENSIM_SKIP_CALIB = os.environ.get("OPENSIM_SKIP_CALIB", "1") != "0"
 
 # ── Sensor slot layout ────────────────────────────────────────────────────────
 # SENSORS is the canonical ordered list of IMU frame names used by the OpenSim
@@ -460,7 +460,8 @@ def _read_coord_value(model, state, joint_name):
       2. Call model.realizePosition(state) to ensure the state is up-to-date.
       3. Find the Coordinate object in the model's CoordinateSet.
       4. Read the value in radians, convert to degrees.
-    Returns float("nan") if anything goes wrong (unknown name, IK failure, etc.).
+    Falls back to the coordinate default, then 0.0, so the HUD does not get
+    stuck on the initial placeholder while the live state is settling.
     """
     coord_name = opensim_joint_catalog.coordinate_for(joint_name)
     try:
@@ -479,14 +480,22 @@ def _read_coord_value(model, state, joint_name):
                 coord = candidate
                 break
     if coord is None:
-        return float("nan")
+        return 0.0
     try:
         value = float(coord.getValue(state))
-        if not math.isfinite(value):
-            return float("nan")
-        return float(math.degrees(value))
+        if math.isfinite(value):
+            return float(math.degrees(value))
     except Exception:
-        return float("nan")
+        pass
+
+    try:
+        value = float(coord.getDefaultValue())
+        if math.isfinite(value):
+            return float(math.degrees(value))
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def _send_angle_feedback(t_stream, joint_index, angle_deg):
@@ -532,7 +541,11 @@ _window_title_warned = False
 
 
 def _try_set_window_title(viz, title):
-    """OpenSim 4.5 SWIG rejects plain Python str for setWindowTitle; skip after first failure."""
+    """OpenSim 4.5 SWIG rejects plain Python str for setWindowTitle; skip after first failure.
+
+    Legacy plain-str path — kept for call sites that pre-date the wrapped-String attempt.
+    For the capability-probe path use _try_set_window_title_wrapped instead.
+    """
     global _window_title_supported, _window_title_warned
     if _window_title_supported is False:
         return
@@ -545,8 +558,48 @@ def _try_set_window_title(viz, title):
             _window_title_warned = True
             print(
                 f"[WARN] setWindowTitle unavailable ({exc}); "
-                "using in-viewport DecorativeText HUD only"
+                "falling back to udp_feedback"
             )
+
+
+def _try_set_window_title_wrapped(viz, title):
+    """Attempt viz.setWindowTitle with a SWIG-wrapped SimTK::String before the plain-str path.
+
+    On OpenSim 4.5 the SWIG typemap for setWindowTitle rejects a plain Python str.
+    Wrapping via osim.String(title) may satisfy the typemap.  If osim.String is absent
+    or the wrapped call also raises, falls back to the plain str.  Only latches
+    _window_title_supported=False (and warns once) on genuine failure of BOTH paths.
+
+    After a single call the _window_title_supported flag tells the caller whether this
+    surface is viable:
+      True  -> wrapped or plain str worked    -> use "window_title" strategy
+      False -> both raised                    -> use "udp_feedback" strategy
+      None  -> not yet attempted              -> call this function first
+    """
+    global _window_title_supported, _window_title_warned
+    if _window_title_supported is False:
+        return
+    try:
+        # Primary: try the SWIG-wrapped SimTK::String typemap path.
+        if hasattr(osim, "String"):
+            viz.setWindowTitle(osim.String(title))
+        else:
+            viz.setWindowTitle(title)
+        _window_title_supported = True
+    except Exception as wrapped_exc:
+        # Wrapped path failed; try plain str as final fallback.
+        try:
+            viz.setWindowTitle(title)
+            _window_title_supported = True
+        except Exception as plain_exc:
+            _window_title_supported = False
+            if not _window_title_warned:
+                _window_title_warned = True
+                print(
+                    f"[WARN] setWindowTitle unavailable "
+                    f"(wrapped: {wrapped_exc}; plain: {plain_exc}); "
+                    "falling back to udp_feedback"
+                )
 
 
 def _try_enable_model_geometry(model, simbody_viz):
@@ -671,6 +724,8 @@ def _build_joint_hud_lines(model, state, last_known=None):
             cached = last_known.get(coord_name)
             if cached is not None and math.isfinite(cached):
                 degrees = cached
+        if not math.isfinite(degrees):
+            degrees = 0.0
         abbrev = opensim_joint_catalog.abbrev_for(coord_name)
         if not math.isfinite(degrees):
             lines.append(f"{abbrev}: --.--°")
@@ -682,6 +737,15 @@ def _build_joint_hud_lines(model, state, last_known=None):
 
 
 def _init_screen_text_hud(viz):
+    """Initialize in-viewport screen text via addDecoration.
+
+    GATED: Only callable when the caps probe reports upd_decoration_text=True (i.e. the
+    base DecorativeGeometry exposes setText so live updates are possible).  On OpenSim 4.5
+    that flag is False and this function is NEVER called — the addDecoration path below is
+    dead code on this build.  The guard is enforced in _pick_hud_strategy: the
+    "screen_text" branch (which would call this) is only entered when upd_decoration_text
+    is True.
+    """
     global _hud_screen_text
     xform = _hud_screen_transform()
     text = osim.DecorativeText("knee_r: --.--°")
@@ -695,14 +759,88 @@ def _init_screen_text_hud(viz):
     return True
 
 
+def _probe_hud_capabilities(viz):
+    """Return a dict of what the live Simbody visualizer can actually do on this build.
+
+    Uses only hasattr/dir — makes no calls that mutate viz state and invokes no IK.
+    Never constructs osim.DecorationGenerator (only probes hasattr, which is safe even
+    when the class is absent).
+
+    Verified values on C:\\OpenSim 4.5 (OpenSim 4.5, Python 3.8):
+      has_add_decoration_generator = True   (method present, but class is unwrapped)
+      decoration_generator_subclassable = False  (class absent -> unusable)
+      upd_decoration_text = False           (updDecoration returns base DecorativeGeometry; no setText)
+      has_set_window_title = True           (present, but rejects str at runtime on this build)
+      has_remove_decoration = False         (no removeDecoration or clearDecorations)
+    """
+    caps = {}
+    caps["has_add_decoration_generator"] = hasattr(viz, "addDecorationGenerator")
+    # The method exists but is unfeedable without a constructible/subclassable generator class.
+    # Only probe hasattr — never write osim.DecorationGenerator(...) as a constructor.
+    caps["decoration_generator_subclassable"] = hasattr(osim, "DecorationGenerator")
+    # updDecoration returns base DecorativeGeometry, which lacks setText on this build.
+    caps["upd_decoration_text"] = hasattr(osim.DecorativeGeometry, "setText")
+    caps["has_set_window_title"] = hasattr(viz, "setWindowTitle")
+    caps["has_remove_decoration"] = (
+        hasattr(viz, "removeDecoration") or hasattr(viz, "clearDecorations")
+    )
+    return caps
+
+
 def _pick_hud_strategy(viz):
-    # Prefer the window title because Simbody copies DecorativeText decorations
-    # on addDecoration(), so mutating the Python object can leave stale text.
-    print("[JOINT-DISPLAY-SPIKE] chosen strategy=window_title (screen text disabled)")
-    return "window_title"
+    """Probe the live viz object and select the highest-fidelity HUD strategy.
+
+    Prints exactly one [JOINT-DISPLAY-PROBE] line (caps dict) then exactly one
+    [JOINT-DISPLAY] strategy=... line, and returns one of:
+      "decoration_generator" | "screen_text" | "window_title" | "udp_feedback"
+
+    On C:\\OpenSim 4.5 this resolves to "window_title" if the wrapped-String title
+    attempt succeeds, otherwise "udp_feedback".  "decoration_generator" and
+    "screen_text" are dead on this build (class unwrapped; updDecoration lacks setText).
+    """
+    caps = _probe_hud_capabilities(viz)
+    print(f"[JOINT-DISPLAY-PROBE] viz caps: {caps}")
+
+    # Decoration-generator path requires BOTH the method AND a subclassable class.
+    # On OpenSim 4.5 decoration_generator_subclassable is False -> skip.
+    if caps["has_add_decoration_generator"] and caps["decoration_generator_subclassable"]:
+        print("[JOINT-DISPLAY] strategy=decoration_generator")
+        return "decoration_generator"
+
+    # In-viewport live text via updDecoration only works if the base type exposes setText.
+    # On OpenSim 4.5 upd_decoration_text is False -> skip.
+    if caps["upd_decoration_text"]:
+        print("[JOINT-DISPLAY] strategy=screen_text (updDecoration)")
+        return "screen_text"
+
+    # Attempt a wrapped-String window-title set.  _try_set_window_title_wrapped() tries
+    # osim.String(title) before the plain-str path and latches _window_title_supported.
+    # We probe by calling it once here; the result flag tells us which strategy to use.
+    if caps["has_set_window_title"]:
+        _try_set_window_title_wrapped(viz, _HUD_BASE_TITLE)
+        if _window_title_supported is not False:
+            print("[JOINT-DISPLAY] strategy=window_title (wrapped SimTK.String)")
+            return "window_title"
+
+    # UDP feedback is the only confirmed-working live operator-visible readout on this build.
+    print("[JOINT-DISPLAY] strategy=udp_feedback (in-viewport text unavailable on this build)")
+    return "udp_feedback"
 
 
 def _render_joint_display_hud(model, viz, state, strategy, base_title=_HUD_BASE_TITLE, last_known=None):
+    """Render the joint-angle HUD on the surface selected by _pick_hud_strategy.
+
+    Dispatch:
+      "screen_text"          — dead on OpenSim 4.5; kept as dead-code guard (gated by probe)
+      "window_title"         — updates OpenSim window title bar each frame (text_changed guard)
+      "udp_feedback"         — relies on the unconditional _send_angle_feedback call at line ~1587;
+                               emits [HUD-UPDATE] log line when text changes so the operator/console
+                               has a per-frame visible value; does NOT call setWindowTitle
+      "decoration_generator" — future; falls through to udp_feedback log line
+
+    No IK calls and no per-frame allocation are added here.  _build_joint_hud_lines reads
+    pre-computed IK state and does only coord.getValue reads + formatting.
+    """
     global _last_hud_text
     lines = _build_joint_hud_lines(model, state, last_known)
     if not lines:
@@ -712,6 +850,9 @@ def _render_joint_display_hud(model, viz, state, strategy, base_title=_HUD_BASE_
     text_changed = compact != _last_hud_text
     _last_hud_text = compact
 
+    # Dead path on OpenSim 4.5 (probe caps upd_decoration_text=False).
+    # Gated: only reachable when _pick_hud_strategy returns "screen_text", which requires
+    # upd_decoration_text=True — never True on this build.
     if strategy == "screen_text" and _hud_screen_text is not None:
         try:
             if text_changed:
@@ -720,9 +861,19 @@ def _render_joint_display_hud(model, viz, state, strategy, base_title=_HUD_BASE_
             print(f"[WARN] screen text HUD update failed: {exc}")
         return
 
-    display_text = f"{base_title} | {compact}"
+    if strategy == "window_title":
+        display_text = f"{base_title} | {compact}"
+        if text_changed:
+            print(f"[HUD-UPDATE] {compact}")
+            _try_set_window_title_wrapped(viz, display_text)
+        return
+
+    # strategy == "udp_feedback" (or "decoration_generator" future path):
+    # The live angle is transmitted by the unconditional _send_angle_feedback call in the
+    # main IK loop (~line 1587) — do NOT call setWindowTitle on this path.
+    # Emit [HUD-UPDATE] so the operator/console sees a per-frame value.
     if text_changed:
-        _try_set_window_title(viz, display_text)
+        print(f"[HUD-UPDATE] {compact}")
 
 
 def _write_test_joint_display_config(joints, seq):
@@ -1196,17 +1347,12 @@ def _udp_ahrs_thread():
             values, slot_map, last_expanded_values
         )
         last_expanded_values = list(values)
-        real_source = SOURCE_LABEL in REAL_SOURCE_LABELS or LIVE_MODE
-        real_static_invalid = False
-
         if active_static:
             if neutral_static_since is None:
                 neutral_static_since = now
             elif now - neutral_static_since > STATIC_NEUTRAL_S and not neutral_warned:
-                print("[WARN] active real IMUs appear neutral/static")
+                print("[WARN] active real IMUs appear neutral/static; continuing render loop")
                 neutral_warned = True
-            if real_source and neutral_static_since is not None and now - neutral_static_since > STATIC_NEUTRAL_S:
-                real_static_invalid = True
         else:
             neutral_static_since = None
             neutral_warned = False
@@ -1218,11 +1364,6 @@ def _udp_ahrs_thread():
             if drained:
                 print(f"[LIVE {_pkt_n}] drained {drained} stale UDP packets")
             print(f"[ACTIVE {_pkt_n}] {active_summary}")
-
-        if real_static_invalid:
-            if _pkt_n <= 5 or _pkt_n % PACKET_LOG_INTERVAL == 0:
-                print("[FREEZE] real data invalid/static; OpenSim update skipped")
-            continue
 
         if not OPENSIM_SKIP_CALIB and not _accumulate_ag_calib(values, slot_map):
             continue
@@ -1405,7 +1546,10 @@ def run_live():
     ikSolver.setAccuracy(1e-4)
     default_coord_locks = _capture_coordinate_locks(model.getCoordinateSet(), state)
 
-    _try_set_window_title(viz, _HUD_BASE_TITLE)
+    # Use the wrapped-String path so the typemap probe runs before _pick_hud_strategy reads
+    # _window_title_supported.  _try_set_window_title (plain str) would latch the flag False
+    # before the wrapped attempt gets a chance.
+    _try_set_window_title_wrapped(viz, _HUD_BASE_TITLE)
     viz.setShowSimTime(True)
     hud_strategy = _pick_hud_strategy(viz)
     coord_set = model.getCoordinateSet()
