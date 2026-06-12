@@ -15,7 +15,7 @@
 | 3 | Trigger Wiring | Trigger + Apply Display → config | TRIG-01–03, OPS-01 | Complete 2026-06-10 |
 | 4 | Filtered Display | HUD polish beside sim clock | DISP-01,02,05 | Complete 2026-06-10 |
 | 5 | Integration Verify | Docs + E2E checklist | DISP-04, OPS-02 | Complete 2026-06-10 |
-| 6 | HUD Live-Update Fix | Make on-screen angle text actually update each frame | DISP-02 | Pending |
+| 6 | HUD Live-Update Fix | Make on-screen angle text actually update each frame | DISP-02 | Planned (1 plan) |
 
 ---
 
@@ -107,6 +107,9 @@
 
 **Requirements:** DISP-02 (reopened — deferred verification failed in hardware UAT)
 
+**Plans:** 1 plan
+- [ ] 06-01-PLAN.md — Runtime HUD capability probe + layered window_title/udp_feedback render fix; gate dead screen_text path; reconcile both file copies byte-identical
+
 **Defect:** Phase 4 added the HUD via `viz.addDecoration(0, xform, DecorativeText("knee_r: --.--°"))` once at init, then mutates the retained Python handle with `_hud_screen_text.setText(...)` each frame. Simbody's `addDecoration` stores a **copy** by value, so `setText()` on the original handle never reaches the rendered geometry — the readout is frozen at the constructor string. IK and `_read_coord_value()` work correctly; only the render path is dead. DISP-02 verification was `human_needed` (code-inspection PASS) and the live UAT exposed the freeze.
 
 **Chosen approach (LAYERED — option 1 proven unbuildable by Phase 6 research):** In-viewport text is impossible on the installed OpenSim 4.5 bindings (`DecorationGenerator` unwrapped; no decoration text-mutation path). A runtime capability probe selects a strategy: **(1) `window_title`** — revive `setWindowTitle` with a SWIG-wrapped `SimTK.String` and write the live HUD string to the OpenSim window title bar each frame; **(2) `udp_feedback`** — fall through to the already-wired port-5001 `_send_angle_feedback` packet, with the angle read in the Open Ephys plugin UI. Python-only; no C++ plugin rebuild this phase.
@@ -147,3 +150,4 @@ Prior roadmap phases for camera/view presets (Simbody camera API, `opensim_view_
 ---
 *Roadmap created: 2026-06-10*  
 *Revised: 2026-06-10 — joint angle display control*
+*Revised: 2026-06-12 — Phase 6 planned (1 plan)*
