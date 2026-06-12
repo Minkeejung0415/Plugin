@@ -29,19 +29,39 @@
 #include "Headstage.h"
 #include "ImpedanceMeter.h"
 
-/** Instructions for settings digital output */
+/*
+    A simple container holding one digital-output request.
+    Think of it like a sticky note: "please turn TTL line #N on" or "please turn it off."
+    These get queued up and processed by the run() thread so the UI doesn't have to wait.
+*/
 struct DigitalOutputCommand
 {
-    int ttlLine;
-    bool state;
+    int ttlLine;  // which TTL output line (0-7) to change
+    bool state;   // true = turn ON (rising edge), false = turn OFF (falling edge)
 };
 
-/**
-    Abstract interface for any type of Open Ephys Acquisition Board
+/*
+    ============================================================
+    AcquisitionBoard — the universal "job description" for all boards
+    ============================================================
 
-    https://open-ephys.org/acq-board
+    This is a blueprint / contract that ALL boards must follow.
+    Think of it like a job posting: it says WHAT any acquisition board
+    must be able to do, but says nothing about HOW. Each concrete board
+    type (OpalKelly, ONI, RedPitaya, Simulated) fills in the HOW by
+    inheriting from this class and implementing every pure-virtual (= 0)
+    method.
 
-    @see DataThread, SourceNode
+    Why bother? Because the rest of Open Ephys (DeviceThread, DeviceEditor,
+    etc.) can talk to *any* board through this single interface without
+    knowing the hardware details. Swap the board → only the subclass changes.
+
+    The "= 0" after a method means: "I don't know how to do this — my
+    subclass MUST provide an implementation or it won't compile."
+
+    AcquisitionBoard also inherits from JUCE's Thread so it can run its
+    data-collection loop (run()) on a background thread without blocking
+    the UI.
 */
 
 class AcquisitionBoard : public Thread
@@ -191,7 +211,14 @@ public:
     /** Sets the analog output voltage */
     virtual void setAnalogOutVoltage (float voltage) {}
 
-    /** Returns total number of continuous channels */
+    /*
+        Returns the total number of continuous channels the board produces.
+        This adds up three channel types:
+          - ELECTRODE: the neural recording channels (from headstages)
+          - AUX:       auxiliary accelerometer channels (3 per headstage)
+          - ADC:       external analog-to-digital converter channels
+        The result tells Open Ephys how big to make the data buffer.
+    */
     int getNumChannels()
     {
         return getNumDataOutputs (ContinuousChannel::ELECTRODE)
@@ -199,16 +226,28 @@ public:
                + getNumDataOutputs (ContinuousChannel::ADC);
     }
 
-    /** Trigger a digital output event */
+    /*
+        triggerDigitalOutput — fires a TTL pulse for a set duration.
+
+        Two-step flow:
+          Step 1 — RIGHT NOW: push a turn-ON command into the queue so the
+                   run() thread sends the rising edge on the next iteration.
+          Step 2 — LATER: create a DigitalOutputTimer that will fire after
+                   eventDurationMs milliseconds and push a turn-OFF command,
+                   creating the falling edge automatically.
+
+        The timer is owned by digitalOutputTimers (an OwnedArray) which will
+        delete it once it has fired. This avoids us having to track it manually.
+    */
     void triggerDigitalOutput (int ttlLine, int eventDurationMs)
     {
         DigitalOutputCommand command;
         command.ttlLine = ttlLine;
         command.state = true;
 
-        digitalOutputCommands.push (command);
+        digitalOutputCommands.push (command); // Step 1: queue the ON edge now
 
-        DigitalOutputTimer* timer = new DigitalOutputTimer (this, ttlLine, eventDurationMs);
+        DigitalOutputTimer* timer = new DigitalOutputTimer (this, ttlLine, eventDurationMs); // Step 2: schedule OFF edge
 
         digitalOutputTimers.add (timer);
     }
@@ -227,27 +266,47 @@ public:
         return buffer;
     }
 
+    /*
+        BoardType — an enum that names each supported hardware variant.
+        DeviceThread uses this to decide which concrete class to create
+        and which UI columns to show in the DeviceEditor.
+
+        None      = no board detected yet (default at startup)
+        Simulated = fake board used for testing without real hardware
+        OpalKelly = classic USB FPGA board (Intan RHD2000 era)
+        ONI       = Open Neuro Interface — newer USB3 platform
+        RedPitaya = our custom Red Pitaya / ESP32-S3 wireless IMU board
+    */
     enum class BoardType
     {
         None = 0,
-        Simulated = 1,
-        OpalKelly = 2,
-        ONI = 3,
-        RedPitaya = 4
+        Simulated = 1,   // software-only fake board for testing
+        OpalKelly = 2,   // USB FPGA (legacy Intan boards)
+        ONI = 3,         // Open Neuro Interface USB3 platform
+        RedPitaya = 4    // Red Pitaya or ESP32-S3 STEP node (our wireless IMU board)
     };
 
     BoardType getBoardType() const { return boardType; }
 
 protected:
-    /** Timer for triggering digital outputs */
+    /*
+        DigitalOutputTimer — a one-shot JUCE Timer that pushes the turn-OFF
+        command after the caller-specified delay.
+
+        Why use a timer instead of sleeping? Because sleeping the run() thread
+        would freeze the data stream for eventDurationMs. Instead we let the
+        JUCE message thread fire the callback asynchronously while run() keeps
+        going. When the timer fires, it calls addDigitalOutputCommand() to
+        queue the falling edge and then removes itself from digitalOutputTimers.
+    */
     class DigitalOutputTimer : public Timer
     {
     public:
-        /** Constructor */
+        /** Constructor — starts the one-shot countdown immediately */
         DigitalOutputTimer (AcquisitionBoard* board_, int tllLine, int eventDurationMs) : board (board_),
                                                                                           tllOutputLine (tllLine)
         {
-            startTimer (eventDurationMs);
+            startTimer (eventDurationMs); // fires once after eventDurationMs ms
         }
 
         /** Destructor*/
@@ -256,9 +315,9 @@ protected:
         /** Sends signal to turn off event channel*/
         void timerCallback()
         {
-            stopTimer();
+            stopTimer(); // prevent re-firing
 
-            board->addDigitalOutputCommand (this, tllOutputLine, false);
+            board->addDigitalOutputCommand (this, tllOutputLine, false); // queue the OFF edge
         }
 
     private:
@@ -275,13 +334,22 @@ protected:
 
         digitalOutputCommands.push (command);
 
-        digitalOutputTimers.removeObject (timerToDelete);
+        digitalOutputTimers.removeObject (timerToDelete); // this deletes the timer object
     }
 
-    /** Sample buffer to fill */
+    /*
+        buffer — the shared memory ring buffer between the run() thread and Open Ephys.
+        The run() thread continuously writes new samples into this buffer.
+        Open Ephys reads from it on its own schedule to send data downstream.
+        Sized at 60000 samples deep so a brief processing hiccup doesn't cause data loss.
+    */
     DataBuffer* buffer;
 
-    /** Optimum delay settings */
+    /*
+        OptimumDelay — stores the automatically measured cable-delay calibration
+        for each of the 8 headstage ports. Units are in 1/2-sample increments.
+        Default -1 means "not yet measured."
+    */
     struct OptimumDelay
     {
         float portA = -1;
@@ -294,7 +362,12 @@ protected:
         float portH = -1;
     };
 
-    /** Cable length settings */
+    /*
+        CableLength — the physical cable length (in metres) for each port.
+        This feeds into the Intan chip's delay calculation so signals are
+        sampled at exactly the right phase despite cable propagation delay.
+        Default 0.914 m (about 3 feet) matches the standard Open Ephys cable.
+    */
     struct CableLength
     {
         float portA = 0.914f;
@@ -307,21 +380,48 @@ protected:
         float portH = 0.914f;
     };
 
-    /** Dsp settings*/
+    /*
+        Dsp — on-chip digital high-pass filter (offset removal).
+        enabled=true removes slow DC drift from electrodes.
+        cutoffFreq is in Hz; 0.5 Hz is a common choice for LFP recording.
+    */
     struct Dsp
     {
         bool enabled = true;
         double cutoffFreq = 0.5;
     };
 
-    /** Analog filter settings */
+    /*
+        AnalogFilter — the RHD chip's on-chip analog bandpass filter.
+        upperBandwidth: low-pass cutoff in Hz (default 7500 Hz, limits high-freq noise)
+        lowerBandwidth: high-pass cutoff in Hz (default 1 Hz, blocks slow drift)
+        Together they define the "recording bandwidth" of each electrode channel.
+    */
     struct AnalogFilter
     {
         double upperBandwidth = 7500.0f;
         double lowerBandwidth = 1.0f;
     };
 
-    /** struct containing board settings*/
+    /*
+        Settings — a single struct that bundles all board-wide configuration.
+        Subclasses read from and write to `settings` to persist UI choices.
+
+        Key fields:
+          acquireAux / acquireAdc  — enable/disable AUX (accel) and ADC channel groups
+          fastSettleEnabled        — rapidly bleed electrode charge after a large TTL pulse;
+                                     prevents amplifier saturation artifacts
+          fastTTLSettleEnabled     — same settle logic but triggered by a specific TTL input
+          ttlOutputMode            — when true, DAC channels output TTL pulses (not audio)
+          dsp                      — on-chip DSP high-pass filter settings (see Dsp above)
+          analogFilter             — on-chip analog bandpass settings (see AnalogFilter above)
+          boardSampleRate          — current sample rate in Hz (e.g. 30000.0 for 30 kHz)
+          cableLength              — physical cable lengths per port (affects timing calibration)
+          optimumDelay             — auto-calibrated port delays
+          audioOutputL/R           — headstage channel index routed to left/right audio monitor
+          ledsEnabled              — whether the board's indicator LEDs are on
+          clockDivideFactor        — divide ratio for the clock output BNC connector
+    */
     struct Settings
     {
         bool acquireAux = false;

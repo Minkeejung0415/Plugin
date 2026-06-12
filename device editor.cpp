@@ -43,10 +43,29 @@ inline double round (double x)
 #endif
 #endif
 
+/*
+    DeviceEditor constructor — builds the control panel UI.
+
+    Layout overview:
+      - Non-Red-Pitaya boards (OpalKelly, ONI, Simulated): panel is 340 px wide,
+        showing standard headstage/bandwidth/DSP controls.
+      - Red Pitaya / ESP32-S3: panel is 800 px wide with 6 columns of controls.
+        The extra width comes from isRedPitaya ? 800 : 340 in the initialiser.
+
+    Column x-positions (from left edge):
+      col1 = 6    (sample rate + record + OpenSim Live)
+      col2 = 135  (filter toggle + analog in/out)
+      col3 = 275  (accel range + gyro range + sensor Hz)
+      col4 = 420  (sensor select + body segment + Gen Motion)
+      col5 = 555  (joint HUD toggles — 7 joints in 2-column grid)
+      col6 = 690  (Node IP label + Display Joint dropdown)
+*/
 DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
                             AcquisitionBoard* board_)
     : VisualizerEditor (parentNode,
                         "Acq Board",
+                        // Red Pitaya needs the full 800-pixel width for its 6 columns;
+                        // all other boards fit in the standard 340-pixel panel.
                         (board_ != nullptr && board_->getBoardType() == AcquisitionBoard::BoardType::RedPitaya) ? 800 : 340),
       board (board_),
       activeAudioChannel (LEFT)
@@ -89,12 +108,13 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
     }
 
     const bool isRedPitaya = (board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya);
-    const int col1 = xOffset + 6;
-    const int col2 = xOffset + 135;
-    const int col3 = xOffset + 275;
-    const int col4 = xOffset + 420;
-    const int col5 = xOffset + 555;
-    const int col6 = xOffset + 690;
+    // x-positions where each column starts (pixels from the left edge of the editor panel)
+    const int col1 = xOffset + 6;    // Col 1: sample rate, record, OpenSim Live
+    const int col2 = xOffset + 135;  // Col 2: filter, analog in/out
+    const int col3 = xOffset + 275;  // Col 3: accel/gyro/sensor-Hz config (Red Pitaya only)
+    const int col4 = xOffset + 420;  // Col 4: sensor select, body segment, Gen Motion
+    const int col5 = xOffset + 555;  // Col 5: joint HUD checkboxes
+    const int col6 = xOffset + 690;  // Col 6: node IP, display joint
     const int midCol = isRedPitaya ? col3 : (xOffset + 155);
 
     // add headstage-specific controls (currently just a toggle button)
@@ -217,11 +237,17 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         sensorCfgRateTitle->setBounds (col3, 106, 100, 12);
         addAndMakeVisible (sensorCfgRateTitle.get());
 
+        // sensorCfgRateCombo — per-sensor effective sample rate.
+        // Items are built dynamically by repopulateSensorRateComboForHwHz() whenever
+        // the hardware Hz label changes. Options: Same as HW / HW/2 / HW/5 / HW/10 / 1 Hz / 10 Hz / 25 Hz.
+        // Selecting an option sends "CFG <si> SRATE <hz>" to the firmware.
         sensorCfgRateCombo = std::make_unique<ComboBox> ("sensorCfgRate");
         sensorCfgRateCombo->setBounds (col3, 120, comboW, 20);
         sensorCfgRateCombo->addListener (this);
         addAndMakeVisible (sensorCfgRateCombo.get());
 
+        // sensorSelectCombo — which sensor is being configured.
+        // Populated after acquisition starts and the firmware sends back the SENSORS: line.
         sensorSelectTitle = std::make_unique<Label> ("sensorSelectTitle", "Sensor");
         sensorSelectTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
         sensorSelectTitle->setBounds (col4, 28, 110, 12);
@@ -239,6 +265,9 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         sensorBodySegmentTitle->setBounds (col4, 62, 110, 12);
         addAndMakeVisible (sensorBodySegmentTitle.get());
 
+        // sensorBodySegmentCombo — maps the selected sensor to an OpenSim body segment.
+        // The mapping is written to opensim_sensor_map.json before the Python bridge launches,
+        // telling OpenSim which bone each IMU is physically attached to.
         sensorBodySegmentCombo = std::make_unique<ComboBox> ("sensorBodySegment");
         sensorBodySegmentCombo->setBounds (col4, 74, comboW, 20);
         sensorBodySegmentCombo->addListener (this);
@@ -275,6 +304,12 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         const int toggleCols = 2;
         const int toggleRow1Y = 42;
 
+        // Build 7 joint-toggle checkboxes in a 2-column grid (Col 5).
+        // Each checkbox corresponds to one entry in kOpenSimJointCatalog:
+        //   pelvis_tilt, hip_flexion_r, hip_flexion_l,
+        //   knee_angle_r, knee_angle_l, ankle_angle_r, ankle_angle_l.
+        // The operator checks whichever joints they want on the OpenSim HUD.
+        // When clicked, buttonClicked() updates the board and writes the JSON config.
         for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
         {
             const int col = i % toggleCols;
@@ -283,7 +318,7 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
             const int ty = toggleRow1Y + row * (toggleH + 3);
 
             jointDisplayToggles[(size_t) i] = std::make_unique<ToggleButton> (kOpenSimJointCatalog[i].abbrev);
-            jointDisplayToggles[(size_t) i]->setComponentID (String (i));
+            jointDisplayToggles[(size_t) i]->setComponentID (String (i)); // used in buttonClicked() to identify which toggle fired
             jointDisplayToggles[(size_t) i]->setBounds (tx, ty, toggleW, toggleH);
             jointDisplayToggles[(size_t) i]->setTooltip (kOpenSimJointCatalog[i].coordinate);
             jointDisplayToggles[(size_t) i]->addListener (this);
@@ -295,6 +330,10 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         nodeHostTitle->setBounds (col6, 28, 110, 12);
         addAndMakeVisible (nodeHostTitle.get());
 
+        // nodeHostLabel — user types an IP address or hostname here to connect to an
+        // ESP32-S3 STEP node. When the label changes (labelTextChanged), we call
+        // retryDetection() which opens a new TCP socket and repeats the handshake.
+        // Red Pitaya uses mDNS (rp-*.local) so this field is usually blank for it.
         nodeHostLabel = std::make_unique<Label> ("nodeHostLabel", "");
         nodeHostLabel->setEditable (true);
         nodeHostLabel->setColour (Label::backgroundColourId, Colours::black);
@@ -577,6 +616,16 @@ int DeviceEditor::getSelectedStreamSensorIndex() const
     return jmax (0, id - 1);
 }
 
+/*
+    syncRecordButtonForBoardType() — updates the RECORD button tooltip based on
+    which device is connected.
+
+    ESP32-S3 STEP node: stores recordings as CSV files on the host PC
+    (in the user's Documents folder). The tooltip explains the CSV column layout.
+
+    Red Pitaya: sends RECORD ON/OFF to the firmware which writes to the
+    board's local SD card as .bin + .csv pair in /root/Measurements/.
+*/
 void DeviceEditor::syncRecordButtonForBoardType()
 {
     if (recordButton == nullptr
@@ -629,6 +678,21 @@ void DeviceEditor::syncRedPitayaBoardSampleRateFromLabel()
     board->setSampleRate (hz);
 }
 
+/*
+    repopulateSensorRateComboForHwHz() — fills the Sensor Hz dropdown with 7 choices
+    relative to the current hardware tick rate (hwHz).
+
+    The firmware supports decimation: it reads at the hardware rate but only runs VQF
+    and reports a sample every N ticks. The choices below let the operator pick how
+    much to decimate per sensor:
+      "Same as HW" = no decimation (sensor updates every tick)
+      "HW / 2"     = update every other tick
+      "HW / 5"     = update every 5th tick
+      "HW / 10"    = update every 10th tick
+      "1 Hz"       = one update per second (very slow, good for debugging)
+      "10 Hz"      = useful for slow joints like pelvis tilt
+      "25 Hz"      = common choice for motion capture (25 fps = standard video rate)
+*/
 void DeviceEditor::repopulateSensorRateComboForHwHz (int hwHz)
 {
     if (sensorCfgRateCombo == nullptr)
@@ -740,6 +804,18 @@ void DeviceEditor::refreshJointDisplayHighlights()
     }
 }
 
+/*
+    comboBoxChanged() — dispatches combo box events to the correct handler.
+
+    There are three categories:
+      1. Body segment and display joint: can be set at any time (before or during
+         acquisition) because they only write JSON files, not the TCP socket.
+      2. Sensor CFG combos (accel, gyro, rate): only work during acquisition because
+         they send "CFG ..." commands over the live TCP connection to the firmware.
+         Sending before the stream starts would fail (socket not open yet).
+      3. Sensor select: refreshes the dependent combos to show the stored settings
+         for whichever sensor was just chosen.
+*/
 void DeviceEditor::comboBoxChanged (ComboBox* comboBox)
 {
     // Body segment mapping can be set at any time — not gated by acquisitionIsActive
@@ -910,6 +986,21 @@ int DeviceEditor::getChannelCount()
     return board->getNumChannels();
 }
 
+/*
+    buttonClicked() — handles all button press events in the editor.
+
+    Button actions:
+      RECORD button    — sends "RECORD ON" / "RECORD OFF" to the board over TCP;
+                         reports the saved file path in the status bar.
+      FILTER button    — sends "FILTER ON" / "FILTER OFF" to toggle VQF fusion on firmware.
+      Gen Motion       — syncs the display joint to the board, then calls launchOpenSimMotion()
+                         which runs the offline IK batch job and opens OpenSim 4.5 GUI.
+      OpenSim Live     — syncs the display joint, then calls launchOpenSimLive() which starts
+                         opensim_live_realtime.py for the real-time 3D skeleton.
+      Joint toggles    — updates jointDisplaySelected[] on the board object, enforces the
+                         6-joint maximum, then calls writeJointDisplayConfig() to flush the
+                         JSON file that Python polls every 50 ms.
+*/
 void DeviceEditor::buttonClicked (Button* button)
 {
     /*
@@ -1083,6 +1174,7 @@ void DeviceEditor::startAcquisition()
     if (filterButton != nullptr)
         filterButton->setEnabledState (true);
 
+
     if (analogInLabel != nullptr)
         analogInLabel->setEnabled (true);
 
@@ -1097,6 +1189,11 @@ void DeviceEditor::startAcquisition()
     if (canvas != nullptr)
     {
         canvas->beginAnimation();
+        // The ChannelCanvas widget covers the full editor area when it appears.
+        // All our interactive controls (labels, combos, buttons) sit behind it in
+        // z-order and become unclickable. Calling toFront() on each one brings it
+        // above the canvas so the user can still interact with all controls while
+        // data is streaming.
         // Right-column controls sit under the canvas z-order; bring strip to front for hit-testing.
         if (sampleRateTitle != nullptr)
             sampleRateTitle->toFront (false);
@@ -1217,7 +1314,19 @@ void DeviceEditor::syncOpenSimDisplayJointToBoard()
         rp->setDisplayJointIndex (displayJointCombo->getSelectedId() - 1);
 }
 
-// --- ADD THIS METHOD TO HANDLE YOUR NEW TEXT BOX ---
+/*
+    labelTextChanged() — called when the user finishes editing any editable Label.
+
+    Four editable labels are handled:
+      sampleRateLabel  — user changes the hardware Hz; we clamp it, call setSampleRate(),
+                         then send "FREQ:<hz>" to the firmware via updateSampleFrequency().
+                         We do NOT call updateSignalChain() during active acquisition because
+                         that would free and reallocate the DataBuffer while run() is writing to it.
+      analogInLabel    — changes the ADC input gain (0.1–100.0); sends "AIN_GAIN:<g>" to firmware.
+      analogOutLabel   — changes the DAC output voltage (0–1.8 V); sends "AOUT:<v>" to firmware.
+      nodeHostLabel    — user typed a new IP / hostname; we call retryDetection() to re-probe
+                         the board. If successful, we re-sync sample rate and button state.
+*/
 void DeviceEditor::labelTextChanged (Label* labelThatHasChanged)
 {
     if (labelThatHasChanged == sampleRateLabel.get())
