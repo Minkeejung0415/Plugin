@@ -43,8 +43,8 @@ ESP32_HINTS = (
 
 HEADER_FMT = "<iiHiii"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
-PAYLOAD_SIZE = 11 * 2  # NUM_CHANNELS * int16
-FRAME_SIZE = HEADER_SIZE + PAYLOAD_SIZE
+DEFAULT_PAYLOAD_SIZE = 11 * 2  # NUM_CHANNELS * int16
+DEFAULT_FRAME_SIZE = HEADER_SIZE + DEFAULT_PAYLOAD_SIZE
 
 CSV_LINE = re.compile(r"^\s*(\d+)\s*,")
 
@@ -222,15 +222,12 @@ def wait_for_text(ser: serial.Serial, timeout: float) -> str:
     return buf.decode("utf-8", errors="replace")
 
 
-STATUS_RE = re.compile(r"^(?:SD_STATUS|STATUS)\s+(.*)$")
+STATUS_RE = re.compile(r"(?:SD_STATUS|STATUS)\s+([^\r\n]*)")
 
 
 def parse_key_values(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    for line in text.splitlines():
-        m = STATUS_RE.search(line.strip())
-        if not m:
-            continue
+    for m in STATUS_RE.finditer(text):
         for part in m.group(1).split():
             if "=" not in part:
                 continue
@@ -299,24 +296,39 @@ def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) ->
         else:
             time.sleep(0.001)
 
-        while len(pending) >= FRAME_SIZE:
-            if pending[0:1] in (b"#", b"S", b"F", b"C") or pending[0:1].isalpha():
+        while len(pending) >= HEADER_SIZE:
+            frame_start = None
+            header = None
+            for i in range(0, len(pending) - HEADER_SIZE + 1):
                 try:
-                    nl = pending.index(0x0A)
-                except ValueError:
+                    candidate = struct.unpack_from(HEADER_FMT, pending, i)
+                except struct.error:
                     break
-                del pending[: nl + 1]
-                continue
-            hdr = pending[:HEADER_SIZE]
-            try:
-                offset, num_bytes, *_rest = struct.unpack(HEADER_FMT, hdr)
-            except struct.error:
-                del pending[0:1]
-                continue
-            if num_bytes != PAYLOAD_SIZE:
-                del pending[0:1]
-                continue
-            del pending[:FRAME_SIZE]
+                _offset, num_bytes, bit_depth, element_size, num_channels, samples_per_channel = candidate
+                expected_bytes = num_channels * samples_per_channel * element_size
+                if (
+                    num_bytes == expected_bytes
+                    and 2 <= num_bytes <= 128
+                    and bit_depth in (3, 16)
+                    and element_size == 2
+                    and 1 <= num_channels <= 32
+                    and samples_per_channel == 1
+                ):
+                    frame_start = i
+                    header = candidate
+                    break
+            if frame_start is None or header is None:
+                del pending[: max(0, len(pending) - HEADER_SIZE + 1)]
+                break
+
+            if frame_start > 0:
+                del pending[:frame_start]
+
+            offset, num_bytes, *_rest = header
+            frame_size = HEADER_SIZE + num_bytes
+            if len(pending) < frame_size:
+                break
+            del pending[:frame_size]
             seq = len(rows)
             if offset != 0:
                 hw_us32 = offset & 0xFFFFFFFF
@@ -393,6 +405,7 @@ def test_one_rate(
     if sd_on:
         send_line(ser, "RECORD ON")
         time.sleep(0.25)
+        drain_serial(ser, 0.1)
 
     send_line(ser, "START")
     time.sleep(0.1)

@@ -85,7 +85,7 @@ extern "C" {
 #define ICM20948_ADDR 0x69
 
 #define NODE_IS_MASTER true
-#define ENABLE_SD false
+#define ENABLE_SD true
 
 // true = USB binary @100 Hz 8ch → serial_tcp_bridge.py [--plugin] → 127.0.0.1:5000 (no Wi-Fi for OE).
 // false = Wi-Fi TCP :5000 on board; Plugin uses Serial Monitor IP, not 127.0.0.1.
@@ -594,6 +594,7 @@ static bool sdEnsureReady() {
 static bool sdRecordStart(const char *path_or_null) {
 #if ENABLE_SD
   if (!sdEnsureReady()) {
+    g_sd_write_errors++;
     Serial.println("SD_STATUS enabled=1 ready=0 recording=0 error=begin_failed");
     return false;
   }
