@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: SD Card Reliability and Lossless Acquisition
 current_phase: 01
-status: milestone-started
-last_updated: "2026-06-12T21:20:00Z"
+status: executing
+last_updated: "2026-06-12T22:01:02.043Z"
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 0
+  total_plans: 1
   completed_plans: 0
   percent: 0
 ---
@@ -17,7 +17,7 @@ progress:
 
 **Project:** Open Ephys ESP32 Acquisition Reliability
 **Current phase:** 01
-**Status:** Milestone v1.1 started
+**Status:** Ready to execute
 
 ## Progress
 
