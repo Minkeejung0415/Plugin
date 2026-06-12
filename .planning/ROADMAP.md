@@ -2,9 +2,9 @@
 
 **Project:** Open Ephys Red Pitaya Plugin  
 **Created:** 2026-06-10  
-**Revised:** 2026-06-10 (scope correction)  
-**Phases:** 5  
-**Requirement coverage:** 14/14 v1 requirements mapped ✓
+**Revised:** 2026-06-12 (Phase 6 remediation added)  
+**Phases:** 6  
+**Requirement coverage:** 14/14 v1 requirements mapped ✓ (DISP-02 reopened in Phase 6)
 
 ## Overview
 
@@ -15,6 +15,7 @@
 | 3 | Trigger Wiring | Trigger + Apply Display → config | TRIG-01–03, OPS-01 | Complete 2026-06-10 |
 | 4 | Filtered Display | HUD polish beside sim clock | DISP-01,02,05 | Complete 2026-06-10 |
 | 5 | Integration Verify | Docs + E2E checklist | DISP-04, OPS-02 | Complete 2026-06-10 |
+| 6 | HUD Live-Update Fix | Make on-screen angle text actually update each frame | DISP-02 | Pending |
 
 ---
 
@@ -101,6 +102,27 @@
 
 ---
 
+### Phase 6: HUD Live-Update Fix (Remediation)
+**Goal:** Make the in-viewport joint-angle text actually update every frame instead of staying frozen on the `knee_r: --.--°` placeholder.
+
+**Requirements:** DISP-02 (reopened — deferred verification failed in hardware UAT)
+
+**Defect:** Phase 4 added the HUD via `viz.addDecoration(0, xform, DecorativeText("knee_r: --.--°"))` once at init, then mutates the retained Python handle with `_hud_screen_text.setText(...)` each frame. Simbody's `addDecoration` stores a **copy** by value, so `setText()` on the original handle never reaches the rendered geometry — the readout is frozen at the constructor string. IK and `_read_coord_value()` work correctly; only the render path is dead. DISP-02 verification was `human_needed` (code-inspection PASS) and the live UAT exposed the freeze.
+
+**Chosen approach (option 1):** Register a Simbody `DecorationGenerator` whose `generateDecorations()` emits a fresh `DecorativeText` with the current compact HUD string each frame, replacing the one-shot `addDecoration` + `setText` pattern.
+
+**Success Criteria:**
+1. On-screen readout reflects the live IK angle each frame (verifiably changes as the knee moves; console `[HUD-DIAG]`/`[COORD]` value and viewport text agree)
+2. Changing the selected joint (via display config) changes the on-screen label, not just the console
+3. If `DecorationGenerator` cannot be subclassed through the OpenSim 4.5 Python/SWIG bindings, a working fallback is implemented and documented (window-title augmentation if `setWindowTitle` is available, else the existing port-5001 angle-feedback path to the Open Ephys UI)
+4. No regression to the ~20 Hz visualizer loop or live IK stream
+
+**Key files:** `opensim_live_realtime.py` (both the `Documents\Plugin` source-of-truth copy and the executed `C:\Users\justi\Open-Sim--Bio-Mech` copy)
+
+**Research flags:** Verify availability of `Visualizer.addDecorationGenerator` and Python-subclassable `simbody.DecorationGenerator` on the installed OpenSim 4.5 build before committing to option 1; enumerate the fallback in plan-phase.
+
+---
+
 ## Phase Ordering Rationale
 
 1. **Spike first** — Simbody on-screen text beside sim time is the highest display risk  
@@ -112,8 +134,9 @@
 
 ```
 Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
-              │           │
-              └───────────┴── both depend on Phase 1 config contract
+              │           │                       │
+              └───────────┴── both depend on      └──► Phase 6 (remediates Phase 4 DISP-02)
+                              Phase 1 config contract
 ```
 
 ## Superseded Planning
