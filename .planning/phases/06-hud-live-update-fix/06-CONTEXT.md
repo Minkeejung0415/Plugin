@@ -39,29 +39,41 @@ Out of scope:
 - `_read_coord_value()` and the IK loop are correct — `[COORD]` / `[HUD-DIAG]`
   console lines show the real changing `knee_angle_r`. Only the render path is dead.
 
-### Chosen fix — Option 1: DecorationGenerator
-- Replace the one-shot `addDecoration` + `setText` pattern with a Simbody
-  `DecorationGenerator` subclass whose `generateDecorations(state, decorations)`
-  is invoked by the visualizer every `report()`/`show()` and appends a freshly
-  constructed `DecorativeText(compact)` carrying the current HUD string.
-- Register it via `viz.addDecorationGenerator(gen)` (exact method name to be
-  confirmed by research against the installed OpenSim 4.5 build).
-- The generator reads the current compact HUD string from shared state that the
-  IK loop updates each frame (e.g. a module-level holder set in
-  `_render_joint_display_hud`), so the generator stays cheap and never calls IK.
+### Option 1 (DecorationGenerator) is BLOCKED — confirmed by research 2026-06-12
+- `06-RESEARCH.md` introspected the installed `C:\OpenSim 4.5` Python bindings:
+  `SimTK::DecorationGenerator` is **not wrapped** (zero `*Generator` types in the
+  861-symbol module), so it cannot be constructed or subclassed — no SWIG director.
+  Every in-viewport live-text path is also dead: `addDecoration` copies by value,
+  there is no `removeDecoration`/`clearDecorations`, and `updDecoration(i)` returns
+  base `DecorativeGeometry` with no `setText`. **Do not attempt option 1 or any
+  in-Simbody-viewport text mutation on this build.**
 
-### Capability probe (locked requirement)
-- Before committing to option 1, the plan MUST include a runtime probe that prints
-  whether `addDecorationGenerator` exists on the live `viz` object and whether
-  `simbody.DecorationGenerator` is Python-subclassable on this build
-  (`_pick_hud_strategy` already enumerates `dir(viz)` near line 575/581 — extend it).
+### Chosen fix — LAYERED strategy (operator-selected 2026-06-12): window-title → UDP
+The readout cannot live inside the Simbody viewport on this build, so it moves to
+the OpenSim window title bar, with the already-wired UDP feed as the fallback.
 
-### Fallback chain (locked, if option 1 is unavailable on this SWIG build)
-1. Window-title augmentation via `setWindowTitle` — BUT this build already logged
-   `[WARN] setWindowTitle unavailable` (`_try_set_window_title`), so treat as likely dead.
-2. Drive the readout through the existing port-5001 angle-feedback UDP packet
-   (`_send_angle_feedback`, already wired) into the Open Ephys plugin UI.
-   Document this as the operator-visible readout if the viewport cannot update.
+1. **Runtime capability probe** (locked): rewrite the hard-coded `_pick_hud_strategy`
+   (currently `return "window_title"` ~line 712) to actually probe the live `viz`
+   object via `hasattr`/`dir(viz)` and select a strategy. Use the verified probe
+   recipe in `06-RESEARCH.md` Q5. On this build it must resolve to `window_title`
+   (if the wrapped-String title works) else `udp_feedback`.
+2. **Strategy `window_title`** (primary, keeps readout in the OpenSim window):
+   revive `setWindowTitle` by passing a **SWIG-wrapped `SimTK.String(title)`**
+   instead of a plain Python `str` (the plain-str typemap is what failed in
+   `_try_set_window_title`, line 543, latching `_window_title_supported=False`).
+   Update the title each frame with the compact HUD string. The window-title-wrap
+   is the one in-OpenSim path still worth trying; it is UNVERIFIED — the plan must
+   test it at runtime and fall through cleanly if the wrap also rejects.
+3. **Strategy `udp_feedback`** (fallback, already transmitting): the per-frame
+   `_send_angle_feedback` packet on port 5001 is the confirmed-working live readout.
+   When this strategy is active, the operator reads the angle in the Open Ephys
+   plugin UI. **No C++ plugin rebuild in this phase** — Python already sends the
+   packet; document the consumer as the operator-visible readout and note
+   plugin-side rendering as a separate follow-up if needed.
+- The active strategy must be chosen once at startup by the probe and logged
+  (`[JOINT-DISPLAY] strategy=...`) so UAT can see which path is live.
+- Remove or gate the dead `addDecoration`+`setText` `screen_text` path so it can
+  never silently re-freeze the readout (this is what masked the bug through Phase 4).
 
 ### Claude's Discretion
 - Exact module structure of the generator (nested class vs module-level), the
@@ -95,8 +107,13 @@ Out of scope:
 ## Specific Ideas
 
 - Verification must be observable, not inspection-only this time: the operator
-  moves the knee and the viewport number changes in lockstep with the console
-  `[HUD-DIAG] knee_angle_r=` value; switching the selected joint changes the label.
+  moves the knee and the displayed number (OpenSim window TITLE BAR under the
+  `window_title` strategy, or the Open Ephys plugin-UI readout under
+  `udp_feedback`) changes in lockstep with the console `[HUD-DIAG] knee_angle_r=`
+  value; switching the selected joint changes the displayed label.
+- The chosen strategy is logged once at startup (`[JOINT-DISPLAY] strategy=...`);
+  Phase 5's manual UAT checklist should be updated to look at the active readout
+  surface rather than the (now-removed) in-viewport text.
 - The visualizer loop target is ~20 Hz (`OPENSIM_LIVE_VISUALIZER_RATE`); the
   generator must not call IK or do per-frame allocation that stalls it.
 </specifics>

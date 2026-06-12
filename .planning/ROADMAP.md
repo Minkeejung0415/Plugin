@@ -109,17 +109,18 @@
 
 **Defect:** Phase 4 added the HUD via `viz.addDecoration(0, xform, DecorativeText("knee_r: --.--°"))` once at init, then mutates the retained Python handle with `_hud_screen_text.setText(...)` each frame. Simbody's `addDecoration` stores a **copy** by value, so `setText()` on the original handle never reaches the rendered geometry — the readout is frozen at the constructor string. IK and `_read_coord_value()` work correctly; only the render path is dead. DISP-02 verification was `human_needed` (code-inspection PASS) and the live UAT exposed the freeze.
 
-**Chosen approach (option 1):** Register a Simbody `DecorationGenerator` whose `generateDecorations()` emits a fresh `DecorativeText` with the current compact HUD string each frame, replacing the one-shot `addDecoration` + `setText` pattern.
+**Chosen approach (LAYERED — option 1 proven unbuildable by Phase 6 research):** In-viewport text is impossible on the installed OpenSim 4.5 bindings (`DecorationGenerator` unwrapped; no decoration text-mutation path). A runtime capability probe selects a strategy: **(1) `window_title`** — revive `setWindowTitle` with a SWIG-wrapped `SimTK.String` and write the live HUD string to the OpenSim window title bar each frame; **(2) `udp_feedback`** — fall through to the already-wired port-5001 `_send_angle_feedback` packet, with the angle read in the Open Ephys plugin UI. Python-only; no C++ plugin rebuild this phase.
 
 **Success Criteria:**
-1. On-screen readout reflects the live IK angle each frame (verifiably changes as the knee moves; console `[HUD-DIAG]`/`[COORD]` value and viewport text agree)
-2. Changing the selected joint (via display config) changes the on-screen label, not just the console
-3. If `DecorationGenerator` cannot be subclassed through the OpenSim 4.5 Python/SWIG bindings, a working fallback is implemented and documented (window-title augmentation if `setWindowTitle` is available, else the existing port-5001 angle-feedback path to the Open Ephys UI)
-4. No regression to the ~20 Hz visualizer loop or live IK stream
+1. The live IK angle is visible to the operator and verifiably updates each frame as the knee moves — console `[HUD-DIAG]`/`[COORD]` value agrees with the displayed value (window title bar or plugin-UI readout, per the active strategy)
+2. Changing the selected joint (via display config) changes the displayed label, not just the console
+3. `_pick_hud_strategy` performs a real runtime probe and logs the chosen strategy; the dead `addDecoration`+`setText` viewport path is removed/gated so it cannot silently re-freeze
+4. The two copies of `opensim_live_realtime.py` (source-of-truth + executed) end identical (`diff` empty)
+5. No regression to the ~20 Hz visualizer loop or live IK stream
 
 **Key files:** `opensim_live_realtime.py` (both the `Documents\Plugin` source-of-truth copy and the executed `C:\Users\justi\Open-Sim--Bio-Mech` copy)
 
-**Research flags:** Verify availability of `Visualizer.addDecorationGenerator` and Python-subclassable `simbody.DecorationGenerator` on the installed OpenSim 4.5 build before committing to option 1; enumerate the fallback in plan-phase.
+**Research:** `.planning/phases/06-hud-live-update-fix/06-RESEARCH.md` — confirms option 1 is dead on this build and provides the verified probe recipe (Q5) + fallback reasoning (Q3/Q4).
 
 ---
 
