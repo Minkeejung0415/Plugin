@@ -68,12 +68,12 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SD-01 | Phase 1, Phase 2 | Planned |
+| SD-01 | Phase 1, Phase 2 | Contract defined; implementation pending Phase 2 |
 | SD-02 | Phase 2 | Planned |
-| SD-03 | Phase 1, Phase 2 | Planned |
-| SD-04 | Phase 1, Phase 2 | Planned |
-| SD-05 | Phase 1, Phase 3 | Planned |
-| LOSS-01 | Phase 1, Phase 2 | Planned |
+| SD-03 | Phase 1, Phase 2 | Contract defined; implementation pending Phase 2 |
+| SD-04 | Phase 1, Phase 2 | Counter contract defined; implementation pending Phase 2 |
+| SD-05 | Phase 1, Phase 3 | Mode contract defined; tooling pending Phase 3 |
+| LOSS-01 | Phase 1, Phase 2 | Contract defined; persistence implementation pending Phase 2 |
 | LOSS-02 | Phase 3 | Planned |
 | LOSS-03 | Phase 3 | Planned |
 | LOSS-04 | Phase 5 | Planned |
@@ -81,9 +81,9 @@
 | STRESS-02 | Phase 3 | Planned |
 | STRESS-03 | Phase 3, Phase 5 | Planned |
 | STRESS-04 | Phase 3 | Planned |
-| STRESS-05 | Phase 1, Phase 3 | Planned |
-| STALL-01 | Phase 1, Phase 2 | Planned |
-| STALL-02 | Phase 1, Phase 2 | Planned |
+| STRESS-05 | Phase 1, Phase 3 | Metric contract defined; analyzer implementation pending Phase 3 |
+| STALL-01 | Phase 1, Phase 2 | Measurement contract defined; firmware implementation pending Phase 2 |
+| STALL-02 | Phase 1, Phase 2 | Measurement contract defined; firmware implementation pending Phase 2 |
 | STALL-03 | Phase 4 | Planned |
 | STALL-04 | Phase 4 | Planned |
 | OPS-01 | Phase 5 | Planned |
