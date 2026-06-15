@@ -118,5 +118,15 @@ Phase 1 -> Phase 2 -> Phase 3 -> Phase 4 -> Phase 5
 
 The prior v1.0 roadmap for OpenSim joint-angle display and HUD live-update remediation is historical. Do not continue HUD work inside this milestone unless acquisition reliability is complete and explicitly resumed.
 
+### Phase 6: Plugin-controlled ESP32 SD recording with reconnect-safe local retrieval
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 5
+**Plans:** 0/3 plans executed
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 6 to break down)
+
 ---
 *Roadmap created: 2026-06-12 - v1.1 SD card reliability and lossless acquisition*
