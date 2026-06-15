@@ -403,6 +403,11 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
                   << numAdcChannels << " channels @ "
                   << (int) settings.boardSampleRate << " Hz (TCP stream)." << std::endl;
+
+        // Negotiate rec-v1 SD recording protocol.  sendEsp32RecHello() also checks for
+        // any timeout-finalized session retained by firmware (D-10).
+        esp32RecV1Supported = sendEsp32RecHello();
+
         return true;
     }
 
@@ -1015,19 +1020,7 @@ bool AcqBoardRedPitaya::sendRecordOnCommand()
 {
     if (isEsp32Node)
     {
-        if (commandSocket == nullptr)
-            return false;
-
-        const char* msg = "RECORD ON\n";
-        int written = commandSocket->write (msg, (int) strlen (msg));
-        if (written <= 0)
-            return false;
-
-        lastRecordingPath = "/sdcard/step_session.bin";
-        lastRecordingCsvPath = {};
-        std::cout << "ESP32 record: requested board SD recording at " << lastRecordingPath << std::endl;
-        return true;
-
+        return sendEsp32RecStart();
     }
 
     // Red Pitaya: tell the board to save locally.
@@ -1056,17 +1049,7 @@ bool AcqBoardRedPitaya::sendRecordOffCommand()
 {
     if (isEsp32Node)
     {
-        if (commandSocket == nullptr)
-            return false;
-
-        const char* msg = "RECORD OFF\n";
-        int written = commandSocket->write (msg, (int) strlen (msg));
-        if (written <= 0)
-            return false;
-
-        std::cout << "ESP32 record: requested board SD recording stop" << std::endl;
-        return true;
-
+        return sendEsp32RecStop();
     }
 
     if (commandSocket == nullptr)
@@ -1828,6 +1811,7 @@ void AcqBoardRedPitaya::run()
         constexpr int headerSize = 22;
         const float accScale = 1.0f / kAccSensitivity[jlimit (0, 3, sensorAccPreset[0])];
         const float gyrScale = 1.0f / kGyrSensitivity[jlimit (0, 3, sensorGyrPreset[0])];
+        constexpr float magScale = 0.15f;
         Array<uint8> tcpRx;
         double lastFrameWallSec = 0.0;
         uint32_t lastHwUs32 = 0;
@@ -1888,10 +1872,10 @@ void AcqBoardRedPitaya::run()
                             raw = float (channels[adc]) * accScale;
                         else if (adc <= 5)
                             raw = float (channels[adc]) * gyrScale;
-                        else if (adc == 6)
-                            raw = float (channels[adc] & 1); // DIO level bit0
+                        else if (adc <= 8)
+                            raw = float (channels[adc]) * magScale;
                         else
-                            raw = float (channels[adc]); // filter quat Q15 (ch7–10)
+                            raw = float (channels[adc]); // filter quat Q15 (ch9-12)
                     }
 
                     samples[(adc * samplesPerBuffer) + sampleIndex] = raw;
@@ -1901,25 +1885,51 @@ void AcqBoardRedPitaya::run()
                 // calibration before AHRS → IK. One physical IMU → numSensors=1.
                 if (openSimEnabled && channelsInPacket >= 6)
                 {
-                    const float imuPkt[6] = {
-                        float (channels[0]) * accScale,
-                        float (channels[1]) * accScale,
-                        float (channels[2]) * accScale,
-                        float (channels[3]) * gyrScale,
-                        float (channels[4]) * gyrScale,
-                        float (channels[5]) * gyrScale,
-                    };
-
-                    if (sampleNumber == 0)
+                    if (filterEnabled && channelsInPacket >= 13)
                     {
-                        std::cout << "ESP32-S3: OpenSim UDP v3 n_sensors=1, ax="
-                                  << imuPkt[0] << std::endl;
-                    }
+                        constexpr float kQ15inv = 1.0f / 32767.0f;
+                        const float quatPkt[4] = {
+                            float (channels[9])  * kQ15inv,
+                            float (channels[10]) * kQ15inv,
+                            float (channels[11]) * kQ15inv,
+                            float (channels[12]) * kQ15inv
+                        };
 
-                    sendOpenSimImuPacket ((float) elapsedSeconds, imuPkt, 1);
+                        if (sampleNumber == 0)
+                        {
+                            std::cout << "ESP32-S3: OpenSim UDP v2 n_sensors=1, qw="
+                                      << quatPkt[0] << std::endl;
+                        }
+
+                        sendOpenSimQuaternionPacket ((float) elapsedSeconds, quatPkt, 1);
+                    }
+                    else
+                    {
+                        const float imuPkt[6] = {
+                            float (channels[0]) * accScale,
+                            float (channels[1]) * accScale,
+                            float (channels[2]) * accScale,
+                            float (channels[3]) * gyrScale,
+                            float (channels[4]) * gyrScale,
+                            float (channels[5]) * gyrScale,
+                        };
+
+                        if (sampleNumber == 0)
+                        {
+                            std::cout << "ESP32-S3: OpenSim UDP v3 n_sensors=1, ax="
+                                      << imuPkt[0] << std::endl;
+                        }
+
+                        sendOpenSimImuPacket ((float) elapsedSeconds, imuPkt, 1);
+                    }
                 }
 
-                // PC-side CSV recording for ESP32 WiFi mode.
+                // PC-side CSV recording for ESP32 WiFi mode (legacy path).
+                // Only runs when rec-v1 is NOT supported (old firmware without SD recording).
+                // When esp32RecV1Supported == true, SD recording is handled by the
+                // sendEsp32RecStart/Stop/retrieval path and this block must be skipped.
+                if (! esp32RecV1Supported)
+                {
                 // Use a counter-based timestamp (sample index / nominal rate) rather than
                 // elapsedSeconds: TCP delivers frames in bursts so wall-clock dt is unreliable —
                 // consecutive frames in the same burst all arrive at nearly the same instant and
@@ -1935,25 +1945,27 @@ void AcqBoardRedPitaya::run()
                         const float rgx  = channelsInPacket > 3 ? float (channels[3]) * gyrScale : 0.0f;
                         const float rgy  = channelsInPacket > 4 ? float (channels[4]) * gyrScale : 0.0f;
                         const float rgz  = channelsInPacket > 5 ? float (channels[5]) * gyrScale : 0.0f;
-                        const float rdio = channelsInPacket > 6 ? float (channels[6] & 1) : 0.0f;
+                        const float rmx  = channelsInPacket > 6 ? float (channels[6]) * magScale : 0.0f;
+                        const float rmy  = channelsInPacket > 7 ? float (channels[7]) * magScale : 0.0f;
+                        const float rmz  = channelsInPacket > 8 ? float (channels[8]) * magScale : 0.0f;
 
                         float rqw = 0.0f, rqx = 0.0f, rqy = 0.0f, rqz = 0.0f;
-                        if (filterEnabled && channelsInPacket >= 11)
+                        if (filterEnabled && channelsInPacket >= 13)
                         {
                             constexpr float kQ15inv = 1.0f / 32767.0f;
-                            rqw = float (channels[7])  * kQ15inv;
-                            rqx = float (channels[8])  * kQ15inv;
-                            rqy = float (channels[9])  * kQ15inv;
-                            rqz = float (channels[10]) * kQ15inv;
+                            rqw = float (channels[9])  * kQ15inv;
+                            rqx = float (channels[10]) * kQ15inv;
+                            rqy = float (channels[11]) * kQ15inv;
+                            rqz = float (channels[12]) * kQ15inv;
                         }
 
                         const double nominalRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
                         const double csvTimestamp = static_cast<double> (esp32RecordSampleCount) / nominalRate;
 
-                        char row[192];
+                        char row[224];
                         const int len = snprintf (row, sizeof (row),
-                            "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.0f,%.6f,%.6f,%.6f,%.6f\n",
-                            csvTimestamp, rax, ray, raz, rgx, rgy, rgz, rdio,
+                            "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%.6f,%.6f\n",
+                            csvTimestamp, rax, ray, raz, rgx, rgy, rgz, rmx, rmy, rmz,
                             rqw, rqx, rqy, rqz);
 
                         if (len > 0 && len < (int) sizeof (row))
@@ -1964,6 +1976,7 @@ void AcqBoardRedPitaya::run()
                             esp32RecordStream->flush();
                     }
                 }
+                } // end !esp32RecV1Supported guard
 
                 const double currentSampleRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
                 const double wallSec = Time::getMillisecondCounterHiRes() * 0.001;
@@ -2172,4 +2185,1041 @@ void AcqBoardRedPitaya::run()
             }
         }
     }
+}
+
+// =============================================================================
+// rec-v1 SD recording protocol implementation
+// =============================================================================
+
+namespace
+{
+    /** Read a single line (up to '\n') from commandSocket with the given timeout ms.
+     *  Returns the line string (without '\n') or an empty string on timeout/error. */
+    static String readSocketLine (StreamingSocket* sock, int timeoutMs)
+    {
+        if (sock == nullptr)
+            return {};
+
+        String line;
+        const int64 deadline = Time::currentTimeMillis() + timeoutMs;
+
+        while (Time::currentTimeMillis() < deadline)
+        {
+            if (! sock->waitUntilReady (true, 50))
+                continue;
+
+            char c = 0;
+            if (sock->read (&c, 1, false) <= 0)
+                break;
+
+            if (c == '\n')
+                break;
+
+            if (c >= 0x20 || c == '\t')
+                line += c;
+        }
+
+        return line;
+    }
+
+    /** Parse a key=value token from a rec-v1 response string.
+     *  E.g. parseRecField("REC HELLO_OK max_chunk=4096 ...", "max_chunk") → "4096" */
+    static String parseRecField (const String& line, const String& key)
+    {
+        const String needle = key + "=";
+        const int idx = line.indexOf (needle);
+        if (idx < 0)
+            return {};
+        String val = line.substring (idx + needle.length());
+        // Trim at first whitespace
+        const int sp = val.indexOfAnyOf (" \t\r\n");
+        if (sp >= 0)
+            val = val.substring (0, sp);
+        return val;
+    }
+
+    // Standard (Ethernet / PKZIP) CRC-32 table.
+    static const uint32_t kCrc32Table[256] = {
+        0x00000000,0x77073096,0xEE0E612C,0x990951BA,0x076DC419,0x706AF48F,0xE963A535,0x9E6495A3,
+        0x0EDB8832,0x79DCB8A4,0xE0D5E91B,0x97D2D988,0x09B64C2B,0x7EB17CBF,0xE7B82D09,0x90BF1D95,
+        0x1DB71064,0x6AB020F2,0xF3B97148,0x84BE41DE,0x1ADAD47D,0x6DDDE4EB,0xF4D4B551,0x83D385C7,
+        0x136C9856,0x646BA8C0,0xFD62F97A,0x8A65C9EC,0x14015C4F,0x63066CD9,0xFA0F3D63,0x8D080DF5,
+        0x3B6E20C8,0x4C69105E,0xD56041E4,0xA2677172,0x3C03E4D1,0x4B04D447,0xD20D85FD,0xA50AB56B,
+        0x35B5A8FA,0x42B2986C,0xDBBBC9D6,0xACBCF940,0x32D86CE3,0x45DF5C75,0xDCD60DCF,0xABD13D59,
+        0x26D930AC,0x51DE003A,0xC8D75180,0xBFD06116,0x21B4F93B,0x56B3C423,0xCFBA9599,0xB8BDA50F,
+        0x2802B89E,0x5F058808,0xC60CD9B2,0xB10BE924,0x2F6F7C87,0x58684C11,0xC1611DAB,0xB6662D3D,
+        0x76DC4190,0x01DB7106,0x98D220BC,0xEFD5102A,0x71B18589,0x06B6B51F,0x9FBFE4A5,0xE8B8D433,
+        0x7807C9A2,0x0F00F934,0x9609A88E,0xE10E9818,0x7F6AD9BB,0x086D3D2D,0x91646C97,0xE6635C01,
+        0x6B6B51F4,0x1C6C6162,0x856530D8,0xF262004E,0x6C0695ED,0x1B01A57B,0x8208F4C1,0xF50FC457,
+        0x65B0D9C6,0x12B7E950,0x8BBEB8EA,0xFCB9887C,0x62DD1FDF,0x15DA2D49,0x8CD37CF3,0xFBD44C65,
+        0x4DB26158,0x3AB551CE,0xA3BC0074,0xD4BB30E2,0x4ADFA541,0x3DD895D7,0xA4D1C46D,0xD3D6F4FB,
+        0x4369E96A,0x346ED9FC,0xAD678846,0xDA60B8D0,0x44042D73,0x33031DE5,0xAA0A4C5F,0xDD0D7CC9,
+        0x5005713C,0x270241AA,0xBE0B1010,0xC90C2086,0x5768B525,0x206F85B3,0xB966D409,0xCE61E49F,
+        0x5EDEF90E,0x29D9C998,0xB0D09822,0xC7D7A8B4,0x59B33D17,0x2EB40D81,0xB7BD5C3B,0xC0BA6CAD,
+        0xEDB88320,0x9ABFB3B6,0x03B6E20C,0x74B1D29A,0xEAD54739,0x9DD277AF,0x04DB2615,0x73DC1683,
+        0xE3630B12,0x94643B84,0x0D6D6A3E,0x7A6A5AA8,0xE40ECF0B,0x9309FF9D,0x0A00AE27,0x7D079EB1,
+        0xF00F9344,0x8708A3D2,0x1E01F268,0x6906C2FE,0xF762575D,0x806567CB,0x196C3671,0x6E6B06E7,
+        0xFED41B76,0x89D32BE0,0x10DA7A5A,0x67DD4ACC,0xF9B9DF6F,0x8EBEEFF9,0x17B7BE43,0x60B08ED5,
+        0xD6D6A3E8,0xA1D1937E,0x38D8C2C4,0x4FDFF252,0xD1BB67F1,0xA6BC5767,0x3FB506DD,0x48B2364B,
+        0xD80D2BDA,0xAF0A1B4C,0x36034AF6,0x41047A60,0xDF60EFC3,0xA8670955,0x316658EF,0x46616879,
+        0xB40BBE37,0xC30C8EA1,0x5A05DF1B,0x2D02EF8D
+    };
+
+    static uint32_t crc32Ethernet (const void* data, size_t length)
+    {
+        const uint8_t* p = static_cast<const uint8_t*> (data);
+        uint32_t crc = 0xFFFFFFFFu;
+        for (size_t i = 0; i < length; ++i)
+            crc = kCrc32Table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+        return crc ^ 0xFFFFFFFFu;
+    }
+
+} // anonymous namespace
+
+// -----------------------------------------------------------------------------
+// sendEsp32RecHello — negotiate rec-v1 on connect (Task 6)
+// -----------------------------------------------------------------------------
+bool AcqBoardRedPitaya::sendEsp32RecHello()
+{
+    if (commandSocket == nullptr)
+        return false;
+
+    // Reset any stale protocol state.
+    esp32RecState.store (Esp32RecState::Idle);
+    esp32SessionId.clear();
+    esp32PendingSessionId.clear();
+    esp32PendingFileSize     = 0;
+    esp32PendingFileChecksum.clear();
+    esp32RetrievalRetryAvailable = false;
+
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "Negotiating SD recording protocol...";
+    }
+
+    const juce::ScopedLock cmdLock (esp32CommandLock);
+
+    const char* hello = "REC HELLO protocol_min=rec-v1 client=plugin mode=direct_tcp\n";
+    if (commandSocket->write (hello, (int) strlen (hello)) <= 0)
+    {
+        std::cout << "ESP32 rec-v1: failed to send REC HELLO" << std::endl;
+        return false;
+    }
+
+    const String resp = readSocketLine (commandSocket, 2000);
+    std::cout << "ESP32 rec-v1 HELLO response: [" << resp << "]" << std::endl;
+
+    if (resp.startsWith ("REC HELLO_OK"))
+    {
+        // Parse max_chunk if present.
+        const String maxChunkStr = parseRecField (resp, "max_chunk");
+        if (maxChunkStr.isNotEmpty())
+        {
+            const int mc = maxChunkStr.getIntValue();
+            if (mc > 0)
+                esp32MaxChunkBytes = static_cast<uint32_t> (mc);
+        }
+
+        esp32RecV1Supported = true;
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "SD recording ready (rec-v1)";
+        }
+        std::cout << "ESP32 rec-v1: supported. max_chunk=" << esp32MaxChunkBytes << std::endl;
+
+        // Check for a timeout-finalized session retained from a previous connection (D-10).
+        checkEsp32ReconnectSession();
+        return true;
+    }
+    else if (resp.startsWith ("REC ERR"))
+    {
+        esp32RecV1Supported = false;
+        esp32RecState.store (Esp32RecState::UnsupportedProtocol);
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "Recording protocol unsupported — update firmware for SD recording";
+        }
+        std::cout << "ESP32 rec-v1: firmware returned REC ERR — old firmware." << std::endl;
+        return false;
+    }
+    else
+    {
+        // No response or unexpected reply — assume old firmware.
+        esp32RecV1Supported = false;
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "SD recording protocol not detected (old firmware)";
+        }
+        std::cout << "ESP32 rec-v1: no REC HELLO_OK response — assuming old firmware." << std::endl;
+        return false;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// checkEsp32ReconnectSession — surface timeout-finalized session on reconnect (Task 7)
+// -----------------------------------------------------------------------------
+void AcqBoardRedPitaya::checkEsp32ReconnectSession()
+{
+    // commandSocket lock already held by caller (sendEsp32RecHello).
+    if (commandSocket == nullptr)
+        return;
+
+    const char* query = "REC SESSION session_id=latest_finalized\n";
+    if (commandSocket->write (query, (int) strlen (query)) <= 0)
+        return;
+
+    const String resp = readSocketLine (commandSocket, 2000);
+    std::cout << "ESP32 rec-v1 reconnect session check: [" << resp << "]" << std::endl;
+
+    if (! resp.startsWith ("REC SESSION_OK"))
+        return; // no retained session or not finalized — that's fine
+
+    const String fileSize = parseRecField (resp, "file_size");
+    const String checksum = parseRecField (resp, "file_checksum");
+    const String sid      = parseRecField (resp, "session_id");
+
+    if (sid.isEmpty() || fileSize.isEmpty() || fileSize == "0")
+        return; // incomplete metadata — ignore
+
+    esp32PendingSessionId    = sid;
+    esp32PendingFileSize     = static_cast<uint64_t> (fileSize.getLargeIntValue());
+    esp32PendingFileChecksum = checksum;
+    esp32RetrievalRetryAvailable = true;
+    esp32RecState.store (Esp32RecState::SdFinalized);
+
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "Timeout-finalized session available (session=" + sid + ") — press Retrieve";
+    }
+    std::cout << "ESP32 rec-v1: timeout-finalized session " << sid
+              << " (" << fileSize << " bytes) available for retrieval." << std::endl;
+}
+
+// -----------------------------------------------------------------------------
+// sendEsp32RecStart — replaces "RECORD ON" for rec-v1 firmware (Task 2)
+// -----------------------------------------------------------------------------
+bool AcqBoardRedPitaya::sendEsp32RecStart()
+{
+    if (! esp32RecV1Supported)
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "Recording protocol unsupported — update firmware for SD recording";
+        esp32RecState.store (Esp32RecState::UnsupportedProtocol);
+        std::cout << "ESP32 record: rec-v1 not supported; cannot start SD recording." << std::endl;
+        return false;
+    }
+
+    if (commandSocket == nullptr)
+        return false;
+
+    const juce::ScopedLock cmdLock (esp32CommandLock);
+
+    const int hz = jmax (1, (int) settings.boardSampleRate);
+    const int ch = numAdcChannels;
+
+    char msg[128];
+    snprintf (msg, sizeof (msg),
+              "REC START sample_rate_hz=%d channels=%d format=sd-bin sd_required=true\n",
+              hz, ch);
+
+    if (commandSocket->write (msg, (int) strlen (msg)) <= 0)
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "ESP32 SD recording: failed to send REC START";
+        esp32RecState.store (Esp32RecState::Failed);
+        return false;
+    }
+
+    esp32RecState.store (Esp32RecState::CommandSent);
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "ESP32 SD recording: command sent — waiting for confirmation";
+    }
+
+    const String resp = readSocketLine (commandSocket, 1000);
+    std::cout << "ESP32 REC START response: [" << resp << "]" << std::endl;
+
+    if (resp.startsWith ("REC STARTED"))
+    {
+        esp32SessionId = parseRecField (resp, "session_id");
+        if (esp32SessionId.isEmpty())
+            esp32SessionId = "session_" + String (Time::currentTimeMillis());
+
+        lastRecordingPath = "esp32://sd/" + esp32SessionId;
+        lastRecordingCsvPath = {};
+
+        esp32RecState.store (Esp32RecState::RecordingConfirmed);
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "ESP32 SD recording confirmed (session=" + esp32SessionId + ")";
+        }
+        std::cout << "ESP32 rec-v1: recording started, session=" << esp32SessionId << std::endl;
+        return true;
+    }
+    else if (resp.startsWith ("REC ERR"))
+    {
+        esp32RecState.store (Esp32RecState::Failed);
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "ESP32 SD recording failed: " + resp;
+        }
+        std::cout << "ESP32 rec-v1: REC START returned error: " << resp << std::endl;
+        return false;
+    }
+    else
+    {
+        // No response or unrecognised reply.
+        esp32RecState.store (Esp32RecState::Failed);
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "ESP32 SD recording: no confirmation from firmware";
+        }
+        std::cout << "ESP32 rec-v1: REC START — unexpected response: " << resp << std::endl;
+        return false;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// sendEsp32RecStop — initiate stop + async finalize/retrieve (Task 3)
+// -----------------------------------------------------------------------------
+bool AcqBoardRedPitaya::sendEsp32RecStop()
+{
+    if (! esp32RecV1Supported || esp32SessionId.isEmpty())
+    {
+        // Fallback: send legacy RECORD OFF for backward compat or unexpected state.
+        if (commandSocket == nullptr)
+            return false;
+
+        const char* legacyMsg = "RECORD OFF\n";
+        const int written = commandSocket->write (legacyMsg, (int) strlen (legacyMsg));
+        std::cout << "ESP32 record: sent legacy RECORD OFF (no rec-v1 session active)." << std::endl;
+        return written > 0;
+    }
+
+    if (commandSocket == nullptr)
+        return false;
+
+    {
+        const juce::ScopedLock cmdLock (esp32CommandLock);
+
+        char msg[128];
+        snprintf (msg, sizeof (msg),
+                  "REC STOP session_id=%s reason=manual_stop\n",
+                  esp32SessionId.toRawUTF8());
+
+        if (commandSocket->write (msg, (int) strlen (msg)) <= 0)
+        {
+            const juce::ScopedLock sl (esp32RecStatusLock);
+            esp32RecStatusText = "ESP32 SD recording: failed to send REC STOP";
+            esp32RecState.store (Esp32RecState::Failed);
+            return false;
+        }
+    }
+
+    esp32RecState.store (Esp32RecState::Finalizing);
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "ESP32 SD recording: stop sent — finalizing and retrieving in background";
+    }
+
+    // Kick off async finalize/retrieve — does NOT block the audio thread.
+    startEsp32RetrievalAsync();
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// getEsp32RecStatusText — thread-safe status text accessor
+// -----------------------------------------------------------------------------
+String AcqBoardRedPitaya::getEsp32RecStatusText() const
+{
+    const juce::ScopedLock sl (esp32RecStatusLock);
+    return esp32RecStatusText;
+}
+
+// =============================================================================
+// Esp32RetrievalThread — background finalize + chunk transfer (Task 4)
+// =============================================================================
+class Esp32RetrievalThread : public juce::Thread
+{
+public:
+    Esp32RetrievalThread (AcqBoardRedPitaya& board)
+        : juce::Thread ("ESP32RetrievalThread"),
+          board_ (board)
+    {
+    }
+
+    void run() override
+    {
+        using RecState = AcqBoardRedPitaya::Esp32RecState;
+
+        auto setStatus = [this] (const String& text)
+        {
+            const juce::ScopedLock sl (board_.esp32RecStatusLock);
+            board_.esp32RecStatusText = text;
+            std::cout << "[ESP32 retrieval] " << text << std::endl;
+        };
+
+        auto setState = [this] (RecState s)
+        {
+            board_.esp32RecState.store (s);
+        };
+
+        // -----------------------------------------------------------------------
+        // Step 1: Poll REC STATUS until recording_state=finalized (max 30 s)
+        // -----------------------------------------------------------------------
+        setStatus ("ESP32 SD recording: finalizing...");
+        setState (RecState::Finalizing);
+
+        bool finalized = false;
+        const int64 finalizeDeadline = Time::currentTimeMillis() + 30000;
+
+        while (! threadShouldExit() && ! board_.esp32RetrievalCancelRequested.load())
+        {
+            if (Time::currentTimeMillis() > finalizeDeadline)
+            {
+                setStatus ("ESP32 SD recording: finalization timeout after 30 s");
+                setState (RecState::Failed);
+                return;
+            }
+
+            // Poll STATUS
+            String statusResp;
+            {
+                const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+                if (board_.commandSocket == nullptr)
+                {
+                    setStatus ("ESP32 SD recording: socket closed during finalization");
+                    setState (RecState::Failed);
+                    return;
+                }
+
+                const char* statusMsg = "REC STATUS\n";
+                board_.commandSocket->write (statusMsg, (int) strlen (statusMsg));
+                statusResp = readSocketLine (board_.commandSocket, 2000);
+            }
+
+            std::cout << "[ESP32 retrieval] STATUS: " << statusResp << std::endl;
+
+            const String recState = parseRecField (statusResp, "recording_state");
+
+            if (recState == "finalized")
+            {
+                finalized = true;
+                break;
+            }
+            else if (recState == "failed" || recState == "error")
+            {
+                setStatus ("ESP32 SD recording: firmware reported finalization failure");
+                setState (RecState::Failed);
+                return;
+            }
+
+            // Still finalizing — wait 500 ms before next poll.
+            Thread::sleep (500);
+        }
+
+        if (board_.esp32RetrievalCancelRequested.load())
+        {
+            sendAbort();
+            setStatus ("ESP32 SD recording: retrieval cancelled");
+            setState (RecState::Failed);
+            return;
+        }
+
+        if (! finalized)
+        {
+            setState (RecState::Failed);
+            return;
+        }
+
+        // -----------------------------------------------------------------------
+        // Step 2: Get session metadata (file_size, file_checksum)
+        // -----------------------------------------------------------------------
+        String sessionId, fileChecksumHex;
+        uint64_t fileSize = 0;
+
+        {
+            const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+            if (board_.commandSocket == nullptr)
+            {
+                setStatus ("ESP32 SD recording: socket closed before metadata fetch");
+                setState (RecState::Failed);
+                return;
+            }
+
+            const char* sessionMsg = "REC SESSION session_id=latest_finalized\n";
+            board_.commandSocket->write (sessionMsg, (int) strlen (sessionMsg));
+            const String resp = readSocketLine (board_.commandSocket, 2000);
+            std::cout << "[ESP32 retrieval] SESSION: " << resp << std::endl;
+
+            if (! resp.startsWith ("REC SESSION_OK"))
+            {
+                setStatus ("ESP32 SD recording: failed to get session metadata — " + resp);
+                setState (RecState::Failed);
+                return;
+            }
+
+            sessionId        = parseRecField (resp, "session_id");
+            fileChecksumHex  = parseRecField (resp, "file_checksum");
+            const String fs  = parseRecField (resp, "file_size");
+            fileSize         = static_cast<uint64_t> (fs.getLargeIntValue());
+        }
+
+        if (sessionId.isEmpty())
+            sessionId = board_.esp32SessionId;
+
+        // Save pending metadata for retry.
+        board_.esp32PendingSessionId    = sessionId;
+        board_.esp32PendingFileSize     = fileSize;
+        board_.esp32PendingFileChecksum = fileChecksumHex;
+        setState (RecState::SdFinalized);
+        setStatus ("ESP32 SD finalized (session=" + sessionId + ", " + String (fileSize) + " bytes) — retrieving...");
+
+        // -----------------------------------------------------------------------
+        // Step 3: Prepare local output directory
+        // -----------------------------------------------------------------------
+        const String timestamp = String (Time::currentTimeMillis());
+        const String dirName   = sessionId + "_" + timestamp;
+        const String resultDir = String (kEsp32RecordDir) + "\\" + dirName;
+
+        File dir (resultDir);
+        if (! dir.createDirectory())
+        {
+            setStatus ("ESP32 retrieval: could not create output directory: " + resultDir);
+            setState (RecState::Failed);
+            return;
+        }
+
+        board_.esp32LocalResultDir = resultDir;
+
+        const String tmpPath  = resultDir + "\\session_data.bin.tmp";
+        const String binPath  = resultDir + "\\session_data.bin";
+        const String metaPath = resultDir + "\\metadata.json";
+        const String logPath  = resultDir + "\\transfer_log.json";
+
+        // -----------------------------------------------------------------------
+        // Step 4: Write metadata.json
+        // -----------------------------------------------------------------------
+        {
+            File meta (metaPath);
+            juce::FileOutputStream metaOut (meta);
+            if (metaOut.openedOk())
+            {
+                // Populate fields we have; firmware extras (write_errors etc.) come
+                // from parseRecField on the SESSION_OK line if firmware provides them.
+                metaOut.writeText (
+                    "{\n"
+                    "  \"session_id\": \"" + sessionId + "\",\n"
+                    "  \"protocol\": \"rec-v1\",\n"
+                    "  \"file_size\": " + String (fileSize) + ",\n"
+                    "  \"file_checksum\": \"" + fileChecksumHex + "\",\n"
+                    "  \"checksum_type\": \"crc32\",\n"
+                    "  \"timestamp_ms\": " + timestamp + "\n"
+                    "}\n",
+                    false, false, "\n");
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Step 5: Retrieve binary data in chunks via REC GET + SDRF frames
+        // -----------------------------------------------------------------------
+        setState (RecState::Retrieving);
+        setStatus ("ESP32 SD retrieving: 0 / " + String (fileSize) + " bytes...");
+
+        File tmpFile (tmpPath);
+        juce::FileOutputStream tmpOut (tmpFile);
+        if (! tmpOut.openedOk())
+        {
+            setStatus ("ESP32 retrieval: could not open temp file: " + tmpPath);
+            setState (RecState::Failed);
+            return;
+        }
+
+        // Build transfer_log JSON incrementally.
+        File logFile (logPath);
+        juce::FileOutputStream logOut (logFile);
+        bool logOk = logOut.openedOk();
+        if (logOk)
+            logOut.writeText ("[\n", false, false, "\n");
+
+        uint64_t offset          = 0;
+        uint32_t chunkIndex      = 0;
+        uint32_t localCrc        = 0xFFFFFFFFu; // running CRC32 of received payload bytes
+        bool     transferOk      = true;
+        bool     gotEof          = false;
+        bool     firstLogEntry   = true;
+
+        const uint32_t kSdrfMagic       = 0x46524453u; // 'SDRF' little-endian
+        const uint8_t  kFrameTypeData   = 0x01;
+        const uint8_t  kFrameTypeEof    = 0x02;
+        const int      kSdrfHeaderBytes = 64;
+
+        while (! threadShouldExit() && ! board_.esp32RetrievalCancelRequested.load())
+        {
+            if (fileSize > 0 && offset >= fileSize)
+            {
+                gotEof = true;
+                break;
+            }
+
+            const uint32_t chunkLen = board_.esp32MaxChunkBytes;
+
+            // Send REC GET
+            char getMsg[128];
+            snprintf (getMsg, sizeof (getMsg),
+                      "REC GET session_id=%s offset=%llu length=%u chunk_index=%u\n",
+                      sessionId.toRawUTF8(),
+                      (unsigned long long) offset,
+                      (unsigned) chunkLen,
+                      (unsigned) chunkIndex);
+
+            {
+                const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+                if (board_.commandSocket == nullptr || board_.commandSocket->write (getMsg, (int) strlen (getMsg)) <= 0)
+                {
+                    setStatus ("ESP32 retrieval: failed to send REC GET at offset " + String (offset));
+                    transferOk = false;
+                    break;
+                }
+            }
+
+            // Read 64-byte SDRF header.
+            uint8_t header[64] = {};
+            int headerBytesRead = 0;
+
+            {
+                const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+                if (board_.commandSocket == nullptr)
+                {
+                    transferOk = false;
+                    break;
+                }
+
+                const int64 chunkDeadline = Time::currentTimeMillis() + 5000;
+                while (headerBytesRead < kSdrfHeaderBytes && Time::currentTimeMillis() < chunkDeadline)
+                {
+                    if (! board_.commandSocket->waitUntilReady (true, 100))
+                        continue;
+
+                    const int n = board_.commandSocket->read (
+                        header + headerBytesRead,
+                        kSdrfHeaderBytes - headerBytesRead,
+                        false);
+
+                    if (n > 0)
+                        headerBytesRead += n;
+                    else if (n < 0)
+                        break;
+                }
+            }
+
+            if (headerBytesRead < kSdrfHeaderBytes)
+            {
+                setStatus ("ESP32 retrieval: incomplete SDRF header at chunk " + String (chunkIndex));
+                transferOk = false;
+                break;
+            }
+
+            // Validate SDRF magic ('S','D','R','F' = 0x53,0x44,0x52,0x46).
+            uint32_t magic = 0;
+            std::memcpy (&magic, header, 4);
+
+            if (magic != kSdrfMagic)
+            {
+                // Check if firmware sent an error line instead of binary.
+                String errLine (reinterpret_cast<const char*> (header), kSdrfHeaderBytes);
+                setStatus ("ESP32 retrieval: bad SDRF magic at chunk " + String (chunkIndex)
+                           + " (got: " + errLine.trim().substring (0, 40) + ")");
+                transferOk = false;
+                break;
+            }
+
+            // Parse header fields (little-endian, per sd_logger spec).
+            uint8_t  frame_version    = header[4];
+            uint8_t  frame_type       = header[5];
+            // header[6..7] = reserved
+            uint32_t payload_length   = 0;
+            uint64_t byte_offset      = 0;
+            uint32_t payload_crc32    = 0;
+            uint32_t header_crc32c    = 0;
+
+            std::memcpy (&payload_length, header +  8, 4);
+            std::memcpy (&byte_offset,    header + 12, 8);
+            std::memcpy (&payload_crc32,  header + 40, 4);
+            std::memcpy (&header_crc32c,  header + 48, 4);
+
+            // Validate header CRC32 (zeroing the crc field, compute over 64 bytes).
+            uint8_t headerForCrc[64];
+            std::memcpy (headerForCrc, header, 64);
+            std::memset (headerForCrc + 48, 0, 4);
+            const uint32_t computedHeaderCrc = crc32Ethernet (headerForCrc, 64);
+
+            if (computedHeaderCrc != header_crc32c && header_crc32c != 0)
+            {
+                // Note: if firmware leaves header CRC as 0, we skip validation gracefully.
+                setStatus ("ESP32 retrieval: SDRF header CRC mismatch at chunk " + String (chunkIndex));
+                transferOk = false;
+                break;
+            }
+
+            if (frame_type == kFrameTypeEof)
+            {
+                gotEof = true;
+                break;
+            }
+
+            if (frame_type != kFrameTypeData)
+            {
+                setStatus ("ESP32 retrieval: unexpected SDRF frame_type 0x"
+                           + String::toHexString ((int) frame_type));
+                transferOk = false;
+                break;
+            }
+
+            if (byte_offset != offset)
+            {
+                setStatus ("ESP32 retrieval: SDRF byte_offset mismatch at chunk "
+                           + String (chunkIndex)
+                           + " (expected " + String (offset)
+                           + ", got " + String (byte_offset) + ")");
+                transferOk = false;
+                break;
+            }
+
+            // Read payload.
+            juce::MemoryBlock payload (payload_length);
+            int payloadRead = 0;
+
+            {
+                const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+                if (board_.commandSocket == nullptr)
+                {
+                    transferOk = false;
+                    break;
+                }
+
+                const int64 payDeadline = Time::currentTimeMillis() + 10000;
+                while (payloadRead < (int) payload_length && Time::currentTimeMillis() < payDeadline)
+                {
+                    if (! board_.commandSocket->waitUntilReady (true, 100))
+                        continue;
+
+                    const int n = board_.commandSocket->read (
+                        static_cast<uint8_t*> (payload.getData()) + payloadRead,
+                        (int) payload_length - payloadRead,
+                        false);
+
+                    if (n > 0)
+                        payloadRead += n;
+                    else if (n < 0)
+                        break;
+                }
+            }
+
+            if (payloadRead < (int) payload_length)
+            {
+                setStatus ("ESP32 retrieval: incomplete payload at chunk " + String (chunkIndex)
+                           + " (" + String (payloadRead) + " of " + String (payload_length) + " bytes)");
+                transferOk = false;
+                break;
+            }
+
+            // Validate payload CRC.
+            const uint32_t computedPayloadCrc = crc32Ethernet (payload.getData(), payload_length);
+            if (computedPayloadCrc != payload_crc32 && payload_crc32 != 0)
+            {
+                setStatus ("ESP32 retrieval: payload CRC mismatch at chunk " + String (chunkIndex));
+                transferOk = false;
+                break;
+            }
+
+            // Update running whole-file CRC.
+            const uint8_t* payBytes = static_cast<const uint8_t*> (payload.getData());
+            for (int i = 0; i < (int) payload_length; ++i)
+                localCrc = kCrc32Table[(localCrc ^ payBytes[i]) & 0xFF] ^ (localCrc >> 8);
+
+            // Write to temp file.
+            tmpOut.write (payload.getData(), payload_length);
+
+            // Append chunk entry to transfer_log.
+            if (logOk)
+            {
+                if (! firstLogEntry)
+                    logOut.writeText (",\n", false, false, "\n");
+                firstLogEntry = false;
+
+                logOut.writeText (
+                    "  {\"chunk_index\":" + String (chunkIndex)
+                    + ",\"byte_offset\":" + String (offset)
+                    + ",\"payload_length\":" + String (payload_length)
+                    + ",\"payload_crc32\":\"" + String::toHexString ((int) computedPayloadCrc) + "\""
+                    + "}",
+                    false, false, "\n");
+            }
+
+            offset += payload_length;
+            ++chunkIndex;
+
+            setStatus ("ESP32 SD retrieving: " + String (offset) + " / " + String (fileSize) + " bytes...");
+        }
+
+        tmpOut.flush();
+        tmpOut.~FileOutputStream(); // close before rename
+
+        if (board_.esp32RetrievalCancelRequested.load())
+        {
+            sendAbort();
+            File (tmpPath).deleteFile();
+            setStatus ("ESP32 SD recording: retrieval cancelled");
+            setState (RecState::Failed);
+            if (logOk) { logOut.writeText ("\n]\n", false, false, "\n"); }
+            return;
+        }
+
+        if (! transferOk)
+        {
+            board_.esp32RetrievalRetryAvailable = true;
+            setState (RecState::Failed);
+            if (logOk) { logOut.writeText ("\n]\n", false, false, "\n"); }
+            return;
+        }
+
+        // -----------------------------------------------------------------------
+        // Step 6: Whole-file CRC32 verification
+        // -----------------------------------------------------------------------
+        setState (RecState::LocalCopyWritten);
+        setStatus ("ESP32 SD: verifying whole-file CRC32...");
+
+        // Finalise running CRC.
+        const uint32_t computedFileCrc = localCrc ^ 0xFFFFFFFFu;
+        const uint32_t expectedFileCrc = static_cast<uint32_t> (
+            fileChecksumHex.getHexValue32());
+
+        const bool crcMatch = (computedFileCrc == expectedFileCrc)
+                              || fileChecksumHex.isEmpty(); // no checksum provided by firmware
+
+        if (logOk)
+        {
+            logOut.writeText (
+                "\n],\n"
+                "\"whole_file_crc_match\":" + String (crcMatch ? "true" : "false") + ",\n"
+                "\"computed_crc32\":\"" + String::toHexString ((int) computedFileCrc) + "\",\n"
+                "\"expected_crc32\":\"" + fileChecksumHex + "\"\n"
+                "}\n",
+                false, false, "\n");
+        }
+
+        if (! crcMatch)
+        {
+            setStatus ("ESP32 SD: transfer CRC mismatch! computed="
+                       + String::toHexString ((int) computedFileCrc)
+                       + " expected=" + fileChecksumHex
+                       + " — press Retry Retrieval");
+            board_.esp32RetrievalRetryAvailable = true;
+            File (tmpPath).deleteFile();
+            setState (RecState::Failed);
+            return;
+        }
+
+        // Atomically rename .tmp → .bin
+        File tmpF (tmpPath);
+        File binF (binPath);
+        if (! tmpF.moveFileTo (binF))
+        {
+            setStatus ("ESP32 SD: could not rename temp file to session_data.bin");
+            setState (RecState::Failed);
+            return;
+        }
+
+        setState (RecState::ChecksumPassed);
+        setStatus ("ESP32 SD: transfer checksum passed — running analyzer...");
+
+        // Send REC COMPLETE acknowledgement.
+        {
+            const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+            if (board_.commandSocket != nullptr)
+            {
+                char completeMsg[256];
+                snprintf (completeMsg, sizeof (completeMsg),
+                          "REC COMPLETE session_id=%s file_size=%llu file_checksum=%s checksum_type=crc32 local_transfer_id=%s\n",
+                          sessionId.toRawUTF8(),
+                          (unsigned long long) fileSize,
+                          fileChecksumHex.toRawUTF8(),
+                          String (Time::currentTimeMillis()).toRawUTF8());
+                board_.commandSocket->write (completeMsg, (int) strlen (completeMsg));
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Step 7: Write analyzer_handoff.json and attempt to run analyzer
+        // -----------------------------------------------------------------------
+        const String handoffPath  = resultDir + "\\analyzer_handoff.json";
+        const String analyzerPath = resultDir + "\\analyzer_result.json";
+        const String analyzerCmd  = "python esp32/host/analyze_sample_rate.py --format sd-bin session_data.bin";
+
+        {
+            File handoffFile (handoffPath);
+            juce::FileOutputStream handoffOut (handoffFile);
+            if (handoffOut.openedOk())
+            {
+                handoffOut.writeText (
+                    "{\n"
+                    "  \"command\": \"" + analyzerCmd + "\",\n"
+                    "  \"session_id\": \"" + sessionId + "\",\n"
+                    "  \"required\": true\n"
+                    "}\n",
+                    false, false, "\n");
+            }
+        }
+
+        // Try to run the analyzer.
+        bool analyzerPassed = false;
+        String analyzerResult;
+
+        // Build analyzer script path relative to the result directory.
+        // Script is at: <resultDir>/../../host/analyze_sample_rate.py
+        //             = C:\Users\justi\Documents\Arduino\ESP32-S3-1\results\..\..\host\...
+        // Simplify: always use the path relative to kEsp32RecordDir.
+        const String scriptPath = String (kEsp32RecordDir) + "\\..\\host\\analyze_sample_rate.py";
+        const String analyzerFullCmd = "python \"" + scriptPath + "\" --format sd-bin \""
+                                       + binPath + "\"";
+
+        juce::ChildProcess analyzerProc;
+        if (analyzerProc.start (analyzerFullCmd))
+        {
+            analyzerProc.waitForProcessToFinish (30000);
+            analyzerResult = analyzerProc.readAllProcessOutput();
+            analyzerPassed = (analyzerProc.getExitCode() == 0);
+        }
+        else
+        {
+            analyzerResult = "Analyzer not found or failed to start. Run manually: " + analyzerFullCmd;
+        }
+
+        // Write analyzer_result.json.
+        {
+            File resultFile (analyzerPath);
+            juce::FileOutputStream resultOut (resultFile);
+            if (resultOut.openedOk())
+            {
+                const String escaped = analyzerResult.replace ("\"", "\\\"")
+                                                     .replace ("\n", "\\n");
+                resultOut.writeText (
+                    "{\n"
+                    "  \"passed\": " + String (analyzerPassed ? "true" : "false") + ",\n"
+                    "  \"output\": \"" + escaped + "\"\n"
+                    "}\n",
+                    false, false, "\n");
+            }
+        }
+
+        if (analyzerPassed)
+        {
+            setState (RecState::AnalyzerPassed);
+            setStatus ("Recording saved and verified (session=" + sessionId + ")");
+        }
+        else
+        {
+            setState (RecState::ChecksumPassed);
+            setStatus ("Transfer checksum passed. Analyzer not run / failed — check analyzer_result.json. Session: " + sessionId);
+        }
+
+        std::cout << "[ESP32 retrieval] Complete. Session: " << sessionId
+                  << " | Dir: " << resultDir << std::endl;
+    }
+
+private:
+    AcqBoardRedPitaya& board_;
+
+    void sendAbort()
+    {
+        const juce::ScopedLock cmdLock (board_.esp32CommandLock);
+        if (board_.commandSocket != nullptr && ! board_.esp32PendingSessionId.isEmpty())
+        {
+            char msg[128];
+            snprintf (msg, sizeof (msg),
+                      "REC ABORT session_id=%s reason=user_cancel\n",
+                      board_.esp32PendingSessionId.toRawUTF8());
+            board_.commandSocket->write (msg, (int) strlen (msg));
+        }
+    }
+
+    static String readSocketLine (StreamingSocket* sock, int timeoutMs)
+    {
+        if (sock == nullptr) return {};
+        String line;
+        const int64 deadline = Time::currentTimeMillis() + timeoutMs;
+        while (Time::currentTimeMillis() < deadline)
+        {
+            if (! sock->waitUntilReady (true, 50)) continue;
+            char c = 0;
+            if (sock->read (&c, 1, false) <= 0) break;
+            if (c == '\n') break;
+            if (c >= 0x20 || c == '\t') line += c;
+        }
+        return line;
+    }
+
+    static String parseRecField (const String& line, const String& key)
+    {
+        const String needle = key + "=";
+        const int idx = line.indexOf (needle);
+        if (idx < 0) return {};
+        String val = line.substring (idx + needle.length());
+        const int sp = val.indexOfAnyOf (" \t\r\n");
+        if (sp >= 0) val = val.substring (0, sp);
+        return val;
+    }
+};
+
+// -----------------------------------------------------------------------------
+// startEsp32RetrievalAsync — spin up the background retrieval thread (Task 4)
+// -----------------------------------------------------------------------------
+void AcqBoardRedPitaya::startEsp32RetrievalAsync()
+{
+    // Stop any existing retrieval thread first.
+    if (esp32RetrievalThread != nullptr)
+    {
+        esp32RetrievalThread->signalThreadShouldExit();
+        esp32RetrievalThread->waitForThreadToExit (2000);
+        esp32RetrievalThread.reset();
+    }
+
+    esp32RetrievalCancelRequested.store (false);
+    esp32RetrievalThread = std::make_unique<Esp32RetrievalThread> (*this);
+    esp32RetrievalThread->startThread (juce::Thread::Priority::normal);
+}
+
+// -----------------------------------------------------------------------------
+// retryEsp32Retrieval — operator retry after failed transfer (Task 10)
+// -----------------------------------------------------------------------------
+bool AcqBoardRedPitaya::retryEsp32Retrieval()
+{
+    if (! esp32RetrievalRetryAvailable || esp32PendingSessionId.isEmpty())
+        return false;
+
+    // Restore session id from pending so the retrieval thread can use it.
+    esp32SessionId = esp32PendingSessionId;
+    esp32RetrievalRetryAvailable = false;
+    esp32RetrievalCancelRequested.store (false);
+
+    {
+        const juce::ScopedLock sl (esp32RecStatusLock);
+        esp32RecStatusText = "Retrying retrieval for session " + esp32SessionId + "...";
+    }
+    esp32RecState.store (Esp32RecState::SdFinalized);
+
+    startEsp32RetrievalAsync();
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// cancelEsp32Retrieval
+// -----------------------------------------------------------------------------
+void AcqBoardRedPitaya::cancelEsp32Retrieval()
+{
+    esp32RetrievalCancelRequested.store (true);
+
+    if (esp32RetrievalThread != nullptr)
+        esp32RetrievalThread->waitForThreadToExit (5000);
 }
