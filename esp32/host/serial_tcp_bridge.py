@@ -41,6 +41,11 @@ HEADER = struct.Struct("<iiHiii")
 HEADER_SIZE = HEADER.size
 FRAME_PAYLOAD = 8 * 2  # legacy 8 x int16
 FRAME_SIZE = HEADER_SIZE + FRAME_PAYLOAD
+SDRF_HEADER_SIZE = 64
+SDRF_MAGIC = b"SDRF"
+SDRF_TYPE_EOF = 0x02
+SDRF_TYPE_ABORT = 0x03
+SDRF_TYPE_ERROR = 0x05
 STARTED_REPLY = b"STARTED BIN:step_usb_bridge\n"
 SENSORS_REPLY = b"SENSORS:0,ICM20948\n"
 # Open Ephys Ephys Socket: OpenCV Mat depth enum (S16), not literal 16 bits.
@@ -54,7 +59,16 @@ PLUGIN_CMD_TIMEOUT = 120.0
 # Last FREQ forwarded to firmware (USB path has no REDPITAYA text reply on serial).
 _plugin_sample_rate_hz = 100
 
-_RELAY_PREFIXES = ("FREQ:", "FREQ ", "CFG ", "FILTER", "STOP")
+_RELAY_PREFIXES = (
+    "FREQ:",
+    "FREQ ",
+    "CFG ",
+    "FILTER",
+    "STOP",
+    "RECORD ",
+    "STATUS",
+    "REC ",
+)
 
 
 def _should_relay_plugin_command(line: str) -> bool:
@@ -200,6 +214,8 @@ class SerialFrameSource:
         self._csv_mode = csv_mode
         self._buf = bytearray()
         self._queue: deque[bytes] = deque(maxlen=256)
+        self._response_queue: deque[bytes] = deque(maxlen=64)
+        self._transfer_queue: deque[bytes] = deque(maxlen=64)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._bytes_received = 0
@@ -223,6 +239,24 @@ class SerialFrameSource:
             time.sleep(0.01)
         return None
 
+    def get_response(self, timeout: float = 0.5) -> bytes | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._response_queue:
+                    return self._response_queue.popleft()
+            time.sleep(0.01)
+        return None
+
+    def get_transfer_frame(self, timeout: float = 0.5) -> bytes | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._transfer_queue:
+                    return self._transfer_queue.popleft()
+            time.sleep(0.01)
+        return None
+
     def wait_for_frames(self, timeout: float) -> bool:
         """Block until at least one parsed frame is queued (does not dequeue)."""
         deadline = time.monotonic() + timeout
@@ -237,6 +271,11 @@ class SerialFrameSource:
         with self._lock:
             self._queue.clear()
 
+    def drain_control(self) -> None:
+        with self._lock:
+            self._response_queue.clear()
+            self._transfer_queue.clear()
+
     def diagnostic_hint(self) -> str | None:
         with self._lock:
             return diagnose_serial_buffer(self._buf, self._csv_mode)
@@ -247,6 +286,14 @@ class SerialFrameSource:
     def _push_frame(self, frame: bytes) -> None:
         with self._lock:
             self._queue.append(frame)
+
+    def _push_response(self, line: bytes) -> None:
+        with self._lock:
+            self._response_queue.append(line)
+
+    def _push_transfer_frame(self, frame: bytes) -> None:
+        with self._lock:
+            self._transfer_queue.append(frame)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -286,6 +333,24 @@ class SerialFrameSource:
 
     def _parse_binary(self) -> None:
         while len(self._buf) >= HEADER_SIZE:
+            if self._buf.startswith(b"REC ") or self._buf.startswith(b"SD_STATUS") or self._buf.startswith(b"STATUS"):
+                if b"\n" not in self._buf:
+                    break
+                line, _, rest = self._buf.partition(b"\n")
+                self._buf = bytearray(rest)
+                self._push_response(bytes(line + b"\n"))
+                continue
+            if self._buf.startswith(SDRF_MAGIC):
+                if len(self._buf) < SDRF_HEADER_SIZE:
+                    break
+                payload_len = struct.unpack_from("<I", self._buf, 36)[0]
+                total = SDRF_HEADER_SIZE + payload_len
+                if len(self._buf) < total:
+                    break
+                frame = bytes(self._buf[:total])
+                del self._buf[:total]
+                self._push_transfer_frame(frame)
+                continue
             hdr = HEADER.unpack_from(self._buf, 0)
             _off, num_bytes, _bd, elem, _n_ch, _n_per = hdr
             if not is_valid_header(hdr):
@@ -336,6 +401,48 @@ def forward_serial_command(source: SerialFrameSource, command: str) -> None:
     source.write_line(line + "\n")
 
 
+async def relay_rec_command(
+    writer: asyncio.StreamWriter,
+    source: SerialFrameSource,
+    command: str,
+    timeout: float = 3.0,
+) -> None:
+    """Relay one rec-v1 command and return text or SDRF frames to the TCP client."""
+    loop = asyncio.get_event_loop()
+    source.drain_control()
+    forward_serial_command(source, command)
+    upper = command.upper()
+
+    if upper.startswith("REC GET"):
+        first = True
+        while True:
+            response = await loop.run_in_executor(None, source.get_response, 0.05)
+            if response is not None:
+                writer.write(response)
+                await writer.drain()
+                return
+            frame = await loop.run_in_executor(
+                None, source.get_transfer_frame, timeout if first else 1.0
+            )
+            first = False
+            if frame is None:
+                writer.write(b"REC ERR code=sd_error retryable=true detail=bridge_timeout\n")
+                await writer.drain()
+                return
+            writer.write(frame)
+            await writer.drain()
+            frame_type = frame[5] if len(frame) > 5 else 0
+            if frame_type in (SDRF_TYPE_EOF, SDRF_TYPE_ABORT, SDRF_TYPE_ERROR):
+                return
+
+    response = await loop.run_in_executor(None, source.get_response, timeout)
+    if response is None:
+        writer.write(b"REC ERR code=internal_error retryable=true detail=bridge_timeout\n")
+    else:
+        writer.write(response)
+    await writer.drain()
+
+
 async def handle_plugin_handshake(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -380,8 +487,11 @@ async def handle_plugin_handshake(
             return
         if _should_relay_plugin_command(line):
             logger.info("Plugin → serial (pre-START): %s", line)
-            forward_serial_command(source, line)
-            _note_forwarded_plugin_command(line)
+            if line.upper().startswith("REC "):
+                await relay_rec_command(writer, source, line)
+            else:
+                forward_serial_command(source, line)
+                _note_forwarded_plugin_command(line)
             continue
         logger.debug("Plugin ignored command while waiting for START: %r", line)
 
@@ -427,6 +537,20 @@ async def handle_client(
             return
 
         first_line = _first_command_line(peek)
+        if first_line.upper().startswith("REC "):
+            logger.info("rec-v1 command mode")
+            await relay_rec_command(writer, source, first_line)
+            while True:
+                line = await read_line(reader)
+                if not line:
+                    break
+                if line.upper().startswith("REC "):
+                    await relay_rec_command(writer, source, line)
+                elif _should_relay_plugin_command(line):
+                    forward_serial_command(source, line)
+                    _note_forwarded_plugin_command(line)
+            return
+
         if first_line.upper().startswith("REDPITAYA"):
             logger.info("Plugin handshake auto-detected (REDPITAYA)")
             await handle_plugin_handshake(
@@ -463,6 +587,7 @@ async def handle_client(
 
 async def relay_plugin_commands(
     reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
     source: SerialFrameSource,
 ) -> None:
     """Forward FREQ/CFG/FILTER lines from Plugin to USB serial during acquisition."""
@@ -479,8 +604,11 @@ async def relay_plugin_commands(
                 continue
             if _should_relay_plugin_command(line):
                 logger.info("Plugin → serial: %s", line)
-                forward_serial_command(source, line)
-                _note_forwarded_plugin_command(line)
+                if upper.startswith("REC "):
+                    await relay_rec_command(writer, source, line)
+                else:
+                    forward_serial_command(source, line)
+                    _note_forwarded_plugin_command(line)
     except (asyncio.CancelledError, ConnectionResetError):
         pass
 
@@ -500,7 +628,7 @@ async def stream_frames(
     sent = 0
     relay_task = None
     if command_reader is not None:
-        relay_task = asyncio.create_task(relay_plugin_commands(command_reader, source))
+        relay_task = asyncio.create_task(relay_plugin_commands(command_reader, writer, source))
     try:
         while True:
             timeout = first_frame_timeout if first_frame else 1.0

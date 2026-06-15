@@ -74,7 +74,7 @@ extern "C" {
 
 #define TCP_PORT 5000
 #define SAMPLE_HZ_DEFAULT 100
-#define NUM_CHANNELS 11
+#define NUM_CHANNELS 13
 
 #define ICM_BANK2_ACCEL_CONFIG_1 0x14
 #define ICM_BANK2_GYRO_CONFIG_1 0x01
@@ -106,8 +106,20 @@ extern "C" {
 #define ICM_REG_BANK_SEL 0x7F
 #define ICM_WHO_AM_I 0x00
 #define ICM_PWR_MGMT_1 0x06
+#define ICM_USER_CTRL 0x03
+#define ICM_INT_PIN_CFG 0x0F
 #define ICM_ACCEL_XOUT_H 0x2D
 #define ICM20948_WHOAMI_VAL 0xEA
+
+#define AK09916_ADDR 0x0C
+#define AK09916_WIA2 0x01
+#define AK09916_ST1 0x10
+#define AK09916_HXL 0x11
+#define AK09916_ST2 0x18
+#define AK09916_CNTL2 0x31
+#define AK09916_CNTL3 0x32
+#define AK09916_WIA2_VAL 0x09
+#define AK09916_MODE_CONT_100HZ 0x08
 
 #pragma pack(push, 1)
 struct OeHeader {
@@ -139,6 +151,29 @@ struct SdLogRecord {
 
 #define SD_LOG_MAGIC 0x31505453UL  // "STP1" little-endian
 #define SD_LOG_VERSION 1
+#define REC_RECONNECT_GRACE_MS 90000UL
+#define REC_MAX_CHUNK 1024UL
+#define SDRF_HEADER_LEN 64
+#define SDRF_TYPE_DATA 0x01
+#define SDRF_TYPE_EOF 0x02
+
+#pragma pack(push, 1)
+struct SdrfHeader {
+  char magic[4];
+  uint8_t frame_version;
+  uint8_t frame_type;
+  uint16_t header_length;
+  uint8_t session_id[16];
+  uint32_t chunk_index;
+  uint64_t byte_offset;
+  uint32_t payload_length;
+  uint64_t total_file_size;
+  uint32_t header_crc32;
+  uint32_t payload_checksum;
+  uint32_t flags;
+  uint32_t reserved;
+};
+#pragma pack(pop)
 
 WiFiServer server(TCP_PORT);
 WiFiClient client;
@@ -149,12 +184,13 @@ bool wifi_soft_ap = false;
 uint32_t seq = 0;
 int16_t channels[NUM_CHANNELS];
 bool icm_ok = false;
+bool mag_ok = false;
 uint8_t icm_addr = ICM20948_ADDR;
 uint32_t boot_ms = 0;
 bool csv_banner_sent = false;
 uint32_t last_status_ms = 0;
 
-// DIO ch6: bit0 = level (1 idle/high, 0 pressed to GND); bits1-15 = debounced edge count
+// DIO input is kept for commands/sync, but it is not part of the 13-channel OE stream.
 struct {
   bool stable_high;
   bool pending_raw;
@@ -178,6 +214,15 @@ static uint32_t g_max_sd_write_us = 0;
 static uint32_t g_max_loop_us = 0;
 static uint32_t g_loop_overruns = 0;
 static char g_sd_path[48] = "/step_session.bin";
+static char g_rec_session_id[33] = "none";
+static char g_rec_state[32] = "idle";
+static char g_transfer_state[16] = "none";
+static char g_finalization_reason[32] = "none";
+static char g_last_rec_error[32] = "none";
+static uint64_t g_final_file_size = 0;
+static uint32_t g_final_file_checksum = 0;
+static uint32_t g_rec_grace_deadline_ms = 0;
+static bool g_transfer_active = false;
 
 static const float kAccLsbPerG[4] = {16384.0f, 8192.0f, 4096.0f, 2048.0f};
 static const float kGyrLsbPerDps[4] = {131.072f, 65.536f, 32.768f, 16.384f};
@@ -187,6 +232,8 @@ static const float kMagRateHz = 100.0f;
 
 static VQF g_vqf;
 static bool g_vqf_inited = false;
+static int16_t g_last_mag[3] = {0, 0, 0};
+static bool g_have_mag = false;
 
 static bool useWifi() { return ENABLE_TCP || ENABLE_ESPNOW; }
 
@@ -269,17 +316,19 @@ static void packChannelsFromImu(const int16_t imu[6], const int16_t *mag_or_null
   channels[3] = imu[3];
   channels[4] = imu[4];
   channels[5] = imu[5];
-  channels[6] = packDioCh6();
-  channels[7] = 0;
-  channels[8] = 0;
+  channels[6] = mag_or_null != nullptr ? mag_or_null[0] : 0;
+  channels[7] = mag_or_null != nullptr ? mag_or_null[1] : 0;
+  channels[8] = mag_or_null != nullptr ? mag_or_null[2] : 0;
   channels[9] = 0;
   channels[10] = 0;
+  channels[11] = 0;
+  channels[12] = 0;
 
   if (!g_filter_on)
     return;
 
   vqfUpdateFromImu(imu, mag_or_null, mag_fresh);
-  vqfReadQuatQ15(&channels[7], mag_or_null != nullptr && mag_fresh);
+  vqfReadQuatQ15(&channels[9], mag_or_null != nullptr && g_have_mag);
 }
 
 static int parseFreqHz(const String &line) {
@@ -429,7 +478,7 @@ static void initDio() {
   dio_state.pending_since_ms = millis();
   Serial.printf("DIO: GPIO%d (pad D0) pull-up — initial level=%d (1=idle, 0=GND)\n",
                 PIN_DIO, level ? 1 : 0);
-  Serial.println("DIO ch6: bit0=level, bits1-15=edge_count (Open Ephys int16)");
+  Serial.println("DIO: input active for sync/commands; not included in 13-channel OE stream");
 }
 
 static void updateDio() {
@@ -497,6 +546,98 @@ static bool readImuRaw(int16_t out[6]) {
   return true;
 }
 
+static bool akWrite(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(AK09916_ADDR);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+static bool akRead(uint8_t reg, uint8_t *val) {
+  Wire.beginTransmission(AK09916_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(AK09916_ADDR, (uint8_t)1) != 1) return false;
+  *val = Wire.read();
+  return true;
+}
+
+static bool initAk09916() {
+  if (!icm_ok) return false;
+
+  icmSelectBank(icm_addr, 0);
+  icmWriteAddr(icm_addr, ICM_USER_CTRL, 0x00);
+  icmWriteAddr(icm_addr, ICM_INT_PIN_CFG, 0x02);  // bypass internal I2C master
+  delay(10);
+
+  uint8_t who = 0;
+  if (!akRead(AK09916_WIA2, &who) || who != AK09916_WIA2_VAL) {
+    Serial.printf("AK09916: unavailable at 0x%02X WIA2=0x%02X\n", AK09916_ADDR, who);
+    return false;
+  }
+
+  akWrite(AK09916_CNTL3, 0x01);
+  delay(10);
+  if (!akWrite(AK09916_CNTL2, AK09916_MODE_CONT_100HZ)) {
+    Serial.println("AK09916: failed to enter 100 Hz continuous mode");
+    return false;
+  }
+
+  Serial.println("AK09916: OK at I2C 0x0C, continuous 100 Hz");
+  return true;
+}
+
+static bool readMagRaw(int16_t out[3], bool *fresh) {
+  if (fresh != nullptr) *fresh = false;
+  if (!mag_ok) return false;
+
+  uint8_t st1 = 0;
+  if (!akRead(AK09916_ST1, &st1)) return false;
+  if ((st1 & 0x01) == 0) {
+    if (g_have_mag) {
+      out[0] = g_last_mag[0];
+      out[1] = g_last_mag[1];
+      out[2] = g_last_mag[2];
+      return true;
+    }
+    return false;
+  }
+
+  Wire.beginTransmission(AK09916_ADDR);
+  Wire.write(AK09916_HXL);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(AK09916_ADDR, (uint8_t)8) != 8) return false;
+
+  auto read16le = []() {
+    uint8_t lo = Wire.read();
+    uint8_t hi = Wire.read();
+    return (int16_t)((uint16_t)lo | ((uint16_t)hi << 8));
+  };
+
+  int16_t mx = read16le();
+  int16_t my = read16le();
+  int16_t mz = read16le();
+  (void)Wire.read();
+  uint8_t st2 = Wire.read();
+
+  if ((st2 & 0x08) != 0) {
+    if (g_have_mag) {
+      out[0] = g_last_mag[0];
+      out[1] = g_last_mag[1];
+      out[2] = g_last_mag[2];
+      return true;
+    }
+    return false;
+  }
+
+  g_last_mag[0] = out[0] = mx;
+  g_last_mag[1] = out[1] = my;
+  g_last_mag[2] = out[2] = mz;
+  g_have_mag = true;
+  if (fresh != nullptr) *fresh = true;
+  return true;
+}
+
 static void readImu(int16_t out[6]) {
   if (icm_ok && readImuRaw(out)) return;
 
@@ -505,6 +646,14 @@ static void readImu(int16_t out[6]) {
   out[1] = (int16_t)(500 * cosf(t));
   out[2] = 16384;
   out[3] = out[4] = out[5] = 0;
+}
+
+static void readMag(int16_t out[3], bool *fresh) {
+  if (readMagRaw(out, fresh)) return;
+  out[0] = g_last_mag[0];
+  out[1] = g_last_mag[1];
+  out[2] = g_last_mag[2];
+  if (fresh != nullptr) *fresh = false;
 }
 
 // Open Ephys header offset field (int32 LE): low 32 bits of esp_timer_get_time() µs since boot.
@@ -541,9 +690,10 @@ static void packAndSendTcp() {
 
 static void sendSerialBench() {
 #if ENABLE_SERIAL_BENCH
+  if (g_transfer_active) return;
   if (!csv_banner_sent) {
-    Serial.printf("# STEP boot complete icm=%s addr=0x%02X dio_ch6=level|edges\n",
-                  icm_ok ? "OK" : "FALLBACK", icm_addr);
+    Serial.printf("# STEP boot complete icm=%s addr=0x%02X mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz\n",
+                  icm_ok ? "OK" : "FALLBACK", icm_addr, mag_ok ? "OK" : "FALLBACK");
     csv_banner_sent = true;
   }
 #if SERIAL_OUTPUT_BINARY
@@ -552,11 +702,107 @@ static void sendSerialBench() {
   Serial.write((uint8_t *)&hdr, sizeof(hdr));
   Serial.write((uint8_t *)channels, sizeof(channels));
 #else
-  Serial.printf("%lu,%d,%d,%d,%d,%d,%d,%d,%d\n",
+  Serial.printf("%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                 (unsigned long)seq, channels[0], channels[1], channels[2],
-                channels[3], channels[4], channels[5], channels[6], channels[7]);
+                channels[3], channels[4], channels[5], channels[6], channels[7],
+                channels[8], channels[9], channels[10], channels[11], channels[12]);
 #endif
 #endif
+}
+
+static void sdRecordStop();
+
+static uint32_t recCrc32Update(uint32_t crc, const uint8_t *data, size_t len) {
+  crc = ~crc;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int bit = 0; bit < 8; bit++) {
+      uint32_t mask = -(crc & 1u);
+      crc = (crc >> 1) ^ (0xEDB88320UL & mask);
+    }
+  }
+  return ~crc;
+}
+
+static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
+#if ENABLE_SD
+  uint8_t buf[128];
+  uint32_t crc = 0;
+  uint64_t total = 0;
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    if (size_out) *size_out = 0;
+    return 0;
+  }
+  while (f.available()) {
+    size_t n = f.read(buf, sizeof(buf));
+    if (n == 0) break;
+    crc = recCrc32Update(crc, buf, n);
+    total += n;
+  }
+  f.close();
+  if (size_out) *size_out = total;
+  return crc;
+#else
+  if (size_out) *size_out = 0;
+  return 0;
+#endif
+}
+
+static void makeSessionId() {
+  snprintf(g_rec_session_id, sizeof(g_rec_session_id), "%08lx%08lx",
+           (unsigned long)millis(), (unsigned long)seq);
+}
+
+static uint32_t recGraceRemainingMs() {
+  if (strcmp(g_rec_state, "host-disconnected-grace") != 0 || g_rec_grace_deadline_ms == 0)
+    return 0;
+  uint32_t now = millis();
+  return (int32_t)(g_rec_grace_deadline_ms - now) > 0 ? g_rec_grace_deadline_ms - now : 0;
+}
+
+static void recMarkControlConnected() {
+  if (strcmp(g_rec_state, "host-disconnected-grace") == 0) {
+    strncpy(g_rec_state, "recording", sizeof(g_rec_state) - 1);
+    g_rec_grace_deadline_ms = 0;
+  }
+}
+
+static void recMarkControlDisconnected() {
+  if (g_sd_recording && strcmp(g_rec_state, "recording") == 0) {
+    strncpy(g_rec_state, "host-disconnected-grace", sizeof(g_rec_state) - 1);
+    g_rec_grace_deadline_ms = millis() + REC_RECONNECT_GRACE_MS;
+  }
+}
+
+static void recMaybeFinalizeTimeout() {
+  if (strcmp(g_rec_state, "host-disconnected-grace") == 0 && recGraceRemainingMs() == 0) {
+    strncpy(g_finalization_reason, "disconnect_timeout", sizeof(g_finalization_reason) - 1);
+    sdRecordStop();
+  }
+}
+
+static void writeSdrfFrame(const char *session_id, uint8_t type, uint32_t chunk_index,
+                           uint64_t offset, const uint8_t *payload, uint32_t payload_len,
+                           uint64_t total_size, uint32_t flags) {
+  SdrfHeader hdr = {};
+  hdr.magic[0] = 'S'; hdr.magic[1] = 'D'; hdr.magic[2] = 'R'; hdr.magic[3] = 'F';
+  hdr.frame_version = 1;
+  hdr.frame_type = type;
+  hdr.header_length = SDRF_HEADER_LEN;
+  size_t sid_len = strlen(session_id);
+  if (sid_len > sizeof(hdr.session_id)) sid_len = sizeof(hdr.session_id);
+  memcpy(hdr.session_id, session_id, sid_len);
+  hdr.chunk_index = chunk_index;
+  hdr.byte_offset = offset;
+  hdr.payload_length = payload_len;
+  hdr.total_file_size = total_size;
+  hdr.payload_checksum = payload && payload_len ? recCrc32Update(0, payload, payload_len) : 0;
+  hdr.flags = flags;
+  hdr.header_crc32 = 0;
+  hdr.header_crc32 = recCrc32Update(0, (const uint8_t *)&hdr, sizeof(hdr));
+  Serial.write((uint8_t *)&hdr, sizeof(hdr));
+  if (payload && payload_len) Serial.write(payload, payload_len);
 }
 
 static void logSd() {
@@ -595,6 +841,8 @@ static bool sdRecordStart(const char *path_or_null) {
 #if ENABLE_SD
   if (!sdEnsureReady()) {
     g_sd_write_errors++;
+    strncpy(g_rec_state, "failed", sizeof(g_rec_state) - 1);
+    strncpy(g_last_rec_error, "sd_not_ready", sizeof(g_last_rec_error) - 1);
     Serial.println("SD_STATUS enabled=1 ready=0 recording=0 error=begin_failed");
     return false;
   }
@@ -604,18 +852,20 @@ static bool sdRecordStart(const char *path_or_null) {
     g_sd_file.close();
   }
 
+  makeSessionId();
   if (path_or_null && path_or_null[0]) {
     strncpy(g_sd_path, path_or_null, sizeof(g_sd_path) - 1);
     g_sd_path[sizeof(g_sd_path) - 1] = '\0';
   } else {
-    strncpy(g_sd_path, "/step_session.bin", sizeof(g_sd_path) - 1);
-    g_sd_path[sizeof(g_sd_path) - 1] = '\0';
+    snprintf(g_sd_path, sizeof(g_sd_path), "/step_%s.bin", g_rec_session_id);
   }
 
   g_sd_file = SD.open(g_sd_path, FILE_WRITE);
   if (!g_sd_file) {
     g_sd_recording = false;
     g_sd_write_errors++;
+    strncpy(g_rec_state, "failed", sizeof(g_rec_state) - 1);
+    strncpy(g_last_rec_error, "open_failed", sizeof(g_last_rec_error) - 1);
     Serial.printf("SD_STATUS enabled=1 ready=1 recording=0 error=open_failed path=%s\n", g_sd_path);
     return false;
   }
@@ -623,6 +873,12 @@ static bool sdRecordStart(const char *path_or_null) {
   g_sd_saved_samples = 0;
   g_sd_write_errors = 0;
   g_max_sd_write_us = 0;
+  g_final_file_size = 0;
+  g_final_file_checksum = 0;
+  strncpy(g_rec_state, "starting", sizeof(g_rec_state) - 1);
+  strncpy(g_transfer_state, "none", sizeof(g_transfer_state) - 1);
+  strncpy(g_finalization_reason, "none", sizeof(g_finalization_reason) - 1);
+  strncpy(g_last_rec_error, "none", sizeof(g_last_rec_error) - 1);
 
   SdLogHeader hdr = {};
   hdr.magic = SD_LOG_MAGIC;
@@ -637,6 +893,7 @@ static bool sdRecordStart(const char *path_or_null) {
   }
 
   g_sd_recording = true;
+  strncpy(g_rec_state, "recording", sizeof(g_rec_state) - 1);
   Serial.printf("SD_STATUS enabled=1 ready=1 recording=1 path=%s sample_hz=%u\n",
                 g_sd_path, (unsigned)g_sample_hz);
   return true;
@@ -648,6 +905,7 @@ static bool sdRecordStart(const char *path_or_null) {
 
 static void sdRecordStop() {
 #if ENABLE_SD
+  strncpy(g_rec_state, "finalizing", sizeof(g_rec_state) - 1);
   if (g_sd_file) {
     uint32_t t0 = micros();
     g_sd_file.flush();
@@ -656,6 +914,12 @@ static void sdRecordStop() {
     g_sd_file.close();
   }
   g_sd_recording = false;
+  g_final_file_checksum = checksumSdFile(g_sd_path, &g_final_file_size);
+  if (strcmp(g_finalization_reason, "none") == 0) {
+    strncpy(g_finalization_reason, "manual_stop", sizeof(g_finalization_reason) - 1);
+  }
+  strncpy(g_rec_state, "finalized", sizeof(g_rec_state) - 1);
+  g_rec_grace_deadline_ms = 0;
   Serial.printf("SD_STATUS enabled=1 ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_path,
@@ -669,6 +933,7 @@ static void sdRecordStop() {
 
 static void printAcqStatus() {
   Serial.printf("STATUS seq=%lu generated=%llu sample_hz=%u filter=%d streaming=%d "
+                "icm_ok=%d mag_ok=%d "
                 "sd_enabled=%d sd_ready=%d sd_recording=%d sd_saved=%llu sd_errors=%llu "
                 "max_sd_write_us=%lu max_loop_us=%lu loop_overruns=%lu\n",
                 (unsigned long)seq,
@@ -676,6 +941,8 @@ static void printAcqStatus() {
                 (unsigned)g_sample_hz,
                 g_filter_on ? 1 : 0,
                 streaming ? 1 : 0,
+                icm_ok ? 1 : 0,
+                mag_ok ? 1 : 0,
 #if ENABLE_SD
                 1,
 #else
@@ -690,17 +957,226 @@ static void printAcqStatus() {
                 (unsigned long)g_loop_overruns);
 }
 
+static void recReplyToHost(const char *text);
+
+static void printRecStatus() {
+  char buf[1024];
+  snprintf(buf, sizeof(buf),
+                "REC STATUS_OK protocol=rec-v1 capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream transport=usb_bridge sd_ready=%d sd_open=%d recording_state=%s transfer_state=%s session_id=%s sd_path_token=sd:%s generated_samples=%llu saved_samples=%llu queue_drops=0 write_errors=%llu max_write_latency_us=%lu overrun_count=%lu finalization_reason=%s file_byte_size=%llu file_checksum=%08lx checksum_type=crc32 last_error=%s grace_ms_remaining=%lu local_result_path=unknown local_analyzer_result=unknown\n",
+                g_sd_ready ? 1 : 0,
+                g_sd_recording ? 1 : 0,
+                g_rec_state,
+                g_transfer_state,
+                g_rec_session_id,
+                g_rec_session_id,
+                (unsigned long long)g_generated_samples,
+                (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)g_sd_write_errors,
+                (unsigned long)g_max_sd_write_us,
+                (unsigned long)g_loop_overruns,
+                g_finalization_reason,
+                (unsigned long long)g_final_file_size,
+                (unsigned long)g_final_file_checksum,
+                g_last_rec_error,
+                (unsigned long)recGraceRemainingMs());
+  recReplyToHost(buf);
+}
+
 static void replyToHost(const char *text) {
 #if ENABLE_TCP && !ENABLE_SERIAL_BENCH
   if (client && client.connected())
     client.print(text);
 #else
-  (void)text;  // Plugin USB path: bridge answers REDPITAYA/START on TCP; optional log only
+  (void)text;  // Plugin USB path: bridge answers legacy handshakes on TCP.
 #endif
 }
 
+static void recReplyToHost(const char *text) {
+#if ENABLE_TCP && !ENABLE_SERIAL_BENCH
+  if (client && client.connected())
+    client.print(text);
+#else
+  Serial.print(text);
+#endif
+}
+
+static bool recFieldValue(const String &line, const char *key, char *buf, size_t len) {
+  String needle = String(key) + "=";
+  int start = line.indexOf(needle);
+  if (start < 0 || len == 0) return false;
+  start += needle.length();
+  int end = line.indexOf(' ', start);
+  if (end < 0) end = line.length();
+  String value = line.substring(start, end);
+  value.toCharArray(buf, len);
+  return true;
+}
+
+#define replyToHost recReplyToHost
+static void handleRecLine(const String &line) {
+  if (line.startsWith("REC HELLO")) {
+    if (line.indexOf("protocol_min=rec-v1") < 0) {
+      replyToHost("REC ERR code=unsupported_protocol retryable=false detail=protocol_min\n");
+      return;
+    }
+    recMarkControlConnected();
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "REC HELLO_OK protocol=rec-v1 firmware=arduino-step-%s transport=usb_bridge capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream max_chunk=%lu analyzer=sd-bin-v1 grace_ms=%lu\n",
+             FIRMWARE_VERSION, (unsigned long)REC_MAX_CHUNK, (unsigned long)REC_RECONNECT_GRACE_MS);
+    replyToHost(buf);
+    return;
+  }
+
+  if (line.startsWith("REC START")) {
+    if (g_sd_recording) {
+      char err[128];
+      snprintf(err, sizeof(err), "REC ERR code=already_recording session_id=%s retryable=false detail=active\n", g_rec_session_id);
+      replyToHost(err);
+      return;
+    }
+    bool ok = sdRecordStart(nullptr);
+    if (!ok) {
+      replyToHost("REC ERR code=sd_not_ready retryable=true detail=start_failed\n");
+      return;
+    }
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "REC STARTED session_id=%s sd_path_token=sd:%s recording_state=recording generated_samples=%llu saved_samples=%llu\n",
+             g_rec_session_id, g_rec_session_id,
+             (unsigned long long)g_generated_samples,
+             (unsigned long long)g_sd_saved_samples);
+    replyToHost(buf);
+    return;
+  }
+
+  if (line.startsWith("REC STATUS")) {
+    printRecStatus();
+    return;
+  }
+
+  if (line.startsWith("REC STOP")) {
+    if (!g_sd_recording) {
+      char err[128];
+      snprintf(err, sizeof(err), "REC ERR code=not_recording session_id=%s retryable=false detail=idle\n", g_rec_session_id);
+      replyToHost(err);
+      return;
+    }
+    strncpy(g_finalization_reason, "manual_stop", sizeof(g_finalization_reason) - 1);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "REC FINALIZING session_id=%s\n", g_rec_session_id);
+    replyToHost(buf);
+    sdRecordStop();
+    snprintf(buf, sizeof(buf), "REC FINALIZED session_id=%s\n", g_rec_session_id);
+    replyToHost(buf);
+    return;
+  }
+
+  if (line.startsWith("REC SESSION")) {
+    if (g_sd_recording) {
+      replyToHost("REC ERR code=busy_recording retryable=true detail=session\n");
+      return;
+    }
+    if (strcmp(g_rec_state, "finalized") != 0 || strcmp(g_rec_session_id, "none") == 0) {
+      replyToHost("REC ERR code=not_found retryable=false detail=session\n");
+      return;
+    }
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "REC SESSION_OK session_id=%s sd_path_token=sd:%s file_size=%llu file_checksum=%08lx checksum_type=crc32 sample_count=%llu finalized_at=unknown finalization_reason=%s analyzer_format=sd-bin-v1\n",
+             g_rec_session_id, g_rec_session_id,
+             (unsigned long long)g_final_file_size,
+             (unsigned long)g_final_file_checksum,
+             (unsigned long long)g_sd_saved_samples,
+             g_finalization_reason);
+    replyToHost(buf);
+    return;
+  }
+
+  if (line.startsWith("REC GET")) {
+    if (g_sd_recording) {
+      replyToHost("REC ERR code=busy_recording retryable=true detail=active\n");
+      return;
+    }
+    if (strcmp(g_rec_state, "finalized") != 0) {
+      replyToHost("REC ERR code=not_finalized retryable=true detail=session\n");
+      return;
+    }
+    char off_buf[24], len_buf[16], idx_buf[16];
+    uint64_t offset = recFieldValue(line, "offset", off_buf, sizeof(off_buf)) ? strtoull(off_buf, nullptr, 10) : 0;
+    uint32_t length = recFieldValue(line, "length", len_buf, sizeof(len_buf)) ? (uint32_t)strtoul(len_buf, nullptr, 10) : REC_MAX_CHUNK;
+    uint32_t chunk_index = recFieldValue(line, "chunk_index", idx_buf, sizeof(idx_buf)) ? (uint32_t)strtoul(idx_buf, nullptr, 10) : 0;
+    if (offset > g_final_file_size) {
+      replyToHost("REC ERR code=offset_out_of_range retryable=false detail=offset\n");
+      return;
+    }
+    if (length > REC_MAX_CHUNK) length = REC_MAX_CHUNK;
+    if (offset + length > g_final_file_size) length = (uint32_t)(g_final_file_size - offset);
+    File f = SD.open(g_sd_path, FILE_READ);
+    if (!f) {
+      replyToHost("REC ERR code=sd_error retryable=true detail=read\n");
+      return;
+    }
+    if (!f.seek(offset)) {
+      f.close();
+      replyToHost("REC ERR code=offset_out_of_range retryable=false detail=seek\n");
+      return;
+    }
+    uint8_t buf[REC_MAX_CHUNK];
+    size_t got = f.read(buf, length);
+    f.close();
+    strncpy(g_transfer_state, "chunking", sizeof(g_transfer_state) - 1);
+    g_transfer_active = true;
+    writeSdrfFrame(g_rec_session_id, SDRF_TYPE_DATA, chunk_index, offset, buf, got,
+                   g_final_file_size, offset + got >= g_final_file_size ? 0x04 : 0);
+    if (offset + got >= g_final_file_size) {
+      writeSdrfFrame(g_rec_session_id, SDRF_TYPE_EOF, chunk_index + 1, g_final_file_size,
+                     nullptr, 0, g_final_file_size, 0);
+    }
+    g_transfer_active = false;
+    return;
+  }
+
+  if (line.startsWith("REC COMPLETE")) {
+    strncpy(g_transfer_state, "complete", sizeof(g_transfer_state) - 1);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "REC COMPLETE_OK session_id=%s transfer_state=complete\n", g_rec_session_id);
+    replyToHost(buf);
+    return;
+  }
+
+  if (line.startsWith("REC ABORT")) {
+    strncpy(g_transfer_state, "aborted", sizeof(g_transfer_state) - 1);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "REC ABORTED session_id=%s transfer_state=aborted\n", g_rec_session_id);
+    replyToHost(buf);
+    return;
+  }
+
+  if (line.startsWith("REC CLEAR")) {
+    char scope[24];
+    if (recFieldValue(line, "scope", scope, sizeof(scope)) && strcmp(scope, "errors") == 0) {
+      strncpy(g_last_rec_error, "none", sizeof(g_last_rec_error) - 1);
+      replyToHost("REC CLEAR_OK scope=errors\n");
+      return;
+    }
+    if (recFieldValue(line, "scope", scope, sizeof(scope)) && strcmp(scope, "transfer") == 0) {
+      strncpy(g_transfer_state, "none", sizeof(g_transfer_state) - 1);
+      replyToHost("REC CLEAR_OK scope=transfer\n");
+      return;
+    }
+    replyToHost("REC ERR code=invalid_scope retryable=false detail=clear\n");
+    return;
+  }
+
+  replyToHost("REC ERR code=unsupported retryable=false detail=command\n");
+}
+#undef replyToHost
+
 static void handleLine(const String &line) {
-  if (line.startsWith("REDPITAYA")) {
+  if (line.startsWith("REC ")) {
+    handleRecLine(line);
+  } else if (line.startsWith("REDPITAYA")) {
     char buf[96];
     snprintf(buf, sizeof(buf),
              "%d channels; sample_rate=%u; node=esp32s3_arduino; filter=%s\n",
@@ -1013,6 +1489,9 @@ static void maybeRepeatStatus() {
   if (!icm_ok) {
     Serial.println("ICM20948: synthetic fallback — check 3V3, GND, SDA->D4, SCL->D5, addr 0x68/0x69");
   }
+  if (!mag_ok) {
+    Serial.println("MAG unavailable: ch6-8=0, VQF 6-DOF only (no heading). See boot log for cause.");
+  }
 #endif
 }
 
@@ -1030,6 +1509,13 @@ void setup() {
 
   printBootDiagnostics();
   icm_ok = initIcm20948();
+  mag_ok = initAk09916();
+  if (!mag_ok) {
+    Serial.println("WARNING: AK09916 magnetometer not found.");
+    Serial.println("  ch[6..8] will be 0; VQF quaternion is 6-DOF only (no yaw/heading).");
+    Serial.println("  Causes: XIAO non-Sense variant (no AK09916); ICM bypass I2C not releasing");
+    Serial.println("  (USER_CTRL); AK09916 needs power-cycle; board wiring missing SDA/SCL to ICM.");
+  }
 
   setupWifi();
   setupEspNow();
@@ -1047,7 +1533,7 @@ void setup() {
   Serial.println("Serial bench active @115200");
   Serial.println(SERIAL_OUTPUT_BINARY
                      ? "Format: Open Ephys binary on Serial"
-                     : "Format: CSV seq,ax,ay,az,gx,gy,gz,dio,cam");
+                     : "Format: CSV seq,ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz");
 #endif
 
   boot_ms = millis();
@@ -1057,14 +1543,17 @@ void setup() {
 
 void loop() {
   pollSerialCommands();
+  recMaybeFinalizeTimeout();
 
 #if ENABLE_TCP && !ENABLE_SERIAL_BENCH
   if (wifi_up) {
     if (!client || !client.connected()) {
+      recMarkControlDisconnected();
       WiFiClient incoming = server.available();
       if (incoming && incoming.connected()) {
         client = incoming;
         streaming = false;
+        recMarkControlConnected();
         Serial.printf("Client connected from %s\n",
                       client.remoteIP().toString().c_str());
       }
@@ -1093,9 +1582,12 @@ void loop() {
   g_sample_last_us = now;
 
   int16_t imu[6];
+  int16_t mag[3];
+  bool mag_fresh = false;
   readImu(imu);
+  readMag(mag, &mag_fresh);
   updateDio();
-  packChannelsFromImu(imu, nullptr, false);
+  packChannelsFromImu(imu, mag_ok ? mag : nullptr, mag_fresh);
 
   sendEspNowSync();
   packAndSendTcp();
