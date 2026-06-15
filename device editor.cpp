@@ -657,8 +657,22 @@ void DeviceEditor::syncRecordButtonForBoardType()
 
     if (rp->getIsEsp32Node())
     {
-        recordButton->setEnabled (true);
-        recordButton->setTooltip ("Record acquisition data to the ESP32 SD card.");
+        if (rp->esp32RecV1Supported)
+        {
+            recordButton->setEnabled (true);
+            recordButton->setTooltip (
+                "Record to ESP32 SD card using rec-v1 protocol.\n"
+                "Press once to start, press again to stop, finalize, and retrieve.\n"
+                "Status bar shows: command sent → confirmed → finalizing → retrieving → verified.");
+        }
+        else
+        {
+            recordButton->setEnabled (true);
+            recordButton->setTooltip (
+                "ESP32 SD recording requires firmware with rec-v1 support.\n"
+                "Update firmware to enable SD recording.\n"
+                "Legacy CSV recording to host PC is still available with old firmware.");
+        }
     }
     else
     {
@@ -1060,34 +1074,68 @@ void DeviceEditor::buttonClicked (Button* button)
     */
     if (button == recordButton.get() && acquisitionIsActive)
     {
+        // Determine if we are talking to an ESP32 node with rec-v1 support.
+        auto* rp = (board != nullptr && board->getBoardType() == AcquisitionBoard::BoardType::RedPitaya)
+                    ? static_cast<AcqBoardRedPitaya*> (board) : nullptr;
+        const bool isEsp32 = (rp != nullptr && rp->getIsEsp32Node());
+
         if (recordButton->getToggleState())
         {
             if (board->sendRecordOnCommand())
             {
-                const String binPath = board->getLastRecordingPath();
-                const String csvPath = board->getLastRecordingCsvPath();
-
-                if (binPath.isNotEmpty() && csvPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording to BIN: " + binPath + " CSV: " + csvPath);
-                else if (binPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording to " + binPath);
+                if (isEsp32)
+                {
+                    // Truthful status — does NOT say "Recording saved" until verified.
+                    // The openSimAngleTimer polls getEsp32RecStatusText() every 500 ms
+                    // and updates the status bar throughout the lifecycle.
+                    CoreServices::sendStatusMessage (rp->getEsp32RecStatusText());
+                }
                 else
-                    CoreServices::sendStatusMessage ("Recording started.");
+                {
+                    const String binPath = board->getLastRecordingPath();
+                    const String csvPath = board->getLastRecordingCsvPath();
+
+                    if (binPath.isNotEmpty() && csvPath.isNotEmpty())
+                        CoreServices::sendStatusMessage ("Recording to BIN: " + binPath + " CSV: " + csvPath);
+                    else if (binPath.isNotEmpty())
+                        CoreServices::sendStatusMessage ("Recording to " + binPath);
+                    else
+                        CoreServices::sendStatusMessage ("Recording started.");
+                }
+            }
+            else
+            {
+                if (isEsp32)
+                    CoreServices::sendStatusMessage (rp->getEsp32RecStatusText());
             }
         }
         else
         {
             if (board->sendRecordOffCommand())
             {
-                const String binPath = board->getLastRecordingPath();
-                const String csvPath = board->getLastRecordingCsvPath();
-
-                if (binPath.isNotEmpty() && csvPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording saved. BIN: " + binPath + " CSV: " + csvPath);
-                else if (binPath.isNotEmpty())
-                    CoreServices::sendStatusMessage ("Recording saved to " + binPath);
+                if (isEsp32)
+                {
+                    // Stop sent — background thread handles finalize/retrieve.
+                    // Status bar will be updated every 500 ms via openSimAngleTimer.
+                    CoreServices::sendStatusMessage (rp->getEsp32RecStatusText());
+                }
                 else
-                    CoreServices::sendStatusMessage ("Recording stopped and saved.");
+                {
+                    const String binPath = board->getLastRecordingPath();
+                    const String csvPath = board->getLastRecordingCsvPath();
+
+                    if (binPath.isNotEmpty() && csvPath.isNotEmpty())
+                        CoreServices::sendStatusMessage ("Recording saved. BIN: " + binPath + " CSV: " + csvPath);
+                    else if (binPath.isNotEmpty())
+                        CoreServices::sendStatusMessage ("Recording saved to " + binPath);
+                    else
+                        CoreServices::sendStatusMessage ("Recording stopped and saved.");
+                }
+            }
+            else
+            {
+                if (isEsp32)
+                    CoreServices::sendStatusMessage (rp->getEsp32RecStatusText());
             }
         }
     }
@@ -1262,6 +1310,10 @@ void DeviceEditor::startAcquisition()
             nodeHostTitle->toFront (false);
         if (nodeHostLabel != nullptr)
             nodeHostLabel->toFront (false);
+        if (openSimAngleTitle != nullptr)
+            openSimAngleTitle->toFront (false);
+        if (openSimAngleLabel != nullptr)
+            openSimAngleLabel->toFront (false);
         if (jointDisplayTitle != nullptr)
             jointDisplayTitle->toFront (false);
 
@@ -1345,13 +1397,29 @@ void DeviceEditor::syncOpenSimDisplayJointToBoard()
 */
 void DeviceEditor::refreshOpenSimAngleReadout()
 {
-    if (openSimAngleLabel == nullptr)
-        return;
-
     if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
         return;
 
     auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+
+    // Poll ESP32 rec-v1 status text every tick (~10 Hz) and forward to the status bar.
+    // This gives the operator truthful lifecycle feedback:
+    //   "command sent" → "recording confirmed" → "finalizing" → "SD finalized" →
+    //   "retrieving" → "transfer checksum passed" → "Recording saved and verified"
+    if (rp->getIsEsp32Node())
+    {
+        static String lastEsp32Status;
+        const String currentStatus = rp->getEsp32RecStatusText();
+
+        if (currentStatus.isNotEmpty() && currentStatus != lastEsp32Status)
+        {
+            lastEsp32Status = currentStatus;
+            CoreServices::sendStatusMessage (currentStatus);
+        }
+    }
+
+    if (openSimAngleLabel == nullptr)
+        return;
 
     rp->pollOpenSimAngleFeedback();   // non-blocking drain of UDP 5001
 
@@ -1359,7 +1427,7 @@ void DeviceEditor::refreshOpenSimAngleReadout()
     if (rp->getLiveDisplayAngle (angleDeg))
         openSimAngleLabel->setText (String (angleDeg, 1) + " deg", dontSendNotification);
     else
-        openSimAngleLabel->setText ("--.- deg", dontSendNotification);
+        openSimAngleLabel->setText ("waiting", dontSendNotification);
 }
 
 /*
