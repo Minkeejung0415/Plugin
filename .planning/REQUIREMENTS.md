@@ -9,14 +9,14 @@
 ### Device-Side SD Recording
 
 - [x] **SD-01**: Firmware mounts/detects SD card at startup and reports whether SD logging is enabled, disabled, or failed.
-- [ ] **SD-02**: Firmware writes acquisition samples to SD without blocking the acquisition loop on per-sample card latency.
+- [x] **SD-02**: Firmware writes acquisition samples to SD without blocking the acquisition loop on per-sample card latency.
 - [x] **SD-03**: SD file format records `seq`, `timestamp_us`, channel data, and enough session metadata to decode sample rate, channel layout, firmware mode, and logging mode.
 - [x] **SD-04**: Firmware records generated sample count, saved sample count, SD queue drops, max SD queue depth, max write latency, and acquisition-loop overrun count.
 - [x] **SD-05**: SD recording can be explicitly enabled/disabled for stress comparisons without changing unrelated firmware behavior.
 
 ### Sample-Loss Accounting
 
-- [ ] **LOSS-01**: Every generated sample has a monotonic sequence number that is persisted to SD.
+- [x] **LOSS-01**: Every generated sample has a monotonic sequence number that is persisted to SD.
 - [ ] **LOSS-02**: Analyzer reports duplicate sequences, missing sequences, timestamp gaps, and duration/rate mismatch from SD files.
 - [x] **LOSS-03**: Stress output compares generated vs saved vs streamed counts when the firmware exposes those counters.
 - [x] **LOSS-04**: "No samples lost" is accepted only when SD sequence continuity is clean and firmware counters agree.
@@ -31,8 +31,8 @@
 
 ### Stall Isolation
 
-- [ ] **STALL-01**: Firmware measures acquisition-loop duration and flags loop overruns relative to requested period.
-- [ ] **STALL-02**: Firmware measures SD write latency separately from sensor-read/filter latency.
+- [x] **STALL-01**: Firmware measures acquisition-loop duration and flags loop overruns relative to requested period.
+- [x] **STALL-02**: Firmware measures SD write latency separately from sensor-read/filter latency.
 - [x] **STALL-03**: Test workflow distinguishes hardware/sensor/I2C limits from filter CPU cost, SD-card stalls, USB/TCP/Open Ephys buffering, and UDP/host transport loss.
 - [ ] **STALL-04**: Open Ephys buffer stalls are tested as a downstream symptom and not treated as proof that acquisition samples were lost on device.
 

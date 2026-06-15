@@ -4,12 +4,12 @@ milestone: v1.1
 milestone_name: SD Card Reliability and Lossless Acquisition
 current_phase: 06
 status: executing
-last_updated: "2026-06-15T17:11:14.654Z"
+last_updated: "2026-06-15T17:33:12.375Z"
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
   percent: 33
 ---
 
@@ -59,5 +59,17 @@ OpenSim and HUD work are paused. The active goal is to make acquisition data rel
 - USB/TCP/UDP observations cannot substitute for SD continuity proof.
 - SD-card behavior depends on card model and filesystem state.
 
+## Decisions
+
+- 2026-06-15: Default SD recording paths are session-derived so new recordings do not overwrite prior finalized SD sources.
+- 2026-06-15: Direct TCP and USB bridge retrieval use SDRF frames and are only served after finalization.
+- 2026-06-15: The firmware and bridge advertise crc32 as the negotiated whole-file checksum type for this implementation.
+
+## Performance Metrics
+
+| Date | Phase | Plan | Duration | Tasks | Files |
+|------|-------|------|----------|-------|-------|
+| 2026-06-15 | 06-plugin-controlled-esp32-sd-recording-with-reconnect-safe-loc | 02 | 17min | 13 | 5 |
+
 ---
-*State updated: 2026-06-12 - v1.1 milestone started*
+*State updated: 2026-06-15 - Phase 06 Plan 02 executed*
