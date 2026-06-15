@@ -323,7 +323,7 @@ public:
     /*
         isEsp32Node — true when the device that answered the handshake is an
         ESP32-S3 STEP node running the STEP firmware, not a Red Pitaya.
-        The ESP32 has a different default channel layout (11 channels) and
+        The ESP32 has a different default channel layout (13 channels) and
         stores recordings on the host PC rather than on-device SD card.
     */
     bool isEsp32Node = false;
@@ -336,14 +336,14 @@ public:
     bool getIsEsp32Node() const { return isEsp32Node; }
 
     /*
-        ESP32_DEFAULT_CHANNELS = 11 — the ESP32-S3 STEP node always sends exactly
-        11 channels per frame in this order:
+        ESP32_DEFAULT_CHANNELS = 13 - the ESP32-S3 STEP node always sends exactly
+        13 channels per frame in this order:
           0=ax (accel X, g)   1=ay   2=az
           3=gx (gyro X, dps)  4=gy   5=gz
-          6=dio (digital I/O bitmask)
-          7=qw  8=qx  9=qy  10=qz  (VQF quaternion, scaled Q15)
+          6=mx (mag X, uT)    7=my   8=mz
+          9=qw  10=qx  11=qy  12=qz  (VQF quaternion, scaled Q15)
     */
-    static constexpr int ESP32_DEFAULT_CHANNELS = 11;
+    static constexpr int ESP32_DEFAULT_CHANNELS = 13;
 
     void resetCommandSocket();
     bool connectCommandSocketToHost (const String& host);
@@ -446,9 +446,93 @@ public:
     std::unique_ptr<juce::ChildProcess> openSimLiveProcess;
 
     // Legacy PC-side CSV recording path for ESP32 WiFi mode; board SD recording is preferred.
+    // Only used when esp32RecV1Supported == false (old firmware without rec-v1).
     std::unique_ptr<juce::FileOutputStream> esp32RecordStream;
     juce::CriticalSection esp32RecordLock;
     int esp32RecordSampleCount = 0;
+
+    // =========================================================================
+    // rec-v1 SD recording protocol state
+    // =========================================================================
+
+    /** True if firmware responded with REC HELLO_OK (rec-v1 capable). */
+    bool esp32RecV1Supported = false;
+
+    /** Session ID returned by REC STARTED or REC SESSION_OK. */
+    String esp32SessionId;
+
+    /** Maximum chunk size the firmware will send in a single REC GET response. */
+    uint32_t esp32MaxChunkBytes = 4096;
+
+    /** Local output directory for the current/last retrieved session. */
+    String esp32LocalResultDir;
+
+    /** State machine for the SD recording lifecycle.
+     *  Only the retrieval thread and the command thread write this; the UI reads it. */
+    enum class Esp32RecState
+    {
+        Idle,
+        CommandSent,
+        RecordingConfirmed,
+        Finalizing,
+        SdFinalized,
+        Retrieving,
+        LocalCopyWritten,
+        ChecksumPassed,
+        AnalyzerPassed,
+        UnsupportedProtocol,
+        Failed
+    };
+    std::atomic<Esp32RecState> esp32RecState { Esp32RecState::Idle };
+
+    /** Human-readable status line — written under esp32RecStatusLock, read on UI thread. */
+    String esp32RecStatusText;
+    mutable juce::CriticalSection esp32RecStatusLock;
+
+    /** Session id and metadata stored after sd-finalized so retrieval can be retried. */
+    String   esp32PendingSessionId;
+    String   esp32PendingPathToken;
+    uint64_t esp32PendingFileSize     = 0;
+    String   esp32PendingFileChecksum;
+    bool     esp32RetrievalRetryAvailable = false;
+
+    /** Background thread for finalize / retrieve — never touches the audio/acquisition path. */
+    std::unique_ptr<juce::Thread> esp32RetrievalThread;
+    std::atomic<bool> esp32RetrievalCancelRequested { false };
+
+    /** Mutex that must be held before any commandSocket read/write inside the retrieval thread. */
+    juce::CriticalSection esp32CommandLock;
+
+    // -------------------------------------------------------------------------
+    // rec-v1 command methods
+    // -------------------------------------------------------------------------
+
+    /** Send REC HELLO and parse the response; sets esp32RecV1Supported. */
+    bool sendEsp32RecHello();
+
+    /** If a timeout-finalized session is present on the firmware, surface it for retry. */
+    void checkEsp32ReconnectSession();
+
+    /** Send REC START; replaces the old "RECORD ON" path for ESP32 SD recording. */
+    bool sendEsp32RecStart();
+
+    /** Send REC STOP and kick off the async finalize/retrieve thread. */
+    bool sendEsp32RecStop();
+
+    /** Start the background retrieval thread. */
+    void startEsp32RetrievalAsync();
+
+    /** Retry a failed transfer (e.g. checksum mismatch). */
+    bool retryEsp32Retrieval();
+
+    /** Cancel an in-progress retrieval. */
+    void cancelEsp32Retrieval();
+
+    /** Thread-safe read of the current status text for the UI. */
+    String getEsp32RecStatusText() const;
+
+    /** Thread-safe read of the current recording state. */
+    Esp32RecState getEsp32RecState() const { return esp32RecState.load(); }
 
     /*
         jointDisplaySelected[] — one boolean per entry in kOpenSimJointCatalog (7 joints).
