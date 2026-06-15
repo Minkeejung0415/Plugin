@@ -118,6 +118,18 @@ Phase 1 -> Phase 2 -> Phase 3 -> Phase 4 -> Phase 5
 
 The prior v1.0 roadmap for OpenSim joint-angle display and HUD live-update remediation is historical. Do not continue HUD work inside this milestone unless acquisition reliability is complete and explicitly resumed.
 
+### Phase 7: ESP-NOW Master Broadcast & Slave Timestamp Sync
+
+**Goal:** Enable ESP-NOW one-way broadcast from the master ESP32 (USB-connected) so all slave nodes correct their timestamps to the master clock, producing identical time references across devices.
+**Requirements:** ESPNOW-01, ESPNOW-02, ESPNOW-03
+**Depends on:** Phase 2 (firmware foundation)
+**Plans:** 1/1 plans complete
+
+Plans:
+- [x] 07-01: Enable master broadcast, fix slave recv + offset, apply corrected timestamps in SD log and OE header
+
+---
+
 ### Phase 6: Plugin-controlled ESP32 SD recording with reconnect-safe local retrieval
 
 **Goal:** Wire the plugin RECORD button to rec-v1 SD start/stop/finalize/retrieve with truthful operator status throughout the lifecycle.
