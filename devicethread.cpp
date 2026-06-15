@@ -267,9 +267,10 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
 
         /*
             ADC channel naming differs between board types:
-              - ESP32-S3 STEP node: 11 fixed-purpose channels with semantic names
-                (ax, ay, az = accelerometer; gx, gy, gz = gyroscope; dio = digital I/O;
-                qw, qx, qy, qz = VQF quaternion output). These come pre-defined in esp32Names[].
+              - ESP32-S3 STEP node: 13 fixed-purpose channels with semantic names
+                (ax, ay, az = accelerometer; gx, gy, gz = gyroscope;
+                mx, my, mz = magnetometer; qw, qx, qy, qz = VQF quaternion output).
+                These come pre-defined in esp32Names[].
               - Red Pitaya: many raw IMU channels named "Channel N", with the last two
                 renamed "AnalogInput1 / AnalogInput2" for the waveform capture channels.
               - All other boards (OpalKelly, ONI): plain "Channel N" ADC naming.
@@ -287,11 +288,11 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
 
                 if (esp32Layout)
                 {
-                    // ESP32-S3 STEP node has 11 columns with fixed meanings:
-                    // ax/ay/az = accel (g), gx/gy/gz = gyro (dps), dio = digital IO,
-                    // qw/qx/qy/qz = quaternion from VQF sensor fusion
+                    // ESP32-S3 STEP node has 13 columns with fixed meanings:
+                    // ax/ay/az = accel (g), gx/gy/gz = gyro (dps),
+                    // mx/my/mz = magnetometer (uT), qw/qx/qy/qz = VQF quaternion
                     static const char* esp32Names[] = {
-                        "ax", "ay", "az", "gx", "gy", "gz", "dio", "qw", "qx", "qy", "qz"
+                        "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz", "qw", "qx", "qy", "qz"
                     };
                     name = (ch < (int) (sizeof (esp32Names) / sizeof (esp32Names[0])))
                                ? esp32Names[ch]
