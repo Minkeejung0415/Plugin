@@ -255,10 +255,129 @@ to VQF (and wiring `vqf.c` into CMake) becomes worthwhile.
 
 ---
 
-## 6. Commit reference (branch `claude/quirky-hypatia-2NwPv`)
+## 6. SD Card Recording via rec-v1 Protocol (Phase 06, Plan 03)
+
+### 6.1 Required firmware
+
+The rec-v1 SD recording protocol requires ESP32 firmware that responds to
+`REC HELLO protocol_min=rec-v1` with `REC HELLO_OK`.
+
+- **rec-v1 capable firmware:** replies `REC HELLO_OK max_chunk=<n> ...`
+- **Old firmware (no rec-v1):** no reply or `REC ERR code=unsupported_protocol`
+  → plugin shows "recording protocol unsupported — update firmware for SD recording"
+  → falls back to legacy host-PC CSV recording path
+
+The plugin negotiates capability on every connect: `sendEsp32RecHello()` is
+called right after the REDPITAYA detection handshake succeeds.
+
+### 6.2 Operator workflow (normal session)
+
+1. Insert an SD card into the ESP32-S3 carrier board.
+2. Start the bridge (USB path) or join the Wi-Fi network.
+3. In Open Ephys: detect the board (finds `127.0.0.1` or Node IP) → press **Play**.
+4. Press **RECORD** (first press):
+   - Plugin sends `REC START sample_rate_hz=<hz> channels=<n> format=sd-bin sd_required=true`
+   - Status bar: "ESP32 SD recording: command sent — waiting for confirmation"
+   - On `REC STARTED session_id=<id>`: status → "ESP32 SD recording confirmed (session=...)"
+5. Conduct experiment.
+6. Press **RECORD** again (second press — stop):
+   - Plugin sends `REC STOP session_id=<id> reason=manual_stop`
+   - Status bar: "ESP32 SD recording: stop sent — finalizing and retrieving in background"
+   - Background thread takes over (audio/acquisition path is NOT blocked):
+     - Polls `REC STATUS` every 500 ms until `recording_state=finalized` (max 30 s)
+     - Status → "finalizing..."
+     - Fetches `REC SESSION session_id=latest_finalized` for file_size + file_checksum
+     - Status → "SD finalized (<n> bytes) — retrieving..."
+     - Sends `REC GET` requests; receives SDRF binary frames; validates per-chunk CRC
+     - Status → "ESP32 SD retrieving: <offset> / <total> bytes..."
+     - Computes whole-file CRC32; compares with firmware's checksum
+     - Status → "ESP32 SD: transfer checksum passed — running analyzer..."
+     - Attempts `analyze_sample_rate.py --format sd-bin session_data.bin`
+     - Status → "Recording saved and verified (session=...)"
+7. Session files are in:
+   `C:\Users\justi\Documents\Arduino\ESP32-S3-1\results\<sessionId>_<timestamp>\`
+
+### 6.3 Output file structure
+
+Each session produces a directory:
+
+```
+results\
+  <sessionId>_<timestamp_ms>\
+    session_data.bin          SD binary data (analyzer-compatible)
+    session_data.bin.tmp      staging file during transfer (deleted on success)
+    metadata.json             session_id, protocol, file_size, file_checksum, timestamp_ms
+    transfer_log.json         per-chunk CRC, byte offsets, whole_file_crc_match
+    analyzer_handoff.json     {"command": "python esp32/host/analyze_sample_rate.py ...", ...}
+    analyzer_result.json      {"passed": true/false, "output": "..."}
+```
+
+Verify with:
+```powershell
+python esp32\host\analyze_sample_rate.py --format sd-bin `
+  "C:\Users\justi\Documents\Arduino\ESP32-S3-1\results\<dir>\session_data.bin"
+```
+
+### 6.4 Retry workflow (transfer failure)
+
+If the transfer CRC fails (network glitch, disconnect mid-transfer):
+
+1. Status bar shows: "ESP32 SD: transfer CRC mismatch! ... — press Retry Retrieval"
+2. The session metadata is retained: `esp32PendingSessionId`, `esp32PendingFileSize`,
+   `esp32PendingFileChecksum` are kept in the board object.
+3. Call `rp->retryEsp32Retrieval()` (or wire a "Retry" button in the UI):
+   - Restores `esp32SessionId` from pending.
+   - Restarts the async retrieval thread from the REC GET phase.
+4. A new timestamped subdirectory is created for the retry attempt.
+
+### 6.5 Timeout-finalized session recovery (reconnect)
+
+If the experiment is interrupted (ESP32 reboots, USB disconnect, PC crash),
+the firmware may have stored a finalized SD session.
+
+On reconnect (next `detectBoard()` → `performDetectionHandshake()` → `sendEsp32RecHello()`):
+
+1. Plugin sends `REC SESSION session_id=latest_finalized`.
+2. If the firmware returns `REC SESSION_OK` with non-zero `file_size`:
+   - State → `SdFinalized`
+   - Status bar: "Timeout-finalized session available (session=...) — press Retrieve"
+   - `esp32RetrievalRetryAvailable = true`
+3. Operator calls `retryEsp32Retrieval()` to begin the retrieval.
+
+### 6.6 Unsupported firmware
+
+When `sendEsp32RecHello()` receives no `REC HELLO_OK`:
+
+- `esp32RecV1Supported = false`
+- State → `UnsupportedProtocol`
+- Status bar: "Recording protocol unsupported — update firmware for SD recording"
+- RECORD button tooltip: "ESP32 SD recording requires firmware with rec-v1 support. Update firmware to enable."
+- Plugin falls back to legacy PC-side CSV recording (if `esp32RecordStream` is in use).
+
+### 6.7 Threading model
+
+| Thread | Responsibility |
+|--------|----------------|
+| Main (JUCE message) | `sendEsp32RecHello`, `sendEsp32RecStart`, `sendEsp32RecStop` |
+| `Esp32RetrievalThread` | All of: poll STATUS, fetch SESSION, REC GET chunks, write .bin, CRC, analyzer |
+| `run()` (audio thread) | Frame decode, OpenSim UDP, legacy CSV write (guarded by `!esp32RecV1Supported`) |
+
+`esp32CommandLock` (`CriticalSection`) must be held before any commandSocket
+read/write on threads other than main. The retrieval thread acquires it for each
+REC STATUS, REC SESSION, REC GET, and REC COMPLETE exchange.
+
+`esp32RecStatusLock` guards `esp32RecStatusText`; the UI timer reads this every
+~100 ms and forwards to the Open Ephys status bar.
+
+---
+
+## 8. Commit reference
 
 | Commit | Summary |
 |---|---|
 | `fbdd4ab` | detect ESP32 before the generic `OK` branch; drain `STARTED`/`SENSORS`; add `127.0.0.1` fallback |
 | `567bb1b` | re-handshake (`REDPITAYA`+`START`) on the fresh acquisition socket so data streams |
 | `aa90c89` | self-contained 6-DOF Madgwick fusion → OpenSim quaternion UDP from the ESP32 path |
+| `ed64c35` | rec-v1 header: Esp32RecState, fields, method declarations (Phase 06 plan 03) |
+| `c0f93b4` | rec-v1 implementation: HELLO, START, STOP, async retrieval thread, CRC, analyzer |
+| `e063f42` | DeviceEditor: truthful status, rec-v1 tooltip, openSimAngleTimer polling |
