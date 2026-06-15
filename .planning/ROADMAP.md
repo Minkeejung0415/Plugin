@@ -12,7 +12,7 @@
 |---|-------|------|--------------|--------|
 | 1 | Measurement Contract & Baseline | Define file/counter contract and measure today's failure modes | SD-01, SD-03, SD-04, SD-05, LOSS-01, STALL-01, STALL-02 | Complete 2026-06-12 |
 | 2 | Buffered SD Logger | Make SD recording non-blocking and measurable | SD-01-05, LOSS-01, STALL-01, STALL-02 | Planned |
-| 3 | Stress Harness & Analyzer | Sweep rate/modes and analyze SD/stream continuity | LOSS-02-03, STRESS-01-05 | Planned |
+| 3 | Stress Harness & Analyzer | Sweep rate/modes and analyze SD/stream continuity | LOSS-02-03, STRESS-01-05 | 1/1 plans ready |
 | 4 | Open Ephys Stall Isolation | Separate device loss from host/Open Ephys/transport buffering | STALL-03, STALL-04 | Planned |
 | 5 | Hardware UAT & Operator Docs | Prove no-loss operating envelope and document checklist | LOSS-04, STRESS-03, OPS-01-03 | Planned |
 
@@ -22,7 +22,7 @@
 
 - [x] **Phase 1: Measurement Contract & Baseline** (completed 2026-06-12)
 - [ ] **Phase 2: Buffered SD Logger**
-- [ ] **Phase 3: Stress Harness & Analyzer**
+- [ ] **Phase 3: Stress Harness & Analyzer** *(planned — 1 plan ready)*
 - [ ] **Phase 4: Open Ephys Stall Isolation**
 - [ ] **Phase 5: Hardware UAT & Operator Docs**
 
