@@ -154,7 +154,7 @@ struct SdLogRecord {
 #define SD_LOG_MAGIC 0x31505453UL  // "STP1" little-endian
 #define SD_LOG_VERSION 1
 #define REC_RECONNECT_GRACE_MS 90000UL
-#define SD_QUEUE_DEPTH 256
+#define SD_QUEUE_DEPTH 1024
 #define REC_MAX_CHUNK 1024UL
 #define SDRF_HEADER_LEN 64
 #define SDRF_TYPE_DATA 0x01
@@ -410,8 +410,8 @@ void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
   g_espnow_sync_received = true;
   g_espnow_last_seq      = pkt->seq;
 }
-void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
-  (void)mac; (void)status;
+void onEspNowSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+  (void)tx_info; (void)status;
 }
 #endif
 
