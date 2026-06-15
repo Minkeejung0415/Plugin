@@ -1285,6 +1285,9 @@ static void handleLine(const String &line) {
 #if !SERIAL_OUTPUT_BINARY
     Serial.println("START accepted (USB: bridge streams; Wi-Fi: TCP binary)");
 #endif
+  } else if (line.startsWith("STOP")) {
+    streaming = false;
+    replyToHost("STOPPED\n");
   } else if (line.equalsIgnoreCase("AP?") || line.equalsIgnoreCase("WIFI?") ||
              line.equalsIgnoreCase("STATUS")) {
     printAcqStatus();

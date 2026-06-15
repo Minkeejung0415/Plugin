@@ -215,6 +215,7 @@ def wait_for_text(ser: serial.Serial, timeout: float) -> str:
                 or "STATUS " in text
                 or "SD_STATUS " in text
                 or "OK FILTER" in text
+                or "STOPPED" in text
             ):
                 return text
         else:
@@ -427,8 +428,11 @@ def test_one_rate(
 
     status: dict[str, str] = {}
     if sd_on:
+        send_line(ser, "STOP")
+        wait_for_text(ser, 2.0)
+        drain_serial(ser, 0.25)
         send_line(ser, "RECORD OFF")
-        status_text = wait_for_text(ser, 2.0)
+        status_text = wait_for_text(ser, 10.0)
         status.update(parse_key_values(status_text))
         status.update(read_status(ser, 1.0))
     else:
