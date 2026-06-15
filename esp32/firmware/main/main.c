@@ -82,6 +82,11 @@ static void acquisition_task(void *arg)
         }
 
 #if CONFIG_STEP_ENABLE_ESPNOW
+        if (!CONFIG_STEP_NODE_MASTER) {
+            sync_state_t sync;
+            espnow_sync_get_state(&sync);
+            sample.timestamp_us += sync.clock_offset_us;
+        }
         espnow_sync_on_local_frame(sample.seq, sample.timestamp_us);
 #endif
         open_ephys_stream_set_sample(&sample);

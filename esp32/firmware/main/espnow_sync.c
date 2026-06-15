@@ -24,8 +24,12 @@ static void espnow_recv(const esp_now_recv_info_t *info, const uint8_t *data, in
         return;
     }
     const sync_packet_t *p = (const sync_packet_t *)data;
-    s_state.master_seq = p->seq;
+    int64_t recv_us = esp_timer_get_time();
+    s_state.master_seq     = p->seq;
     s_state.master_time_us = p->time_us;
+    if (!s_master) {
+        s_state.clock_offset_us = (int32_t)(p->time_us - recv_us);
+    }
 }
 
 static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)

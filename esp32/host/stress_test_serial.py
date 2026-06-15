@@ -601,8 +601,8 @@ def main() -> int:
                 )
                 results.append(res)
                 elapsed = time.monotonic() - t_start
-                if elapsed > 120:
-                    print(f"Stopping early: {hz} Hz exceeded 120 s")
+                if elapsed > per_test + 30:
+                    print(f"Stopping early: {hz} Hz exceeded {per_test + 30:.0f} s")
                     break
                 print(
                     f"Hz={hz}: rows={res.rows} mean_hz={res.mean_hz} dup={res.dup_seq} "

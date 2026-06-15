@@ -32,12 +32,14 @@
  * --- end USB_OPEN_EPHYS_MODE ---
  */
 
-#define ENABLE_ESPNOW false
+#define ENABLE_ESPNOW true
+#define ESPNOW_WIFI_CHANNEL 1   // All nodes must use the same channel
 
 #include <WiFi.h>
 #include <WiFiClient.h>
 #if ENABLE_ESPNOW
 #include <esp_now.h>
+#include "esp_wifi.h"
 #endif
 #include <esp_timer.h>
 #include <Wire.h>
@@ -74,7 +76,7 @@ extern "C" {
 
 #define TCP_PORT 5000
 #define SAMPLE_HZ_DEFAULT 100
-#define NUM_CHANNELS 13
+#define NUM_CHANNELS 14
 
 #define ICM_BANK2_ACCEL_CONFIG_1 0x14
 #define ICM_BANK2_GYRO_CONFIG_1 0x01
@@ -152,6 +154,7 @@ struct SdLogRecord {
 #define SD_LOG_MAGIC 0x31505453UL  // "STP1" little-endian
 #define SD_LOG_VERSION 1
 #define REC_RECONNECT_GRACE_MS 90000UL
+#define SD_QUEUE_DEPTH 256
 #define REC_MAX_CHUNK 1024UL
 #define SDRF_HEADER_LEN 64
 #define SDRF_TYPE_DATA 0x01
@@ -213,6 +216,11 @@ static uint64_t g_sd_write_errors = 0;
 static uint32_t g_max_sd_write_us = 0;
 static uint32_t g_max_loop_us = 0;
 static uint32_t g_loop_overruns = 0;
+#if ENABLE_ESPNOW
+static int64_t  g_clock_offset_us      = 0;
+static bool     g_espnow_sync_received = false;
+static uint32_t g_espnow_last_seq      = 0;
+#endif
 static char g_sd_path[48] = "/step_session.bin";
 static char g_rec_session_id[33] = "none";
 static char g_rec_state[32] = "idle";
@@ -223,6 +231,9 @@ static uint64_t g_final_file_size = 0;
 static uint32_t g_final_file_checksum = 0;
 static uint32_t g_rec_grace_deadline_ms = 0;
 static bool g_transfer_active = false;
+
+static QueueHandle_t g_sd_queue = nullptr;
+static SemaphoreHandle_t g_sd_mutex = nullptr;
 
 static const float kAccLsbPerG[4] = {16384.0f, 8192.0f, 4096.0f, 2048.0f};
 static const float kGyrLsbPerDps[4] = {131.072f, 65.536f, 32.768f, 16.384f};
@@ -235,7 +246,7 @@ static bool g_vqf_inited = false;
 static int16_t g_last_mag[3] = {0, 0, 0};
 static bool g_have_mag = false;
 
-static bool useWifi() { return ENABLE_TCP || ENABLE_ESPNOW; }
+static bool useWifi() { return ENABLE_TCP; }
 
 static int16_t floatToQ15(float v) {
   if (v > 1.0f) v = 1.0f;
@@ -323,6 +334,7 @@ static void packChannelsFromImu(const int16_t imu[6], const int16_t *mag_or_null
   channels[10] = 0;
   channels[11] = 0;
   channels[12] = 0;
+  channels[13] = packDioCh6();
 
   if (!g_filter_on)
     return;
@@ -389,10 +401,17 @@ typedef struct {
 
 #if ENABLE_ESPNOW
 void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  (void)info; (void)data; (void)len;
+  (void)info;
+  if (NODE_IS_MASTER) return;
+  if (len < (int)sizeof(SyncPacket)) return;
+  const SyncPacket *pkt = (const SyncPacket *)data;
+  int64_t recv_us = (int64_t)esp_timer_get_time();
+  g_clock_offset_us      = (int64_t)pkt->time_us - recv_us;
+  g_espnow_sync_received = true;
+  g_espnow_last_seq      = pkt->seq;
 }
-void onEspNowSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
-  (void)info; (void)status;
+void onEspNowSent(const uint8_t *mac, esp_now_send_status_t status) {
+  (void)mac; (void)status;
 }
 #endif
 
@@ -660,8 +679,11 @@ static void readMag(int16_t out[3], bool *fresh) {
 // offset==0 = legacy frames (host/Plugin use arrival-time pacing). Same clock on every slave;
 // cross-board alignment needs START pulse or host merge — see docs/open-ephys-plugin.md.
 static void fillOeHeader(OeHeader *hdr) {
-  const uint32_t hw_us = (uint32_t)esp_timer_get_time();
-  hdr->offset = (int32_t)hw_us;
+  int64_t t_us = (int64_t)esp_timer_get_time();
+#if ENABLE_ESPNOW
+  if (!NODE_IS_MASTER && g_espnow_sync_received) t_us += g_clock_offset_us;
+#endif
+  hdr->offset = (int32_t)(uint32_t)t_us;
   hdr->num_channels = NUM_CHANNELS;
   hdr->samples_per_channel = 1;
   hdr->element_size = 2;
@@ -702,10 +724,11 @@ static void sendSerialBench() {
   Serial.write((uint8_t *)&hdr, sizeof(hdr));
   Serial.write((uint8_t *)channels, sizeof(channels));
 #else
-  Serial.printf("%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+  Serial.printf("%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                 (unsigned long)seq, channels[0], channels[1], channels[2],
                 channels[3], channels[4], channels[5], channels[6], channels[7],
-                channels[8], channels[9], channels[10], channels[11], channels[12]);
+                channels[8], channels[9], channels[10], channels[11], channels[12],
+                channels[13]);
 #endif
 #endif
 }
@@ -805,23 +828,48 @@ static void writeSdrfFrame(const char *session_id, uint8_t type, uint32_t chunk_
   if (payload && payload_len) Serial.write(payload, payload_len);
 }
 
+#if ENABLE_SD
+static void sdWriteTask(void *) {
+  SdLogRecord rec;
+  uint32_t last_flush_ms = 0;
+  while (true) {
+    if (g_sd_queue && xQueueReceive(g_sd_queue, &rec, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (g_sd_mutex && xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (g_sd_file) {
+          uint32_t t0 = micros();
+          size_t written = g_sd_file.write((uint8_t *)&rec, sizeof(rec));
+          uint32_t wu = (uint32_t)(micros() - t0);
+          if (wu > g_max_sd_write_us) g_max_sd_write_us = wu;
+          if (written == sizeof(rec)) g_sd_saved_samples++;
+          else g_sd_write_errors++;
+        }
+        xSemaphoreGive(g_sd_mutex);
+      }
+    }
+    uint32_t now_ms = millis();
+    if ((now_ms - last_flush_ms) >= 1000) {
+      last_flush_ms = now_ms;
+      if (g_sd_mutex && xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (g_sd_file) g_sd_file.flush();
+        xSemaphoreGive(g_sd_mutex);
+      }
+    }
+  }
+}
+#endif
+
 static void logSd() {
 #if ENABLE_SD
-  if (!g_sd_recording || !g_sd_file) return;
-
+  if (!g_sd_recording || !g_sd_queue) return;
   SdLogRecord rec = {};
   rec.seq = seq;
-  rec.time_us = (int64_t)esp_timer_get_time();
+  int64_t t_us = (int64_t)esp_timer_get_time();
+#if ENABLE_ESPNOW
+  if (!NODE_IS_MASTER && g_espnow_sync_received) t_us += g_clock_offset_us;
+#endif
+  rec.time_us = t_us;
   memcpy(rec.ch, channels, sizeof(channels));
-
-  uint32_t t0 = micros();
-  size_t written = g_sd_file.write((uint8_t *)&rec, sizeof(rec));
-  uint32_t write_us = (uint32_t)(micros() - t0);
-  if (write_us > g_max_sd_write_us) g_max_sd_write_us = write_us;
-
-  if (written == sizeof(rec)) {
-    g_sd_saved_samples++;
-  } else {
+  if (xQueueSend(g_sd_queue, &rec, 0) != pdTRUE) {
     g_sd_write_errors++;
   }
 #endif
@@ -829,8 +877,6 @@ static void logSd() {
 
 static bool sdEnsureReady() {
 #if ENABLE_SD
-  if (g_sd_ready) return true;
-  g_sd_ready = SD.begin(PIN_SD_CS);
   return g_sd_ready;
 #else
   return false;
@@ -848,8 +894,13 @@ static bool sdRecordStart(const char *path_or_null) {
   }
 
   if (g_sd_recording && g_sd_file) {
+    g_sd_recording = false;
+    if (g_sd_queue) while (uxQueueMessagesWaiting(g_sd_queue) > 0) vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(30));
+    if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
     g_sd_file.flush();
     g_sd_file.close();
+    if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   }
 
   makeSessionId();
@@ -860,7 +911,9 @@ static bool sdRecordStart(const char *path_or_null) {
     snprintf(g_sd_path, sizeof(g_sd_path), "/step_%s.bin", g_rec_session_id);
   }
 
+  if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
   g_sd_file = SD.open(g_sd_path, FILE_WRITE);
+  if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   if (!g_sd_file) {
     g_sd_recording = false;
     g_sd_write_errors++;
@@ -906,14 +959,15 @@ static bool sdRecordStart(const char *path_or_null) {
 static void sdRecordStop() {
 #if ENABLE_SD
   strncpy(g_rec_state, "finalizing", sizeof(g_rec_state) - 1);
+  g_sd_recording = false;
+  if (g_sd_queue) while (uxQueueMessagesWaiting(g_sd_queue) > 0) vTaskDelay(pdMS_TO_TICKS(10));
+  vTaskDelay(pdMS_TO_TICKS(30));
+  if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
   if (g_sd_file) {
-    uint32_t t0 = micros();
     g_sd_file.flush();
-    uint32_t flush_us = (uint32_t)(micros() - t0);
-    if (flush_us > g_max_sd_write_us) g_max_sd_write_us = flush_us;
     g_sd_file.close();
   }
-  g_sd_recording = false;
+  if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   g_final_file_checksum = checksumSdFile(g_sd_path, &g_final_file_size);
   if (strcmp(g_finalization_reason, "none") == 0) {
     strncpy(g_finalization_reason, "manual_stop", sizeof(g_finalization_reason) - 1);
@@ -955,6 +1009,14 @@ static void printAcqStatus() {
                 (unsigned long)g_max_sd_write_us,
                 (unsigned long)g_max_loop_us,
                 (unsigned long)g_loop_overruns);
+#if ENABLE_ESPNOW
+  Serial.printf("ESPNOW role=%s ch=%d sync=%d offset_us=%lld last_seq=%lu\n",
+                NODE_IS_MASTER ? "master" : "slave",
+                ESPNOW_WIFI_CHANNEL,
+                g_espnow_sync_received ? 1 : 0,
+                (long long)g_clock_offset_us,
+                (unsigned long)g_espnow_last_seq);
+#endif
 }
 
 static void recReplyToHost(const char *text);
@@ -1461,18 +1523,37 @@ static void setupWifi() {
 
 static void setupEspNow() {
 #if ENABLE_ESPNOW
+  // When TCP is not in use, WiFi was not started by setupWifi().
+  // ESP-NOW requires the WiFi stack to be initialized (STA mode, no AP join needed).
   if (!wifi_up) {
-    Serial.println("ESP-NOW skipped (Wi-Fi not connected)");
+    WiFi.persistent(false);
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    delay(100);
+    wifi_up = true;
+    Serial.printf("ESP-NOW WiFi: STA mode ch=%d (no AP join)\n", ESPNOW_WIFI_CHANNEL);
+  }
+  esp_err_t err = esp_now_init();
+  if (err != ESP_OK) {
+    Serial.printf("ESP-NOW init failed: %d\n", (int)err);
     return;
   }
-  esp_now_init();
   esp_now_register_recv_cb(onEspNowRecv);
   esp_now_register_send_cb(onEspNowSent);
   esp_now_peer_info_t peer = {};
-  memset(&peer.peer_addr, 0xFF, 6);
+  memset(peer.peer_addr, 0xFF, 6);
+  peer.channel = 0;
   peer.encrypt = false;
-  esp_now_add_peer(&peer);
-  Serial.println("ESP-NOW enabled (multi-node)");
+  err = esp_now_add_peer(&peer);
+  if (err != ESP_OK) {
+    Serial.printf("ESP-NOW add peer failed: %d\n", (int)err);
+    return;
+  }
+  Serial.printf("ESP-NOW ready (role=%s ch=%d)\n",
+                NODE_IS_MASTER ? "master" : "slave", ESPNOW_WIFI_CHANNEL);
 #else
   Serial.println("ESP-NOW disabled — single-node mode");
 #endif
@@ -1521,7 +1602,13 @@ void setup() {
   setupEspNow();
 
 #if ENABLE_SD
-  Serial.println(SD.begin(PIN_SD_CS) ? "SD ready" : "SD init failed");
+  g_sd_mutex = xSemaphoreCreateMutex();
+  g_sd_ready = SD.begin(PIN_SD_CS, SPI, 25000000);
+  Serial.println(g_sd_ready ? "SD ready" : "SD init failed");
+  g_sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(SdLogRecord));
+  if (g_sd_queue) {
+    xTaskCreatePinnedToCore(sdWriteTask, "sd_write", 4096, NULL, 4, NULL, 0);
+  }
 #endif
 
 #if ENABLE_TCP && !ENABLE_SERIAL_BENCH
