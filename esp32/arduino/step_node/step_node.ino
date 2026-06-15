@@ -86,7 +86,7 @@ extern "C" {
 #define PIN_DIO 1       // XIAO D0 / GPIO1 — change via #define if wired elsewhere
 #define ICM20948_ADDR 0x69
 
-#define NODE_IS_MASTER true
+#define NODE_IS_MASTER false
 #define ENABLE_SD true
 
 // true = USB binary @100 Hz 8ch → serial_tcp_bridge.py [--plugin] → 127.0.0.1:5000 (no Wi-Fi for OE).
@@ -1278,6 +1278,8 @@ static void handleLine(const String &line) {
     g_filter_on = false;
     replyToHost("OK FILTER OFF\n");
   } else if (line.startsWith("RECORD ON")) {
+    g_loop_overruns = 0;
+    g_max_loop_us   = 0;
     String path = line.substring(9);
     path.trim();
     sdRecordStart(path.length() ? path.c_str() : nullptr);
