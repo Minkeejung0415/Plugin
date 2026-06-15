@@ -150,6 +150,7 @@ class RateResult:
     gap_seq: int
     rows: int
     passed: bool
+    result: str
     gap_time: int = 0
     sd_saved: int | None = None
     sd_errors: int | None = None
@@ -224,16 +225,23 @@ def wait_for_text(ser: serial.Serial, timeout: float) -> str:
 
 
 STATUS_RE = re.compile(r"(?:SD_STATUS|STATUS)\s+([^\r\n]*)")
+SD_FINAL_RE = re.compile(r"SD_FINAL\s+([^\r\n]*)")
+
+
+def parse_key_value_parts(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for part in text.split():
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        values[k.strip()] = v.strip()
+    return values
 
 
 def parse_key_values(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for m in STATUS_RE.finditer(text):
-        for part in m.group(1).split():
-            if "=" not in part:
-                continue
-            k, v = part.split("=", 1)
-            values[k.strip()] = v.strip()
+        values.update(parse_key_value_parts(m.group(1)))
     return values
 
 
@@ -241,6 +249,22 @@ def read_status(ser: serial.Serial, timeout: float = 1.0) -> dict[str, str]:
     send_line(ser, "STATUS")
     text = wait_for_text(ser, timeout)
     return parse_key_values(text)
+
+
+def wait_for_sd_final(ser: serial.Serial, timeout: float) -> dict[str, str]:
+    buf = bytearray()
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        chunk = ser.read(ser.in_waiting or 1)
+        if chunk:
+            buf.extend(chunk)
+            text = buf.decode("utf-8", errors="replace")
+            m = SD_FINAL_RE.search(text)
+            if m:
+                return parse_key_value_parts(m.group(1))
+        else:
+            time.sleep(0.02)
+    return {}
 
 
 def maybe_int(values: dict[str, str], key: str) -> int | None:
@@ -427,14 +451,16 @@ def test_one_rate(
             gap += max(0, int(hz * capture_s) - rows)
 
     status: dict[str, str] = {}
+    sd_final_seen = False
     if sd_on:
         send_line(ser, "STOP")
         wait_for_text(ser, 2.0)
         drain_serial(ser, 0.25)
         send_line(ser, "RECORD OFF")
-        status_text = wait_for_text(ser, 10.0)
-        status.update(parse_key_values(status_text))
+        final_status = wait_for_sd_final(ser, 20.0)
+        sd_final_seen = bool(final_status)
         status.update(read_status(ser, 1.0))
+        status.update(final_status)
     else:
         status.update(read_status(ser, 1.0))
 
@@ -444,19 +470,25 @@ def test_one_rate(
     sd_errors = first_int(status, "errors", "sd_errors")
     max_sd_write_us = maybe_int(status, "max_sd_write_us")
     max_loop_us = maybe_int(status, "max_loop_us")
-    loop_overruns = maybe_int(status, "loop_overruns")
+    loop_overruns = first_int(status, "overrun", "loop_overruns")
     sd_ok = True
     if sd_on:
         sd_ok = (
+            sd_final_seen
+            and
             sd_saved is not None
             and sd_saved >= expected
             and (sd_errors or 0) == 0
             and (loop_overruns or 0) == 0
         )
     passed = dup == 0 and gap == 0 and rows >= expected and rate_ok and sd_ok
+    result = "PASS" if passed else "FAIL"
     note = ""
     if binary_mode is None:
         note = "auto"
+    if sd_on and not sd_final_seen:
+        note = (note + "; " if note else "") + "missing SD_FINAL"
+        result = "UNKNOWN"
     if rows < 2:
         note = (note + "; " if note else "") + "insufficient rows"
     if sd_on and sd_saved is None:
@@ -475,6 +507,7 @@ def test_one_rate(
             gap_seq=gap,
             rows=rows,
             passed=passed,
+            result=result,
             gap_time=gap_time,
             sd_saved=sd_saved,
             sd_errors=sd_errors,
@@ -611,7 +644,7 @@ def main() -> int:
                 print(
                     f"Hz={hz}: rows={res.rows} mean_hz={res.mean_hz} dup={res.dup_seq} "
                     f"gap={res.gap_seq} sd_saved={res.sd_saved} sd_err={res.sd_errors} "
-                    f"max_sd_us={res.max_sd_write_us} overrun={res.loop_overruns} pass={res.passed}"
+                    f"max_sd_us={res.max_sd_write_us} overrun={res.loop_overruns} pass={res.result}"
                 )
 
         print("\n| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass |")
@@ -619,7 +652,7 @@ def main() -> int:
         last_good = 0
         for r in results:
             mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
-            pf = "PASS" if r.passed else "FAIL"
+            pf = r.result
             print(
                 f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
                 f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
@@ -653,7 +686,7 @@ def main() -> int:
                 f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "
                 f"{r.max_sd_write_us if r.max_sd_write_us is not None else 'n/a'} | "
                 f"{r.loop_overruns if r.loop_overruns is not None else 'n/a'} | "
-                f"{'PASS' if r.passed else 'FAIL'} |"
+                f"{r.result} |"
             )
         lines.extend(
             [

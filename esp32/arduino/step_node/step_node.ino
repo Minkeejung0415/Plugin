@@ -968,6 +968,13 @@ static void sdRecordStop() {
     g_sd_file.close();
   }
   if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
+  Serial.printf("SD_FINAL ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu overrun=%lu\n",
+                g_sd_ready ? 1 : 0,
+                g_sd_path,
+                (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)g_sd_write_errors,
+                (unsigned long)g_max_sd_write_us,
+                (unsigned long)g_loop_overruns);
   g_final_file_checksum = checksumSdFile(g_sd_path, &g_final_file_size);
   if (strcmp(g_finalization_reason, "none") == 0) {
     strncpy(g_finalization_reason, "manual_stop", sizeof(g_finalization_reason) - 1);
