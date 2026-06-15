@@ -120,13 +120,15 @@ The prior v1.0 roadmap for OpenSim joint-angle display and HUD live-update remed
 
 ### Phase 6: Plugin-controlled ESP32 SD recording with reconnect-safe local retrieval
 
-**Goal:** [To be planned]
-**Requirements**: TBD
-**Depends on:** Phase 5
-**Plans:** 2/3 plans executed
+**Goal:** Wire the plugin RECORD button to rec-v1 SD start/stop/finalize/retrieve with truthful operator status throughout the lifecycle.
+**Requirements:** SD-05, LOSS-02, LOSS-03, LOSS-04, STALL-03, STALL-04, OPS-01, OPS-03
+**Depends on:** Phase 1 (protocol contract), Phase 2 (SD logger)
+**Plans:** 3/3 plans executed
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 6 to break down)
+- [x] 06-01: Recording Protocol Contract (completed 2026-06-15)
+- [x] 06-02: Firmware Bridge Recording Control (completed 2026-06-15)
+- [x] 06-03: Plugin UI, Local Retrieval, and End-to-End Verification (completed 2026-06-15)
 
 ---
 *Roadmap created: 2026-06-12 - v1.1 SD card reliability and lossless acquisition*

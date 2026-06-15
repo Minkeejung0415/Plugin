@@ -4,13 +4,13 @@ milestone: v1.1
 milestone_name: SD Card Reliability and Lossless Acquisition
 current_phase: 06
 status: executing
-last_updated: "2026-06-15T17:33:12.375Z"
+last_updated: "2026-06-15T17:47:59Z"
 progress:
   total_phases: 6
-  completed_phases: 2
-  total_plans: 5
-  completed_plans: 4
-  percent: 33
+  completed_phases: 3
+  total_plans: 6
+  completed_plans: 6
+  percent: 60
 ---
 
 # Project State
@@ -64,12 +64,16 @@ OpenSim and HUD work are paused. The active goal is to make acquisition data rel
 - 2026-06-15: Default SD recording paths are session-derived so new recordings do not overwrite prior finalized SD sources.
 - 2026-06-15: Direct TCP and USB bridge retrieval use SDRF frames and are only served after finalization.
 - 2026-06-15: The firmware and bridge advertise crc32 as the negotiated whole-file checksum type for this implementation.
+- 2026-06-15: Plugin RECORD button wired to rec-v1 start/stop/finalize/retrieve; legacy CSV path guarded by !esp32RecV1Supported.
+- 2026-06-15: Plugin status bar shows truthful lifecycle states; never claims "Recording saved" until analyzer-backed verification passes (D-03).
+- 2026-06-15: Timeout-finalized sessions are surfaced on reconnect via checkEsp32ReconnectSession (D-10).
 
 ## Performance Metrics
 
 | Date | Phase | Plan | Duration | Tasks | Files |
 |------|-------|------|----------|-------|-------|
 | 2026-06-15 | 06-plugin-controlled-esp32-sd-recording-with-reconnect-safe-loc | 02 | 17min | 13 | 5 |
+| 2026-06-15 | 06-plugin-controlled-esp32-sd-recording-with-reconnect-safe-loc | 03 | 7min | 12 | 4 |
 
 ---
-*State updated: 2026-06-15 - Phase 06 Plan 02 executed*
+*State updated: 2026-06-15 - Phase 06 Plan 03 executed*
