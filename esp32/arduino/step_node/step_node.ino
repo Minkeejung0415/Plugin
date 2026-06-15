@@ -33,7 +33,7 @@
  */
 
 #define ENABLE_ESPNOW true
-#define ESPNOW_WIFI_CHANNEL 1   // All nodes must use the same channel
+#define ESPNOW_WIFI_CHANNEL 6   // Must match WIFI_AP_CHANNEL so slaves on STEP_ESP32 AP receive sync
 
 #include <WiFi.h>
 #include <WiFiClient.h>

@@ -288,11 +288,12 @@ void DeviceThread::updateSettings (OwnedArray<ContinuousChannel>* continuousChan
 
                 if (esp32Layout)
                 {
-                    // ESP32-S3 STEP node has 13 columns with fixed meanings:
+                    // ESP32-S3 STEP node has 14 columns with fixed meanings:
                     // ax/ay/az = accel (g), gx/gy/gz = gyro (dps),
-                    // mx/my/mz = magnetometer (uT), qw/qx/qy/qz = VQF quaternion
+                    // mx/my/mz = magnetometer (uT), qw/qx/qy/qz = VQF quaternion,
+                    // dio = digital input state
                     static const char* esp32Names[] = {
-                        "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz", "qw", "qx", "qy", "qz"
+                        "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz", "qw", "qx", "qy", "qz", "dio"
                     };
                     name = (ch < (int) (sizeof (esp32Names) / sizeof (esp32Names[0])))
                                ? esp32Names[ch]
