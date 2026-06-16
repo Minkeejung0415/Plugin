@@ -443,14 +443,16 @@ def test_one_rate(
 
     mode_tag = f"filter_{'on' if filter_on else 'off'}__sd_{'on' if sd_on else 'off'}"
     out_path = RESULTS_DIR / f"rate_{hz}__{mode_tag}.csv"
+    dup_payload = 0
     if binary_mode is False:
         rows = capture_text_csv(ser, capture_s, out_path)
         dup, gap, mean_hz, gap_time = run_analyzer(out_path)
         mode = False
     else:
-        rows, mean_hz_bin = capture_binary_to_csv(ser, capture_s, out_path)
-        dup, gap, mean_hz_a, gap_time = run_analyzer(out_path, time_col=1)
+        rows, mean_hz_bin, dup_payload = capture_binary_to_csv(ser, capture_s, out_path)
+        _, gap, mean_hz_a, gap_time = run_analyzer(out_path, time_col=1)
         mean_hz = mean_hz_bin or mean_hz_a
+        dup = dup_payload
         mode = True
         expected = int(hz * capture_s * 0.85)
         if rows < expected:
@@ -503,6 +505,8 @@ def test_one_rate(
         note = (note + "; " if note else "") + f"sd_errors={sd_errors}"
     if sd_on and loop_overruns:
         note = (note + "; " if note else "") + f"loop_overruns={loop_overruns}"
+    if binary_mode is not False and dup_payload:
+        note = (note + "; " if note else "") + f"dup_payload={dup_payload}"
     return (
         RateResult(
             hz=hz,
