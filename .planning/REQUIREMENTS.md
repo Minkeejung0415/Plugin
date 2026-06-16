@@ -24,9 +24,9 @@
 ### Stress Testing
 
 - [ ] **STRESS-01**: `esp32/host/stress_test_serial.py` can sweep requested frequency across configurable ranges and durations.
-- [ ] **STRESS-02**: Stress sweep supports mode combinations: filter on/off, SD on/off, Open Ephys/serial streaming on/off when firmware commands support them.
+- [x] **STRESS-02**: Stress sweep supports mode combinations: filter on/off, SD on/off, Open Ephys/serial streaming on/off when firmware commands support them.
 - [ ] **STRESS-03**: Stress summary reports highest passing frequency and recommended operating cap.
-- [ ] **STRESS-04**: Stress artifacts are saved per run in machine-readable CSV/JSON/Markdown so results can be compared across firmware changes.
+- [x] **STRESS-04**: Stress artifacts are saved per run in machine-readable CSV/JSON/Markdown so results can be compared across firmware changes.
 - [ ] **STRESS-05**: Analyzer includes latency and stall metrics, not only sequence gaps.
 
 ### Stall Isolation
