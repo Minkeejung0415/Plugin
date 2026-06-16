@@ -16,7 +16,7 @@
  * #define ENABLE_SERIAL_BENCH true
  * #define ENABLE_ESPNOW false
  * #define ENABLE_SD false
- * #define ICM20948_ADDR 0x69
+ * #define PIN_ICM_CS 4
  * --- end preset ---
  *
  * --- USB_OPEN_EPHYS_MODE (USB power + PC — Wi-Fi not required for Open Ephys) ---
@@ -42,7 +42,6 @@
 #include "esp_wifi.h"
 #endif
 #include <esp_timer.h>
-#include <Wire.h>
 #include <SD.h>
 #include <SPI.h>
 #include <math.h>
@@ -81,12 +80,13 @@ extern "C" {
 #define ICM_BANK2_ACCEL_CONFIG_1 0x14
 #define ICM_BANK2_GYRO_CONFIG_1 0x01
 
-#define PIN_I2C_SDA 5   // XIAO D4 / GPIO5
-#define PIN_I2C_SCL 6   // XIAO D5 / GPIO6
+#define PIN_SPI_SCK 7    // XIAO D8 / GPIO7
+#define PIN_SPI_MISO 8   // XIAO D9 / GPIO8
+#define PIN_SPI_MOSI 9   // XIAO D10 / GPIO9
+#define PIN_ICM_CS 4     // XIAO D3 / GPIO4
 #define PIN_DIO 1       // XIAO D0 / GPIO1 — change via #define if wired elsewhere
-#define ICM20948_ADDR 0x69
 
-#define NODE_IS_MASTER false
+#define NODE_IS_MASTER true
 #define ENABLE_SD true
 
 // true = USB binary @100 Hz 8ch → serial_tcp_bridge.py [--plugin] → 127.0.0.1:5000 (no Wi-Fi for OE).
@@ -112,6 +112,12 @@ extern "C" {
 #define ICM_INT_PIN_CFG 0x0F
 #define ICM_ACCEL_XOUT_H 0x2D
 #define ICM20948_WHOAMI_VAL 0xEA
+#define ICM_EXT_SENS_DATA_00 0x3B
+#define ICM_I2C_MST_CTRL 0x01
+#define ICM_I2C_SLV0_ADDR 0x03
+#define ICM_I2C_SLV0_REG 0x04
+#define ICM_I2C_SLV0_CTRL 0x05
+#define ICM_I2C_SLV0_DO 0x06
 
 #define AK09916_ADDR 0x0C
 #define AK09916_WIA2 0x01
@@ -188,7 +194,6 @@ uint32_t seq = 0;
 int16_t channels[NUM_CHANNELS];
 bool icm_ok = false;
 bool mag_ok = false;
-uint8_t icm_addr = ICM20948_ADDR;
 uint32_t boot_ms = 0;
 bool csv_banner_sent = false;
 uint32_t last_status_ms = 0;
@@ -240,6 +245,7 @@ static const float kGyrLsbPerDps[4] = {131.072f, 65.536f, 32.768f, 16.384f};
 static const float kStdGravityMps2 = 9.80665f;
 static const float kMagUnitsPerLsb = 0.15f;  // AK09916, matches Plugin sensor_fusion ICM20948
 static const float kMagRateHz = 100.0f;
+static const uint32_t kIcmSpiHz = 4000000UL;
 
 static VQF g_vqf;
 static bool g_vqf_inited = false;
@@ -258,10 +264,10 @@ static void icmApplyRangePresets() {
   if (!icm_ok) return;
   const uint8_t acc_fs = g_acc_preset & 3u;
   const uint8_t gyr_fs = g_gyr_preset & 3u;
-  icmSelectBank(icm_addr, 2);
-  icmWriteAddr(icm_addr, ICM_BANK2_ACCEL_CONFIG_1, (uint8_t)(acc_fs << 1));
-  icmWriteAddr(icm_addr, ICM_BANK2_GYRO_CONFIG_1, (uint8_t)(gyr_fs << 1));
-  icmSelectBank(icm_addr, 0);
+  icmSelectBank(0, 2);
+  icmWrite(ICM_BANK2_ACCEL_CONFIG_1, (uint8_t)(acc_fs << 1));
+  icmWrite(ICM_BANK2_GYRO_CONFIG_1, (uint8_t)(gyr_fs << 1));
+  icmSelectBank(0, 0);
 #if !SERIAL_OUTPUT_BINARY
   Serial.printf("ICM range: ACC preset %u  GYR preset %u\n", acc_fs, gyr_fs);
 #endif
@@ -415,29 +421,48 @@ void onEspNowSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 }
 #endif
 
-static bool i2cProbe(uint8_t addr) {
-  Wire.beginTransmission(addr);
-  return Wire.endTransmission() == 0;
+static void icmSpiBegin() {
+  pinMode(PIN_ICM_CS, OUTPUT);
+  digitalWrite(PIN_ICM_CS, HIGH);
+  SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
 }
 
 static bool icmWriteAddr(uint8_t addr, uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  Wire.write(val);
-  return Wire.endTransmission() == 0;
+  (void)addr;
+  SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_ICM_CS, LOW);
+  SPI.transfer(reg & 0x7F);
+  SPI.transfer(val);
+  digitalWrite(PIN_ICM_CS, HIGH);
+  SPI.endTransaction();
+  return true;
 }
 
 static bool icmReadAddr(uint8_t addr, uint8_t reg, uint8_t *val) {
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(addr, (uint8_t)1) != 1) return false;
-  *val = Wire.read();
+  (void)addr;
+  SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_ICM_CS, LOW);
+  SPI.transfer(reg | 0x80);
+  *val = SPI.transfer(0x00);
+  digitalWrite(PIN_ICM_CS, HIGH);
+  SPI.endTransaction();
+  return true;
+}
+
+static bool icmReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
+  SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_ICM_CS, LOW);
+  SPI.transfer(reg | 0x80);
+  for (size_t i = 0; i < len; i++) {
+    buf[i] = SPI.transfer(0x00);
+  }
+  digitalWrite(PIN_ICM_CS, HIGH);
+  SPI.endTransaction();
   return true;
 }
 
 static void icmSelectBank(uint8_t addr, uint8_t bank) {
-  icmWriteAddr(addr, ICM_REG_BANK_SEL, bank & 0x30);
+  icmWriteAddr(addr, ICM_REG_BANK_SEL, (uint8_t)((bank & 0x03) << 4));
 }
 
 static bool icmReadWhoAmI(uint8_t addr, uint8_t *who) {
@@ -446,11 +471,11 @@ static bool icmReadWhoAmI(uint8_t addr, uint8_t *who) {
 }
 
 static bool icmWrite(uint8_t reg, uint8_t val) {
-  return icmWriteAddr(icm_addr, reg, val);
+  return icmWriteAddr(0, reg, val);
 }
 
 static bool icmReadReg(uint8_t reg, uint8_t *val) {
-  return icmReadAddr(icm_addr, reg, val);
+  return icmReadAddr(0, reg, val);
 }
 
 static void printBootDiagnostics() {
@@ -461,30 +486,16 @@ static void printBootDiagnostics() {
   Serial.println("========================================");
   Serial.printf("Firmware: %s\n", FIRMWARE_VERSION);
   Serial.printf("Board target: XIAO_ESP32S3 (Sense)\n");
-  Serial.printf("I2C SDA: GPIO%d (pad D4)  SCL: GPIO%d (pad D5)\n", PIN_I2C_SDA, PIN_I2C_SCL);
-  Serial.printf("ICM20948 config addr: 0x%02X (AD0 high=0x69, low=0x68)\n", ICM20948_ADDR);
+  Serial.printf("SPI SCK: GPIO%d (D8)  MISO: GPIO%d (D9)  MOSI: GPIO%d (D10)  ICM CS: GPIO%d (D3)\n",
+                PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_ICM_CS);
   Serial.printf("Sample rate: %d Hz  channels: %d\n", g_sample_hz, NUM_CHANNELS);
-  Serial.println("--- I2C scan 0x68-0x6B ---");
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
+  Serial.println("--- ICM20948 SPI WHO_AM_I (expect 0xEA) ---");
+  icmSpiBegin();
   delay(50);
-  int found = 0;
-  for (uint8_t a = 0x68; a <= 0x6B; a++) {
-    if (i2cProbe(a)) {
-      Serial.printf("  device at 0x%02X\n", a);
-      found++;
-    }
-  }
-  if (found == 0) Serial.println("  (no devices — check VCC/GND/SDA/SCL on D4/D5)");
-  Serial.println("--- ICM20948 WHO_AM_I (expect 0xEA) ---");
-  for (uint8_t a : {0x68, 0x69}) {
-    uint8_t who = 0;
-    if (icmReadWhoAmI(a, &who)) {
-      Serial.printf("  0x%02X -> WHO_AM_I 0x%02X %s\n", a, who,
-                    who == ICM20948_WHOAMI_VAL ? "OK" : "unexpected");
-    } else {
-      Serial.printf("  0x%02X -> no ACK\n", a);
-    }
-  }
+  uint8_t spi_who = 0;
+  icmReadWhoAmI(0, &spi_who);
+  Serial.printf("  CS GPIO%d -> WHO_AM_I 0x%02X %s\n", PIN_ICM_CS, spi_who,
+                spi_who == ICM20948_WHOAMI_VAL ? "OK" : "unexpected");
   Serial.println("========================================");
 #endif
 }
@@ -522,87 +533,94 @@ static int16_t packDioCh6() {
   return (int16_t)packed;
 }
 
-static bool initIcm20948() {
-  const uint8_t candidates[] = {ICM20948_ADDR, 0x68, 0x69};
-  for (uint8_t a : candidates) {
-    uint8_t who = 0;
-    if (!icmReadWhoAmI(a, &who)) continue;
-    if (who != ICM20948_WHOAMI_VAL) {
-      Serial.printf("ICM20948 at 0x%02X WHO_AM_I=0x%02X (expected 0xEA)\n", a, who);
-      continue;
-    }
-    icm_addr = a;
-    icmSelectBank(icm_addr, 0);
-    icmWriteAddr(icm_addr, ICM_PWR_MGMT_1, 0x01);
-    delay(100);
-    Serial.printf("ICM20948: OK at I2C 0x%02X WHO_AM_I=0xEA\n", icm_addr);
-    icmApplyRangePresets();
-    return true;
-  }
-  Serial.println("ICM20948: synthetic fallback — no chip at 0x68/0x69 with WHO_AM_I 0xEA");
-  return false;
+static void icmAuxWriteByte(uint8_t slave_addr, uint8_t reg, uint8_t val) {
+  icmSelectBank(0, 3);
+  icmWrite(ICM_I2C_SLV0_ADDR, slave_addr);
+  icmWrite(ICM_I2C_SLV0_REG, reg);
+  icmWrite(ICM_I2C_SLV0_DO, val);
+  icmWrite(ICM_I2C_SLV0_CTRL, 0x81);
+  delay(10);
+  icmWrite(ICM_I2C_SLV0_CTRL, 0x00);
+  icmSelectBank(0, 0);
 }
 
-static bool readImuRaw(int16_t out[6]) {
-  icmSelectBank(icm_addr, 0);
-  Wire.beginTransmission(icm_addr);
-  Wire.write(ICM_ACCEL_XOUT_H);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(icm_addr, (uint8_t)14) != 14) return false;
+static uint8_t icmAuxReadByte(uint8_t slave_addr, uint8_t reg) {
+  icmSelectBank(0, 3);
+  icmWrite(ICM_I2C_SLV0_ADDR, (uint8_t)(0x80 | slave_addr));
+  icmWrite(ICM_I2C_SLV0_REG, reg);
+  icmWrite(ICM_I2C_SLV0_CTRL, 0x81);
+  delay(10);
+  icmSelectBank(0, 0);
+  uint8_t val = 0;
+  icmReadReg(ICM_EXT_SENS_DATA_00, &val);
+  icmSelectBank(0, 3);
+  icmWrite(ICM_I2C_SLV0_CTRL, 0x00);
+  icmSelectBank(0, 0);
+  return val;
+}
 
-  auto read16be = []() {
-    int16_t v = (int16_t)(Wire.read() << 8);
-    v |= Wire.read();
-    return v;
-  };
-  out[0] = read16be();
-  out[1] = read16be();
-  out[2] = read16be();
-  (void)read16be();
-  out[3] = read16be();
-  out[4] = read16be();
-  out[5] = read16be();
+static bool initIcm20948() {
+  icmSpiBegin();
+  uint8_t who = 0;
+  if (!icmReadWhoAmI(0, &who) || who != ICM20948_WHOAMI_VAL) {
+    Serial.printf("ICM20948: synthetic fallback - SPI WHO_AM_I=0x%02X (expected 0xEA)\n", who);
+    return false;
+  }
+
+  icmSelectBank(0, 0);
+  icmWrite(ICM_PWR_MGMT_1, 0x01);
+  delay(100);
+  Serial.printf("ICM20948: OK on SPI CS GPIO%d WHO_AM_I=0xEA\n", PIN_ICM_CS);
+  icmApplyRangePresets();
   return true;
 }
 
-static bool akWrite(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(AK09916_ADDR);
-  Wire.write(reg);
-  Wire.write(val);
-  return Wire.endTransmission() == 0;
-}
+static bool readImuRaw(int16_t out[6]) {
+  uint8_t raw[14];
+  icmSelectBank(0, 0);
+  if (!icmReadBytes(ICM_ACCEL_XOUT_H, raw, sizeof(raw))) return false;
 
-static bool akRead(uint8_t reg, uint8_t *val) {
-  Wire.beginTransmission(AK09916_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(AK09916_ADDR, (uint8_t)1) != 1) return false;
-  *val = Wire.read();
+  auto read16be = [](const uint8_t *p) {
+    return (int16_t)(((uint16_t)p[0] << 8) | p[1]);
+  };
+  out[0] = read16be(&raw[0]);
+  out[1] = read16be(&raw[2]);
+  out[2] = read16be(&raw[4]);
+  out[3] = read16be(&raw[8]);
+  out[4] = read16be(&raw[10]);
+  out[5] = read16be(&raw[12]);
   return true;
 }
 
 static bool initAk09916() {
   if (!icm_ok) return false;
 
-  icmSelectBank(icm_addr, 0);
-  icmWriteAddr(icm_addr, ICM_USER_CTRL, 0x00);
-  icmWriteAddr(icm_addr, ICM_INT_PIN_CFG, 0x02);  // bypass internal I2C master
+  icmSelectBank(0, 0);
+  icmWrite(ICM_USER_CTRL, 0x20);
   delay(10);
+  icmSelectBank(0, 3);
+  icmWrite(ICM_I2C_MST_CTRL, 0x07);
+  delay(10);
+  icmSelectBank(0, 0);
 
-  uint8_t who = 0;
-  if (!akRead(AK09916_WIA2, &who) || who != AK09916_WIA2_VAL) {
-    Serial.printf("AK09916: unavailable at 0x%02X WIA2=0x%02X\n", AK09916_ADDR, who);
+  uint8_t who = icmAuxReadByte(AK09916_ADDR, AK09916_WIA2);
+  if (who != AK09916_WIA2_VAL) {
+    Serial.printf("AK09916: unavailable through ICM SPI aux bus WIA2=0x%02X\n", who);
     return false;
   }
 
-  akWrite(AK09916_CNTL3, 0x01);
+  icmAuxWriteByte(AK09916_ADDR, AK09916_CNTL3, 0x01);
   delay(10);
-  if (!akWrite(AK09916_CNTL2, AK09916_MODE_CONT_100HZ)) {
-    Serial.println("AK09916: failed to enter 100 Hz continuous mode");
-    return false;
-  }
+  icmAuxWriteByte(AK09916_ADDR, AK09916_CNTL2, AK09916_MODE_CONT_100HZ);
 
-  Serial.println("AK09916: OK at I2C 0x0C, continuous 100 Hz");
+  icmSelectBank(0, 3);
+  icmWrite(ICM_I2C_SLV0_ADDR, (uint8_t)(0x80 | AK09916_ADDR));
+  icmWrite(ICM_I2C_SLV0_REG, AK09916_ST1);
+  icmWrite(ICM_I2C_SLV0_CTRL, 0x88);
+  delay(10);
+  icmSelectBank(0, 0);
+
+  Serial.println("AK09916: OK through ICM SPI aux bus, continuous 100 Hz");
   return true;
 }
 
@@ -610,9 +628,11 @@ static bool readMagRaw(int16_t out[3], bool *fresh) {
   if (fresh != nullptr) *fresh = false;
   if (!mag_ok) return false;
 
-  uint8_t st1 = 0;
-  if (!akRead(AK09916_ST1, &st1)) return false;
-  if ((st1 & 0x01) == 0) {
+  uint8_t mag_raw[8];
+  icmSelectBank(0, 0);
+  if (!icmReadBytes(ICM_EXT_SENS_DATA_00, mag_raw, sizeof(mag_raw))) return false;
+
+  if ((mag_raw[0] & 0x01) == 0) {
     if (g_have_mag) {
       out[0] = g_last_mag[0];
       out[1] = g_last_mag[1];
@@ -622,23 +642,7 @@ static bool readMagRaw(int16_t out[3], bool *fresh) {
     return false;
   }
 
-  Wire.beginTransmission(AK09916_ADDR);
-  Wire.write(AK09916_HXL);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(AK09916_ADDR, (uint8_t)8) != 8) return false;
-
-  auto read16le = []() {
-    uint8_t lo = Wire.read();
-    uint8_t hi = Wire.read();
-    return (int16_t)((uint16_t)lo | ((uint16_t)hi << 8));
-  };
-
-  int16_t mx = read16le();
-  int16_t my = read16le();
-  int16_t mz = read16le();
-  (void)Wire.read();
-  uint8_t st2 = Wire.read();
-
+  uint8_t st2 = mag_raw[7];
   if ((st2 & 0x08) != 0) {
     if (g_have_mag) {
       out[0] = g_last_mag[0];
@@ -649,9 +653,9 @@ static bool readMagRaw(int16_t out[3], bool *fresh) {
     return false;
   }
 
-  g_last_mag[0] = out[0] = mx;
-  g_last_mag[1] = out[1] = my;
-  g_last_mag[2] = out[2] = mz;
+  g_last_mag[0] = out[0] = (int16_t)((uint16_t)mag_raw[1] | ((uint16_t)mag_raw[2] << 8));
+  g_last_mag[1] = out[1] = (int16_t)((uint16_t)mag_raw[3] | ((uint16_t)mag_raw[4] << 8));
+  g_last_mag[2] = out[2] = (int16_t)((uint16_t)mag_raw[5] | ((uint16_t)mag_raw[6] << 8));
   g_have_mag = true;
   if (fresh != nullptr) *fresh = true;
   return true;
@@ -714,8 +718,8 @@ static void sendSerialBench() {
 #if ENABLE_SERIAL_BENCH
   if (g_transfer_active) return;
   if (!csv_banner_sent) {
-    Serial.printf("# STEP boot complete icm=%s addr=0x%02X mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz\n",
-                  icm_ok ? "OK" : "FALLBACK", icm_addr, mag_ok ? "OK" : "FALLBACK");
+    Serial.printf("# STEP boot complete icm=%s spi_cs=%d mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz\n",
+                  icm_ok ? "OK" : "FALLBACK", PIN_ICM_CS, mag_ok ? "OK" : "FALLBACK");
     csv_banner_sent = true;
   }
 #if SERIAL_OUTPUT_BINARY
@@ -1580,7 +1584,7 @@ static void maybeRepeatStatus() {
     return;
   }
   if (!icm_ok) {
-    Serial.println("ICM20948: synthetic fallback — check 3V3, GND, SDA->D4, SCL->D5, addr 0x68/0x69");
+    Serial.println("ICM20948: synthetic fallback - check 3V3, GND, SCK->D8, MISO->D9, MOSI->D10, CS->D3");
   }
   if (!mag_ok) {
     Serial.println("MAG unavailable: ch6-8=0, VQF 6-DOF only (no heading). See boot log for cause.");
@@ -1606,8 +1610,8 @@ void setup() {
   if (!mag_ok) {
     Serial.println("WARNING: AK09916 magnetometer not found.");
     Serial.println("  ch[6..8] will be 0; VQF quaternion is 6-DOF only (no yaw/heading).");
-    Serial.println("  Causes: XIAO non-Sense variant (no AK09916); ICM bypass I2C not releasing");
-    Serial.println("  (USER_CTRL); AK09916 needs power-cycle; board wiring missing SDA/SCL to ICM.");
+    Serial.println("  Causes: XIAO non-Sense variant (no AK09916); ICM SPI aux bus not reading");
+    Serial.println("  (USER_CTRL); AK09916 needs power-cycle; board wiring missing SPI pins to ICM.");
   }
 
   setupWifi();
