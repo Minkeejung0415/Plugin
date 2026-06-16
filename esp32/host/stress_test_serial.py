@@ -225,6 +225,8 @@ def wait_for_text(ser: serial.Serial, timeout: float) -> str:
 
 
 STATUS_RE = re.compile(r"(?:SD_STATUS|STATUS)\s+([^\r\n]*)")
+STATUS_BYTES_RE = re.compile(rb"(?:SD_STATUS|STATUS)\s+([^\r\n]*)")
+ACQ_STATUS_BYTES_RE = re.compile(rb"(?<!SD_)STATUS\s+([^\r\n]*)")
 SD_FINAL_RE = re.compile(r"SD_FINAL\s+([^\r\n]*)")
 
 
@@ -246,9 +248,28 @@ def parse_key_values(text: str) -> dict[str, str]:
 
 
 def read_status(ser: serial.Serial, timeout: float = 1.0) -> dict[str, str]:
-    send_line(ser, "STATUS")
-    text = wait_for_text(ser, timeout)
-    return parse_key_values(text)
+    buf = bytearray()
+    end = time.monotonic() + timeout
+    next_send = 0.0
+    while time.monotonic() < end:
+        now = time.monotonic()
+        if now >= next_send:
+            send_line(ser, "STATUS")
+            next_send = now + 0.3
+        chunk = ser.read(ser.in_waiting or 1)
+        if chunk:
+            buf.extend(chunk)
+            for m in ACQ_STATUS_BYTES_RE.finditer(bytes(buf)):
+                values = parse_key_value_parts(m.group(1).decode("utf-8", errors="replace"))
+                if "prof_n" in values:
+                    return values
+        else:
+            time.sleep(0.02)
+    for m in ACQ_STATUS_BYTES_RE.finditer(bytes(buf)):
+        values = parse_key_value_parts(m.group(1).decode("utf-8", errors="replace"))
+        if values:
+            return values
+    return {}
 
 
 def wait_for_sd_final(ser: serial.Serial, timeout: float) -> dict[str, str]:
@@ -470,7 +491,10 @@ def test_one_rate(
         status.update(read_status(ser, 1.0))
         status.update(final_status)
     else:
-        status.update(read_status(ser, 1.0))
+        send_line(ser, "STOP")
+        time.sleep(1.0)
+        drain_serial(ser, 0.5)
+        status.update(read_status(ser, 5.0))
 
     expected = int(hz * capture_s * 0.85)
     rate_ok = mean_hz is not None and (0.95 * hz <= mean_hz <= 1.15 * hz)
@@ -503,10 +527,28 @@ def test_one_rate(
         note = (note + "; " if note else "") + "no SD counters"
     if sd_on and sd_errors:
         note = (note + "; " if note else "") + f"sd_errors={sd_errors}"
-    if sd_on and loop_overruns:
+    if loop_overruns:
         note = (note + "; " if note else "") + f"loop_overruns={loop_overruns}"
     if binary_mode is not False and dup_payload:
         note = (note + "; " if note else "") + f"dup_payload={dup_payload}"
+    prof_n = first_int(status, "prof_n")
+    if prof_n:
+        timing_keys = [
+            "avg_imu_us",
+            "avg_mag_us",
+            "avg_vqf_us",
+            "avg_vqf_mag_us",
+            "avg_quat_us",
+            "avg_serial_us",
+            "max_loop_us",
+        ]
+        timing_parts = []
+        for key in timing_keys:
+            value = maybe_int(status, key)
+            if value is not None:
+                timing_parts.append(f"{key}={value}")
+        if timing_parts:
+            note = (note + "; " if note else "") + "timing " + " ".join(timing_parts)
     return (
         RateResult(
             hz=hz,
@@ -536,19 +578,49 @@ def expand_mode(value: str) -> list[bool]:
     return [value == "on"]
 
 
-def detect_mode(ser: serial.Serial) -> bool:
+def detect_mode(ser: serial.Serial, timeout_s: float = 8.0) -> bool:
     """Return True if binary frames dominate in a short sniff."""
     send_line(ser, "FREQ:100")
-    time.sleep(0.2)
-    sample = ser.read(4096)
-    if b"Format: CSV" in sample or CSV_LINE.search(sample.decode("utf-8", errors="replace")):
-        return False
-    if sample.count(bytes([0, 0, 0, 0])) > 5 and HEADER_SIZE in range(20, 24):
-        return True
+    time.sleep(0.1)
+    send_line(ser, "START")
+    deadline = time.monotonic() + timeout_s
+    sample = bytearray()
+    while time.monotonic() < deadline:
+        chunk = ser.read(max(ser.in_waiting, 256))
+        if chunk:
+            sample.extend(chunk)
+            text = sample.decode("utf-8", errors="replace")
+            if (
+                "TCP listen" in text
+                or "Soft AP" in text
+                or "STEP_ESP32" in text
+                or "Wi-Fi TCP" in text
+            ):
+                raise RuntimeError(
+                    "Serial stress test cannot read samples from this firmware: COM port is diagnostics/control only "
+                    "and the acquisition stream is on Wi-Fi TCP. Join STEP_ESP32 and use 192.168.4.1:5000, "
+                    "or reflash with USB_OPEN_EPHYS_MODE true for serial bench testing."
+                )
+            if b"Format: CSV" in sample or CSV_LINE.search(text):
+                return False
+            if sample.count(bytes([0, 0, 0, 0])) > 5 and HEADER_SIZE in range(20, 24):
+                return True
+            if "Open Ephys binary" in text or "BIN:" in text:
+                return True
+        else:
+            time.sleep(0.05)
+    sample_bytes = bytes(sample)
     text = sample.decode("utf-8", errors="replace")
-    if "Open Ephys binary" in text or "BIN:" in text:
-        return True
-    return True  # default firmware USB_OPEN_EPHYS_MODE
+    if not sample_bytes:
+        raise RuntimeError(
+            "No serial sample frames were detected. The currently flashed Acquisition Board build streams "
+            "samples over Wi-Fi TCP, not COM serial; use TCP/Open Ephys at 192.168.4.1:5000 or reflash "
+            "USB_OPEN_EPHYS_MODE true before running stress_test_serial.py."
+        )
+    raise RuntimeError(
+        "Could not identify a serial CSV or binary sample stream. This usually means the board is flashed "
+        "for Wi-Fi TCP mode; use 192.168.4.1:5000 or reflash USB_OPEN_EPHYS_MODE true for serial stress tests."
+    )
 
 
 def write_summary(results: list[RateResult], port: str, baud: int) -> None:
@@ -703,7 +775,11 @@ def main() -> int:
         time.sleep(2.0)
         drain_serial(ser, 1.0)
         if binary_mode is None:
-            binary_mode = detect_mode(ser)
+            try:
+                binary_mode = detect_mode(ser)
+            except RuntimeError as exc:
+                print(exc, file=sys.stderr)
+                return 3
             print(f"Detected {'binary' if binary_mode else 'CSV'} serial stream")
 
         modes = list(itertools.product(expand_mode(args.filter), expand_mode(args.sd)))

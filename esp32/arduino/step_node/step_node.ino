@@ -16,7 +16,7 @@
  * #define ENABLE_SERIAL_BENCH true
  * #define ENABLE_ESPNOW false
  * #define ENABLE_SD false
- * #define PIN_ICM_CS 4
+ * #define PIN_ICM_CS 44
  * --- end preset ---
  *
  * --- USB_OPEN_EPHYS_MODE (USB power + PC — Wi-Fi not required for Open Ephys) ---
@@ -45,6 +45,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <math.h>
+#include <stdarg.h>
 #include <string.h>
 
 extern "C" {
@@ -68,7 +69,7 @@ extern "C" {
 #define WIFI_AP_PASS "step1234"
 #define WIFI_AP_CHANNEL 6       // 2.4 GHz only — use 1, 6, or 11; explicit helps Windows join
 #define WIFI_AP_MAX_CONN 4
-#define WIFI_STA_TIMEOUT_MS 45000
+#define WIFI_STA_TIMEOUT_MS 1
 // XIAO boards: high TX can desense the onboard antenna — try lower if STA/AP both fail
 #define WIFI_TX_POWER_STA WIFI_POWER_8_5dBm
 #define WIFI_TX_POWER_AP WIFI_POWER_8_5dBm
@@ -77,13 +78,17 @@ extern "C" {
 #define SAMPLE_HZ_DEFAULT 100
 #define NUM_CHANNELS 14
 
-#define ICM_BANK2_ACCEL_CONFIG_1 0x14
+#define ICM_BANK2_GYRO_SMPLRT_DIV 0x00
 #define ICM_BANK2_GYRO_CONFIG_1 0x01
+#define ICM_BANK2_ODR_ALIGN_EN 0x09
+#define ICM_BANK2_ACCEL_SMPLRT_DIV_1 0x10
+#define ICM_BANK2_ACCEL_SMPLRT_DIV_2 0x11
+#define ICM_BANK2_ACCEL_CONFIG_1 0x14
 
 #define PIN_SPI_SCK 7    // XIAO D8 / GPIO7
 #define PIN_SPI_MISO 8   // XIAO D9 / GPIO8
 #define PIN_SPI_MOSI 9   // XIAO D10 / GPIO9
-#define PIN_ICM_CS 4     // XIAO D3 / GPIO4
+#define PIN_ICM_CS 44    // XIAO D7 / GPIO44
 #define PIN_DIO 1       // XIAO D0 / GPIO1 — change via #define if wired elsewhere
 
 #define NODE_IS_MASTER true
@@ -221,6 +226,19 @@ static uint64_t g_sd_write_errors = 0;
 static uint32_t g_max_sd_write_us = 0;
 static uint32_t g_max_loop_us = 0;
 static uint32_t g_loop_overruns = 0;
+static uint64_t g_prof_samples = 0;
+static uint64_t g_prof_imu_sum_us = 0;
+static uint64_t g_prof_mag_sum_us = 0;
+static uint64_t g_prof_vqf_sum_us = 0;
+static uint64_t g_prof_vqf_mag_sum_us = 0;
+static uint64_t g_prof_quat_sum_us = 0;
+static uint64_t g_prof_serial_sum_us = 0;
+static uint32_t g_prof_imu_max_us = 0;
+static uint32_t g_prof_mag_max_us = 0;
+static uint32_t g_prof_vqf_max_us = 0;
+static uint32_t g_prof_vqf_mag_max_us = 0;
+static uint32_t g_prof_quat_max_us = 0;
+static uint32_t g_prof_serial_max_us = 0;
 #if ENABLE_ESPNOW
 static int64_t  g_clock_offset_us      = 0;
 static bool     g_espnow_sync_received = false;
@@ -245,14 +263,51 @@ static const float kGyrLsbPerDps[4] = {131.072f, 65.536f, 32.768f, 16.384f};
 static const float kStdGravityMps2 = 9.80665f;
 static const float kMagUnitsPerLsb = 0.15f;  // AK09916, matches Plugin sensor_fusion ICM20948
 static const float kMagRateHz = 100.0f;
+static const uint32_t kMagPollPeriodUs = 10000UL;
 static const uint32_t kIcmSpiHz = 4000000UL;
+static const uint8_t kIcmGyroSmplrtDiv = 0;
+static const uint16_t kIcmAccelSmplrtDiv = 0;
+static const uint8_t kIcmDlpfCfg = 0;
+static const bool kIcmDlpfEnabled = false;
 
 static VQF g_vqf;
 static bool g_vqf_inited = false;
 static int16_t g_last_mag[3] = {0, 0, 0};
+static uint32_t g_last_mag_poll_us = 0;
 static bool g_have_mag = false;
 
 static bool useWifi() { return ENABLE_TCP; }
+
+static void profAdd(uint32_t elapsed_us, uint64_t *sum_us, uint32_t *max_us) {
+  *sum_us += elapsed_us;
+  if (elapsed_us > *max_us) *max_us = elapsed_us;
+}
+
+static uint32_t profAvg(uint64_t sum_us) {
+  if (g_prof_samples == 0) return 0;
+  return (uint32_t)(sum_us / g_prof_samples);
+}
+
+static void profReset() {
+  g_prof_samples = 0;
+  g_prof_imu_sum_us = 0;
+  g_prof_mag_sum_us = 0;
+  g_prof_vqf_sum_us = 0;
+  g_prof_vqf_mag_sum_us = 0;
+  g_prof_quat_sum_us = 0;
+  g_prof_serial_sum_us = 0;
+  g_prof_imu_max_us = 0;
+  g_prof_mag_max_us = 0;
+  g_prof_vqf_max_us = 0;
+  g_prof_vqf_mag_max_us = 0;
+  g_prof_quat_max_us = 0;
+  g_prof_serial_max_us = 0;
+}
+
+static uint8_t icmConfig1(uint8_t fs_sel) {
+  const uint8_t fchoice = kIcmDlpfEnabled ? 1u : 0u;
+  return (uint8_t)(((kIcmDlpfCfg & 0x07u) << 3) | ((fs_sel & 0x03u) << 1) | fchoice);
+}
 
 static int16_t floatToQ15(float v) {
   if (v > 1.0f) v = 1.0f;
@@ -265,12 +320,21 @@ static void icmApplyRangePresets() {
   const uint8_t acc_fs = g_acc_preset & 3u;
   const uint8_t gyr_fs = g_gyr_preset & 3u;
   icmSelectBank(0, 2);
-  icmWrite(ICM_BANK2_ACCEL_CONFIG_1, (uint8_t)(acc_fs << 1));
-  icmWrite(ICM_BANK2_GYRO_CONFIG_1, (uint8_t)(gyr_fs << 1));
+  icmWrite(ICM_BANK2_ACCEL_CONFIG_1, icmConfig1(acc_fs));
+  icmWrite(ICM_BANK2_GYRO_CONFIG_1, icmConfig1(gyr_fs));
   icmSelectBank(0, 0);
 #if !SERIAL_OUTPUT_BINARY
   Serial.printf("ICM range: ACC preset %u  GYR preset %u\n", acc_fs, gyr_fs);
 #endif
+}
+
+static void icmConfigureOutputRate() {
+  icmSelectBank(0, 2);
+  icmWrite(ICM_BANK2_GYRO_SMPLRT_DIV, kIcmGyroSmplrtDiv);
+  icmWrite(ICM_BANK2_ACCEL_SMPLRT_DIV_1, (uint8_t)(kIcmAccelSmplrtDiv >> 8));
+  icmWrite(ICM_BANK2_ACCEL_SMPLRT_DIV_2, (uint8_t)(kIcmAccelSmplrtDiv & 0xFF));
+  icmWrite(ICM_BANK2_ODR_ALIGN_EN, 0x01);
+  icmSelectBank(0, 0);
 }
 
 static void vqfReinitFilter() {
@@ -302,23 +366,31 @@ static void vqfUpdateFromImu(const int16_t imu[6], const int16_t *mag_or_null,
 
   vqf_real_t acc[3], gyr[3];
   imuRawToVqfPhysical(imu, acc, gyr);
+  uint32_t prof_start_us = micros();
   vqf_update(&g_vqf, gyr, acc);
+  profAdd((uint32_t)(micros() - prof_start_us), &g_prof_vqf_sum_us, &g_prof_vqf_max_us);
 
   if (mag_or_null != nullptr && mag_fresh) {
     vqf_real_t mag[3];
     mag[0] = (vqf_real_t)((float)mag_or_null[0] * kMagUnitsPerLsb);
     mag[1] = (vqf_real_t)((float)mag_or_null[1] * kMagUnitsPerLsb);
     mag[2] = (vqf_real_t)((float)mag_or_null[2] * kMagUnitsPerLsb);
+    prof_start_us = micros();
     vqf_update_mag(&g_vqf, mag);
+    profAdd((uint32_t)(micros() - prof_start_us), &g_prof_vqf_mag_sum_us,
+            &g_prof_vqf_mag_max_us);
   }
 }
 
 static void vqfReadQuatQ15(int16_t out[4], bool use_9d) {
   vqf_real_t quat[4];
+  uint32_t prof_start_us = micros();
   if (use_9d)
     vqf_get_quat_9d(&g_vqf, quat);
   else
     vqf_get_quat_6d(&g_vqf, quat);
+  profAdd((uint32_t)(micros() - prof_start_us), &g_prof_quat_sum_us,
+          &g_prof_quat_max_us);
   out[0] = floatToQ15((float)quat[0]);
   out[1] = floatToQ15((float)quat[1]);
   out[2] = floatToQ15((float)quat[2]);
@@ -486,8 +558,12 @@ static void printBootDiagnostics() {
   Serial.println("========================================");
   Serial.printf("Firmware: %s\n", FIRMWARE_VERSION);
   Serial.printf("Board target: XIAO_ESP32S3 (Sense)\n");
-  Serial.printf("SPI SCK: GPIO%d (D8)  MISO: GPIO%d (D9)  MOSI: GPIO%d (D10)  ICM CS: GPIO%d (D3)\n",
+  Serial.printf("SPI SCK: GPIO%d (D8)  MISO: GPIO%d (D9)  MOSI: GPIO%d (D10)  ICM CS: GPIO%d (D7)\n",
                 PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_ICM_CS);
+  Serial.printf("ICM ODR: gyro_div=%u accel_div=%u odr_align=1 dlpf=%s dlpf_cfg=%u\n",
+                kIcmGyroSmplrtDiv, kIcmAccelSmplrtDiv,
+                kIcmDlpfEnabled ? "on" : "off", kIcmDlpfCfg);
+  Serial.printf("Mag poll: %.0f Hz, cached between polls\n", kMagRateHz);
   Serial.printf("Sample rate: %d Hz  channels: %d\n", g_sample_hz, NUM_CHANNELS);
   Serial.println("--- ICM20948 SPI WHO_AM_I (expect 0xEA) ---");
   icmSpiBegin();
@@ -570,7 +646,11 @@ static bool initIcm20948() {
   icmSelectBank(0, 0);
   icmWrite(ICM_PWR_MGMT_1, 0x01);
   delay(100);
+  icmConfigureOutputRate();
   Serial.printf("ICM20948: OK on SPI CS GPIO%d WHO_AM_I=0xEA\n", PIN_ICM_CS);
+  Serial.printf("ICM20948: ODR gyro_div=%u accel_div=%u odr_align=1 dlpf=%s cfg=%u\n",
+                kIcmGyroSmplrtDiv, kIcmAccelSmplrtDiv,
+                kIcmDlpfEnabled ? "on" : "off", kIcmDlpfCfg);
   icmApplyRangePresets();
   return true;
 }
@@ -620,7 +700,7 @@ static bool initAk09916() {
   delay(10);
   icmSelectBank(0, 0);
 
-  Serial.println("AK09916: OK through ICM SPI aux bus, continuous 100 Hz");
+  Serial.println("AK09916: OK through ICM SPI aux bus, continuous 100 Hz, cached between polls");
   return true;
 }
 
@@ -672,11 +752,19 @@ static void readImu(int16_t out[6]) {
 }
 
 static void readMag(int16_t out[3], bool *fresh) {
-  if (readMagRaw(out, fresh)) return;
+  if (fresh != nullptr) *fresh = false;
+
+  const uint32_t now_us = micros();
+  const bool poll_due = !g_have_mag || g_last_mag_poll_us == 0 ||
+                        (uint32_t)(now_us - g_last_mag_poll_us) >= kMagPollPeriodUs;
+  if (poll_due) {
+    g_last_mag_poll_us = now_us;
+    if (readMagRaw(out, fresh)) return;
+  }
+
   out[0] = g_last_mag[0];
   out[1] = g_last_mag[1];
   out[2] = g_last_mag[2];
-  if (fresh != nullptr) *fresh = false;
 }
 
 // Open Ephys header offset field (int32 LE): low 32 bits of esp_timer_get_time() µs since boot.
@@ -716,7 +804,7 @@ static void packAndSendTcp() {
 
 static void sendSerialBench() {
 #if ENABLE_SERIAL_BENCH
-  if (g_transfer_active) return;
+  if (g_transfer_active || !streaming) return;
   if (!csv_banner_sent) {
     Serial.printf("# STEP boot complete icm=%s spi_cs=%d mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz\n",
                   icm_ok ? "OK" : "FALLBACK", PIN_ICM_CS, mag_ok ? "OK" : "FALLBACK");
@@ -738,6 +826,16 @@ static void sendSerialBench() {
 }
 
 static void sdRecordStop();
+static void recReplyToHost(const char *text);
+
+static void controlPrintf(const char *fmt, ...) {
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  recReplyToHost(buf);
+}
 
 static uint32_t recCrc32Update(uint32_t crc, const uint8_t *data, size_t len) {
   crc = ~crc;
@@ -809,6 +907,14 @@ static void recMaybeFinalizeTimeout() {
   }
 }
 
+static void recWriteBytes(const uint8_t *data, size_t len) {
+#if ENABLE_TCP && !ENABLE_SERIAL_BENCH
+  if (client && client.connected()) client.write(data, len);
+#else
+  Serial.write(data, len);
+#endif
+}
+
 static void writeSdrfFrame(const char *session_id, uint8_t type, uint32_t chunk_index,
                            uint64_t offset, const uint8_t *payload, uint32_t payload_len,
                            uint64_t total_size, uint32_t flags) {
@@ -828,8 +934,8 @@ static void writeSdrfFrame(const char *session_id, uint8_t type, uint32_t chunk_
   hdr.flags = flags;
   hdr.header_crc32 = 0;
   hdr.header_crc32 = recCrc32Update(0, (const uint8_t *)&hdr, sizeof(hdr));
-  Serial.write((uint8_t *)&hdr, sizeof(hdr));
-  if (payload && payload_len) Serial.write(payload, payload_len);
+  recWriteBytes((uint8_t *)&hdr, sizeof(hdr));
+  if (payload && payload_len) recWriteBytes(payload, payload_len);
 }
 
 #if ENABLE_SD
@@ -893,7 +999,7 @@ static bool sdRecordStart(const char *path_or_null) {
     g_sd_write_errors++;
     strncpy(g_rec_state, "failed", sizeof(g_rec_state) - 1);
     strncpy(g_last_rec_error, "sd_not_ready", sizeof(g_last_rec_error) - 1);
-    Serial.println("SD_STATUS enabled=1 ready=0 recording=0 error=begin_failed");
+    controlPrintf("SD_STATUS enabled=1 ready=0 recording=0 error=begin_failed\n");
     return false;
   }
 
@@ -923,7 +1029,7 @@ static bool sdRecordStart(const char *path_or_null) {
     g_sd_write_errors++;
     strncpy(g_rec_state, "failed", sizeof(g_rec_state) - 1);
     strncpy(g_last_rec_error, "open_failed", sizeof(g_last_rec_error) - 1);
-    Serial.printf("SD_STATUS enabled=1 ready=1 recording=0 error=open_failed path=%s\n", g_sd_path);
+    controlPrintf("SD_STATUS enabled=1 ready=1 recording=0 error=open_failed path=%s\n", g_sd_path);
     return false;
   }
 
@@ -951,11 +1057,11 @@ static bool sdRecordStart(const char *path_or_null) {
 
   g_sd_recording = true;
   strncpy(g_rec_state, "recording", sizeof(g_rec_state) - 1);
-  Serial.printf("SD_STATUS enabled=1 ready=1 recording=1 path=%s sample_hz=%u\n",
+  controlPrintf("SD_STATUS enabled=1 ready=1 recording=1 path=%s sample_hz=%u\n",
                 g_sd_path, (unsigned)g_sample_hz);
   return true;
 #else
-  Serial.println("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled");
+  controlPrintf("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled\n");
   return false;
 #endif
 }
@@ -972,7 +1078,7 @@ static void sdRecordStop() {
     g_sd_file.close();
   }
   if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
-  Serial.printf("SD_FINAL ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu overrun=%lu\n",
+  controlPrintf("SD_FINAL ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu overrun=%lu\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_path,
                 (unsigned long long)g_sd_saved_samples,
@@ -985,14 +1091,14 @@ static void sdRecordStop() {
   }
   strncpy(g_rec_state, "finalized", sizeof(g_rec_state) - 1);
   g_rec_grace_deadline_ms = 0;
-  Serial.printf("SD_STATUS enabled=1 ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu\n",
+  controlPrintf("SD_STATUS enabled=1 ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_path,
                 (unsigned long long)g_sd_saved_samples,
                 (unsigned long long)g_sd_write_errors,
                 (unsigned long)g_max_sd_write_us);
 #else
-  Serial.println("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled");
+  controlPrintf("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled\n");
 #endif
 }
 
@@ -1000,7 +1106,14 @@ static void printAcqStatus() {
   Serial.printf("STATUS seq=%lu generated=%llu sample_hz=%u filter=%d streaming=%d "
                 "icm_ok=%d mag_ok=%d "
                 "sd_enabled=%d sd_ready=%d sd_recording=%d sd_saved=%llu sd_errors=%llu "
-                "max_sd_write_us=%lu max_loop_us=%lu loop_overruns=%lu\n",
+                "max_sd_write_us=%lu max_loop_us=%lu loop_overruns=%lu "
+                "prof_n=%llu "
+                "avg_imu_us=%lu max_imu_us=%lu "
+                "avg_mag_us=%lu max_mag_us=%lu "
+                "avg_vqf_us=%lu max_vqf_us=%lu "
+                "avg_vqf_mag_us=%lu max_vqf_mag_us=%lu "
+                "avg_quat_us=%lu max_quat_us=%lu "
+                "avg_serial_us=%lu max_serial_us=%lu\n",
                 (unsigned long)seq,
                 (unsigned long long)g_generated_samples,
                 (unsigned)g_sample_hz,
@@ -1019,7 +1132,20 @@ static void printAcqStatus() {
                 (unsigned long long)g_sd_write_errors,
                 (unsigned long)g_max_sd_write_us,
                 (unsigned long)g_max_loop_us,
-                (unsigned long)g_loop_overruns);
+                (unsigned long)g_loop_overruns,
+                (unsigned long long)g_prof_samples,
+                (unsigned long)profAvg(g_prof_imu_sum_us),
+                (unsigned long)g_prof_imu_max_us,
+                (unsigned long)profAvg(g_prof_mag_sum_us),
+                (unsigned long)g_prof_mag_max_us,
+                (unsigned long)profAvg(g_prof_vqf_sum_us),
+                (unsigned long)g_prof_vqf_max_us,
+                (unsigned long)profAvg(g_prof_vqf_mag_sum_us),
+                (unsigned long)g_prof_vqf_mag_max_us,
+                (unsigned long)profAvg(g_prof_quat_sum_us),
+                (unsigned long)g_prof_quat_max_us,
+                (unsigned long)profAvg(g_prof_serial_sum_us),
+                (unsigned long)g_prof_serial_max_us);
 #if ENABLE_ESPNOW
   Serial.printf("ESPNOW role=%s ch=%d sync=%d offset_us=%lld last_seq=%lu\n",
                 NODE_IS_MASTER ? "master" : "slave",
@@ -1265,6 +1391,9 @@ static void handleLine(const String &line) {
     } else {
       g_sample_hz = (uint16_t)hz;
       g_sample_last_us = 0;
+      g_loop_overruns = 0;
+      g_max_loop_us = 0;
+      profReset();
       if (g_filter_on)
         vqfReinitFilter();
       char ok[32];
@@ -1277,13 +1406,20 @@ static void handleLine(const String &line) {
   } else if (line.startsWith("FILTER ON")) {
     g_filter_on = true;
     vqfReinitFilter();
+    g_loop_overruns = 0;
+    g_max_loop_us = 0;
+    profReset();
     replyToHost("OK FILTER ON\n");
   } else if (line.startsWith("FILTER OFF")) {
     g_filter_on = false;
+    g_loop_overruns = 0;
+    g_max_loop_us = 0;
+    profReset();
     replyToHost("OK FILTER OFF\n");
   } else if (line.startsWith("RECORD ON")) {
     g_loop_overruns = 0;
     g_max_loop_us   = 0;
+    profReset();
     String path = line.substring(9);
     path.trim();
     sdRecordStart(path.length() ? path.c_str() : nullptr);
@@ -1292,6 +1428,9 @@ static void handleLine(const String &line) {
   } else if (handleCfgLine(line)) {
     // handled
   } else if (line.startsWith("START")) {
+    g_loop_overruns = 0;
+    g_max_loop_us = 0;
+    profReset();
     streaming = true;
     replyToHost("STARTED BIN:esp32s3_arduino\n");
     replyToHost("SENSORS:0,ICM20948\n");
@@ -1584,7 +1723,7 @@ static void maybeRepeatStatus() {
     return;
   }
   if (!icm_ok) {
-    Serial.println("ICM20948: synthetic fallback - check 3V3, GND, SCK->D8, MISO->D9, MOSI->D10, CS->D3");
+    Serial.println("ICM20948: synthetic fallback - check 3V3, GND, SCK->D8, MISO->D9, MOSI->D10, CS->D7");
   }
   if (!mag_ok) {
     Serial.println("MAG unavailable: ch6-8=0, VQF 6-DOF only (no heading). See boot log for cause.");
@@ -1687,17 +1826,27 @@ void loop() {
   int16_t imu[6];
   int16_t mag[3];
   bool mag_fresh = false;
+  uint32_t prof_start_us = micros();
   readImu(imu);
+  profAdd((uint32_t)(micros() - prof_start_us), &g_prof_imu_sum_us, &g_prof_imu_max_us);
+
+  prof_start_us = micros();
   readMag(mag, &mag_fresh);
+  profAdd((uint32_t)(micros() - prof_start_us), &g_prof_mag_sum_us, &g_prof_mag_max_us);
+
   updateDio();
   packChannelsFromImu(imu, mag_ok ? mag : nullptr, mag_fresh);
 
   sendEspNowSync();
   packAndSendTcp();
+  prof_start_us = micros();
   sendSerialBench();
+  profAdd((uint32_t)(micros() - prof_start_us), &g_prof_serial_sum_us,
+          &g_prof_serial_max_us);
   logSd();
 
   g_generated_samples++;
+  g_prof_samples++;
   uint32_t loop_us = (uint32_t)(micros() - loop_start_us);
   if (loop_us > g_max_loop_us) g_max_loop_us = loop_us;
   if (loop_us > period_us) g_loop_overruns++;
