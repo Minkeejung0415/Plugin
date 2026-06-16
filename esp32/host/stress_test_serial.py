@@ -303,7 +303,7 @@ def capture_text_csv(ser: serial.Serial, seconds: float, out_path: Path) -> int:
     return len(lines)
 
 
-def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) -> tuple[int, float | None]:
+def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) -> tuple[int, float | None, int]:
     """Parse Open Ephys binary frames; write seq,time_s (hw_us when offset!=0 else host)."""
     end = time.monotonic() + seconds
     pending = bytearray()
@@ -313,6 +313,8 @@ def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) ->
     last_hw_us32: int | None = None
     hw_t0_us: int | None = None
     dts: list[float] = []
+    prev_payload: bytes | None = None
+    dup_payload: int = 0
 
     while time.monotonic() < end:
         chunk = ser.read(max(ser.in_waiting, 256))
@@ -353,6 +355,10 @@ def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) ->
             frame_size = HEADER_SIZE + num_bytes
             if len(pending) < frame_size:
                 break
+            payload = bytes(pending[HEADER_SIZE:frame_size])
+            if prev_payload is not None and payload == prev_payload:
+                dup_payload += 1
+            prev_payload = payload
             del pending[:frame_size]
             seq = len(rows)
             if offset != 0:
@@ -379,7 +385,7 @@ def capture_binary_to_csv(ser: serial.Serial, seconds: float, out_path: Path) ->
         mean_dt = sum(dts) / len(dts)
         if mean_dt > 0:
             mean_hz = 1.0 / mean_dt
-    return len(rows), mean_hz
+    return len(rows), mean_hz, dup_payload
 
 
 def run_analyzer(path: Path, time_col: int | None = None) -> tuple[int, int, float | None, int]:
