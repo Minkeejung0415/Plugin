@@ -551,6 +551,60 @@ def detect_mode(ser: serial.Serial) -> bool:
     return True  # default firmware USB_OPEN_EPHYS_MODE
 
 
+def write_summary(results: list[RateResult], port: str, baud: int) -> None:
+    """Write SUMMARY.md and SUMMARY.json from a results list."""
+    last_good = 0
+    first_fail_hz: int | None = None
+    first_fail_note: str | None = None
+    for r in results:
+        if r.passed:
+            last_good = r.hz
+        elif first_fail_hz is None and r.result != "PASS":
+            first_fail_hz = r.hz
+            first_fail_note = r.note or "see counters"
+    recommended = int(last_good * 0.8) if last_good else 0
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    summary = RESULTS_DIR / "SUMMARY.md"
+    lines = [
+        "# Stress sweep summary",
+        "",
+        f"Port: `{port}` baud {baud}",
+        "",
+        "| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass | note |",
+        "|----|--------|----|---------|------|---------|---------|----------|--------|-----------|---------|------|------|",
+    ]
+    for r in results:
+        mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
+        lines.append(
+            f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
+            f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
+            f"{r.sd_saved if r.sd_saved is not None else 'n/a'} | "
+            f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "
+            f"{r.max_sd_write_us if r.max_sd_write_us is not None else 'n/a'} | "
+            f"{r.loop_overruns if r.loop_overruns is not None else 'n/a'} | "
+            f"{r.result} | {r.note} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Pass rule: `mean_hz` must be within **95%–115%** of requested Hz "
+            "(e.g. 1500 Hz @ 1320 Hz → **FAIL**; USB/loop ceiling ~1.3 kHz on this path).",
+            "",
+            f"Highest passing Hz: **{last_good}**",
+            f"Recommended cap (80% of highest pass): **{recommended} Hz**",
+        ]
+    )
+    if first_fail_hz is not None:
+        lines.append(f"\nFirst failure: {first_fail_hz} Hz — {first_fail_note}")
+    summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    json_path = RESULTS_DIR / "SUMMARY.json"
+    json_path.write_text(
+        json.dumps([r.__dict__ for r in results], indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port", help="Serial port (e.g. COM3)")
@@ -583,7 +637,21 @@ def main() -> int:
         default=0,
         help="Retry open up to 10 times (0.5 s apart) when port is busy; e.g. 5",
     )
+    p.add_argument("--rebuild-summary", action="store_true",
+                   help="Rebuild SUMMARY.md from existing SUMMARY.json and exit.")
     args = p.parse_args()
+
+    if args.rebuild_summary:
+        json_path = RESULTS_DIR / "SUMMARY.json"
+        if not json_path.exists():
+            print("No SUMMARY.json found. Run a sweep first.", file=sys.stderr)
+            return 1
+        import json as _json
+        raw = _json.loads(json_path.read_text(encoding="utf-8"))
+        results = [RateResult(**r) for r in raw]
+        write_summary(results, port="(rebuilt)", baud=115200)
+        print(f"Summary rebuilt from {json_path}")
+        return 0
 
     if args.sd_file:
         cmd = [sys.executable, str(ANALYZER), str(args.sd_file), "--format", "sd-bin"]
@@ -678,42 +746,7 @@ def main() -> int:
         print(f"\nHighest passing Hz: {last_good}")
         print(f"Recommended cap (80%): {recommended} Hz")
 
-        summary = RESULTS_DIR / "SUMMARY.md"
-        lines = [
-            "# Stress sweep summary",
-            "",
-            f"Port: `{port}` baud {args.baud}",
-            "",
-            "| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass |",
-            "|----|--------|----|---------|------|---------|---------|----------|--------|-----------|---------|------|",
-        ]
-        for r in results:
-            mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
-            lines.append(
-                f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
-                f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
-                f"{r.sd_saved if r.sd_saved is not None else 'n/a'} | "
-                f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "
-                f"{r.max_sd_write_us if r.max_sd_write_us is not None else 'n/a'} | "
-                f"{r.loop_overruns if r.loop_overruns is not None else 'n/a'} | "
-                f"{r.result} |"
-            )
-        lines.extend(
-            [
-                "",
-                "Pass rule: `mean_hz` must be within **95%–115%** of requested Hz "
-                "(e.g. 1500 Hz @ 1320 Hz → **FAIL**; USB/loop ceiling ~1.3 kHz on this path).",
-                "",
-                f"Highest passing Hz: **{last_good}**",
-                f"Recommended cap (80% of highest pass): **{recommended} Hz**",
-            ]
-        )
-        summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        json_path = RESULTS_DIR / "SUMMARY.json"
-        json_path.write_text(
-            json.dumps([r.__dict__ for r in results], indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_summary(results, port, args.baud)
     finally:
         ser.close()
     return 0
