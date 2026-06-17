@@ -12,7 +12,7 @@ Board on **USB to PC only**. Firmware **v1.3.4** (`FIRMWARE_VERSION` in sketch).
    ```cpp
    #define USB_OPEN_EPHYS_MODE true
    ```
-   (Sets `ENABLE_TCP false`, `ENABLE_SERIAL_BENCH true`, `SERIAL_OUTPUT_BINARY true`, **100 Hz**, **8 ch**.)
+   (Sets `ENABLE_TCP false`, `ENABLE_SERIAL_BENCH true`, `SERIAL_OUTPUT_BINARY true`, **100 Hz**, **14 ch**.)
 2. **Arduino IDE** — Board **XIAO_ESP32S3**, **USB CDC On Boot → Enabled**, upload.
 3. **COM port (Windows)** — **Device Manager → Ports (COM & LPT)** → e.g. `USB Serial Device (COM5)`. Unplug/replug if missing.
 4. **Boot check** @ **115200** (optional): `Wi-Fi skipped`, `Serial bench active @115200`, `Format: Open Ephys binary on Serial`. Frames start **5 s** after reset.
@@ -22,8 +22,8 @@ Board on **USB to PC only**. Firmware **v1.3.4** (`FIRMWARE_VERSION` in sketch).
    pip install pyserial
    .\host\run_usb_plugin_bridge.ps1 COM5
    ```
-   Or: `python host\serial_tcp_bridge.py COM5 --plugin` (Acq Board). For **11-channel** fusion firmware: `set ESP32_NUM_CHANNELS=11` before starting the bridge.
-7. **Open Ephys** — **`127.0.0.1:5000`** (not the ESP32 Wi-Fi IP). **Sample rate 100 Hz**; match channel count to firmware (8 or 11).
+   Or: `python host\serial_tcp_bridge.py COM5 --plugin` (Acq Board). For legacy **8- or 11-channel** firmware: set `ESP32_NUM_CHANNELS=8` or `ESP32_NUM_CHANNELS=11` before starting the bridge.
+7. **Open Ephys** — **`127.0.0.1:5000`** (not the ESP32 Wi-Fi IP). **Sample rate 100 Hz**; current STEP firmware exposes 14 channels; set `ESP32_NUM_CHANNELS` only for legacy 8- or 11-channel firmware.
    - **Ephys Socket** (built-in): bridge **without** `--plugin`.
    - **Plugin Acq Board** (Minkeejung0415/Plugin, custom GUI): **`run_usb_plugin_bridge.ps1`**, Node IP **`127.0.0.1`** — Wi-Fi not required.
 
@@ -52,10 +52,10 @@ Use when the board is **USB-connected to the PC only** — no router, no TCP.
    #define ENABLE_ESPNOW false
    ```
 2. **Tools → USB CDC On Boot → Enabled**; upload; pick the board’s **COM port**.
-3. Optional **`SERIAL_OUTPUT_BINARY true`** — same 22-byte Open Ephys header + 8× int16 as TCP, sent over Serial (for host parsers).
+3. Optional **`SERIAL_OUTPUT_BINARY true`** — same 22-byte Open Ephys header + 14x int16 as TCP, sent over Serial (for host parsers).
 4. Default (**`SERIAL_OUTPUT_BINARY false`**) — one CSV line per sample @ 100 Hz:
    ```
-   seq,ax,ay,az,gx,gy,gz,dio,cam
+   seq,ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz,dio
    ```
 5. **Windows host script** (COM port from Device Manager):
    ```powershell
@@ -135,7 +135,7 @@ ICM20948: OK
 Wi-Fi skipped — USB serial bench mode
 ESP-NOW disabled — single-node mode
 Serial bench active @115200
-Format: CSV seq,ax,ay,az,gx,gy,gz,dio,cam
+Format: CSV seq,ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz,dio
 ```
 
 - **`ICM20948: OK at I2C 0x69 WHO_AM_I=0xEA`** — real chip; CSV should show changing ax/ay/az (not fixed sinewave)
@@ -266,7 +266,7 @@ Use this when you believe SSID/password are right and the PC is on the **same** 
 | 5 | While connecting | `disc_reason=15` or `202` → password/WPA3; `201` → SSID/band |
 | 6 | After connect | `TCP listen :5000`; every 10 s: `STATUS` block with same **IP** |
 | 7 | PC routing | `ping <IP>` succeeds; disable VPN |
-| 8 | TCP | `python host\esp32_tcp_client.py --host <IP>` logs `handshake: 8 channels…` |
+| 8 | TCP | `python host\esp32_tcp_client.py --host <IP>` logs `handshake: 14 channels…` |
 | 9 | Open Ephys Plugin | Node IP = **Serial IP** (not `127.0.0.1` unless USB bridge); port **5000** |
 | 10 | Isolation | Campus/guest Wi-Fi often blocks PC↔device; iPhone hotspot needs **Maximize Compatibility** |
 
@@ -426,20 +426,20 @@ Matches STEP / Red Pitaya behavior:
 | Step | Action |
 |------|--------|
 | Connect | TCP to node IP, port **5000** |
-| Handshake | Send `REDPITAYA\n` → `8 channels; sample_rate=<Hz>; node=esp32s3_arduino; filter=on\|off` |
+| Handshake | Send `REDPITAYA\n` → `14 channels; sample_rate=<Hz>; node=esp32s3_arduino; filter=on\|off` |
 | Start | Send `START\n` (Plugin may send `FREQ:<Hz>` first) |
-| Payload | 22-byte little-endian header + **8 × int16** channel-major |
+| Payload | 22-byte little-endian header + **14 x int16** channel-major |
 
 TCP text commands (v2.0, newline-terminated):
 
 | Command | Example | Effect |
 |---------|---------|--------|
-| `REDPITAYA` | `REDPITAYA\n` | Handshake + `OK CHANNELS:8` |
+| `REDPITAYA` | `REDPITAYA\n` | Handshake + `OK CHANNELS:14` |
 | `START` | `START\n` | Begin binary stream |
 | `FREQ:` | `FREQ:100\n` | Sample rate **50–200 Hz** (default 100) |
 | `CFG` | `CFG 0 ACC 2\n` | ICM accel full-scale preset 0–3 |
 | `CFG` | `CFG 0 GYR 1\n` | ICM gyro full-scale preset 0–3 |
-| `FILTER` | `FILTER ON\n` / `FILTER OFF\n` | VQF on ch7–10 when ON (see channel map) |
+| `FILTER` | `FILTER ON\n` / `FILTER OFF\n` | VQF on ch9-12 when ON (see channel map) |
 | `STATUS` | `STATUS\n` | Wi-Fi / AP status (Serial or TCP) |
 
 Channel map:
@@ -447,9 +447,11 @@ Channel map:
 | Ch | `FILTER OFF` | `FILTER ON` |
 |----|----------------|-------------|
 | 0–2 | ax, ay, az (int16) | ax, ay, az |
-| 3–5 | gx, gy, gz | qx, qy, qz (Q15 unit quaternion) |
-| 6 | DIO: bit0 level, bits1–15 edge count | same |
-| 7 | 0 | qw (Q15) |
+| 3-5 | gx, gy, gz | gx, gy, gz |
+| 6-8 | mx, my, mz | mx, my, mz |
+| 9-12 | 0 | qw, qx, qy, qz (Q15 unit quaternion) |
+| 13 | DIO: bit0 level, bits1-15 edge count | same |
+
 
 Host test:
 

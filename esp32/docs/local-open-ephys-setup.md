@@ -9,11 +9,11 @@ Step-by-step setup for **Seeed XIAO ESP32-S3** (ICM-20948 + DIO) with the custom
 
 | Path | When | Open Ephys |
 |------|------|------------|
-| **USB + Plugin (recommended if Wi‑Fi broken)** | Board on **USB power/data** to PC; `USB_OPEN_EPHYS_MODE true` | `host\run_usb_plugin_bridge.ps1 COMx` → Acq Board **Node IP `127.0.0.1`**, port **5000**, **100 Hz**, **8 ch** — **Wi‑Fi not required** |
+| **USB + Plugin (recommended if Wi‑Fi broken)** | Board on **USB power/data** to PC; `USB_OPEN_EPHYS_MODE true` | `host\run_usb_plugin_bridge.ps1 COMx` → Acq Board **Node IP `127.0.0.1`**, port **5000**, **100 Hz**, **14 ch** — **Wi‑Fi not required** |
 | **Wi‑Fi + Plugin** | `USB_OPEN_EPHYS_MODE false`, STA or Soft AP | Acq Board → **Serial Monitor IP** (e.g. `192.168.4.1`), port **5000** |
 | **USB + Ephys Socket** | Same USB firmware; bridge **without** `--plugin` | Built-in Ephys Socket → **`127.0.0.1:5000`** |
 
-**Architecture (USB + Plugin):** firmware → Open Ephys **binary on USB serial @ 100 Hz, 8 ch** → `serial_tcp_bridge.py --plugin` → TCP **`127.0.0.1:5000`** with `REDPITAYA` / `START` / `STARTED` / `SENSORS` replies → Plugin **Acq Board** (same handshake as direct ESP32 TCP). Running Wi‑Fi TCP and the bridge at once is unnecessary and shares one COM port; use the bridge for Plugin on USB.
+**Architecture (USB + Plugin):** firmware → Open Ephys **binary on USB serial @ 100 Hz, 14 ch** → `serial_tcp_bridge.py --plugin` → TCP **`127.0.0.1:5000`** with `REDPITAYA` / `START` / `STARTED` / `SENSORS` replies → Plugin **Acq Board** (same handshake as direct ESP32 TCP). Running Wi‑Fi TCP and the bridge at once is unnecessary and shares one COM port; use the bridge for Plugin on USB.
 
 See also: [open-ephys-plugin.md](open-ephys-plugin.md), [arduino-ide-guide.md](arduino-ide-guide.md), [.planning/PLUGIN-INTEGRATION.md](../.planning/PLUGIN-INTEGRATION.md).
 
@@ -93,7 +93,7 @@ pip install pyserial
 
 Or: `python host\serial_tcp_bridge.py COM5 --plugin`
 
-5. **Custom Open Ephys GUI** (Plugin built per §6): **Sources → Acq Board** → **Node IP `127.0.0.1`**, **100 Hz** → Record → **8 channels**.
+5. **Custom Open Ephys GUI** (Plugin built per §6): **Sources → Acq Board** → **Node IP `127.0.0.1`**, **100 Hz** → Record → **14 channels**.
 
 Plugin repo must include commits **`217425a`** + **`e298679`** (`isEsp32Node`, TCP binary stream). Wi‑Fi is **not** used on this path.
 
@@ -134,7 +134,7 @@ $env:ESP32_NODE_HOST = "192.168.x.x"
 python host\esp32_tcp_client.py
 ```
 
-Pass: handshake `8 channels; sample_rate=100; node=esp32s3_arduino`, then samples.
+Pass: handshake `14 channels; sample_rate=100; node=esp32s3_arduino`, then samples.
 
 ---
 
@@ -202,7 +202,7 @@ $env:ESP32_NODE_HOST = "192.168.x.x"   # optional default
 2. Add **Sources → Acq Board**.
 3. Set **Node IP** in editor (triggers re-detect).
 4. **Sample rate 100 Hz**.
-5. Record — expect **8 channels**.
+5. Record — expect **14 channels**.
 
 Detection tries `rp-*.local` first, then Node IP / `ESP32_NODE_HOST`.
 
@@ -249,7 +249,7 @@ Bridge listens on **`127.0.0.1:5000`** and answers like ESP32 Wi‑Fi firmware +
 
 | Client sends | Bridge replies |
 |--------------|----------------|
-| `REDPITAYA\n` | `8 channels; sample_rate=100; node=esp32s3_arduino\n` and `OK CHANNELS:8\n` |
+| `REDPITAYA\n` | `14 channels; sample_rate=100; node=esp32s3_arduino\n` and `OK CHANNELS:14\n` |
 | `START\n` | `STARTED BIN:step_usb_bridge\n` and `SENSORS:0,ICM20948\n` |
 | (then) | Open Ephys binary frames from USB serial |
 
@@ -257,7 +257,7 @@ Open Ephys (custom GUI + Plugin):
 
 1. **Sources → Acq Board**
 2. **Node IP:** `127.0.0.1` (not the ESP32 Wi‑Fi IP)
-3. **Sample rate:** 100 Hz → Record → **8 channels**
+3. **Sample rate:** 100 Hz → Record → **14 channels**
 
 Optional: forward `REDPITAYA` / `START` to the board over USB for Serial Monitor logging (`TCP streaming START` on `START`).
 
@@ -322,7 +322,7 @@ Full step-by-step for “correct Wi-Fi, same network, still fails”: [arduino-i
 
 1. Flash `USB_OPEN_EPHYS_MODE true` → `serial_bench_reader.py COMx --binary --limit 10`  
 2. `run_usb_plugin_bridge.ps1 COMx` → `esp32_tcp_client.py` with `ESP32_NODE_HOST=127.0.0.1`  
-3. Build GUI + Plugin (`217425a`, `e298679`) → Acq Board @ **127.0.0.1:5000**, 100 Hz, 8 ch  
+3. Build GUI + Plugin (`217425a`, `e298679`) → Acq Board @ **127.0.0.1:5000**, 100 Hz, 14 ch  
 
 **Wi‑Fi + Plugin:** `esp32_tcp_client.py` against node IP, then same GUI with that IP.
 

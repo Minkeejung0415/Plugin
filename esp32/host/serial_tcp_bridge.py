@@ -39,8 +39,6 @@ logger = logging.getLogger(__name__)
 
 HEADER = struct.Struct("<iiHiii")
 HEADER_SIZE = HEADER.size
-FRAME_PAYLOAD = 8 * 2  # legacy 8 x int16
-FRAME_SIZE = HEADER_SIZE + FRAME_PAYLOAD
 SDRF_HEADER_SIZE = 64
 SDRF_MAGIC = b"SDRF"
 SDRF_TYPE_EOF = 0x02
@@ -51,7 +49,9 @@ SENSORS_REPLY = b"SENSORS:0,ICM20948\n"
 # Open Ephys Ephys Socket: OpenCV Mat depth enum (S16), not literal 16 bits.
 OE_BIT_DEPTH_S16 = 3
 FIRMWARE_BIT_DEPTH = 16  # step_node fillOeHeader() sends literal 16
-DEFAULT_NUM_CHANNELS = int(os.environ.get("ESP32_NUM_CHANNELS", "11"))
+DEFAULT_NUM_CHANNELS = int(os.environ.get("ESP32_NUM_CHANNELS", "14"))
+FRAME_PAYLOAD = DEFAULT_NUM_CHANNELS * 2
+FRAME_SIZE = HEADER_SIZE + FRAME_PAYLOAD
 DEFAULT_FIRST_FRAME_TIMEOUT = 15.0
 HANDSHAKE_PEEK_TIMEOUT = 0.3
 PLUGIN_CMD_TIMEOUT = 120.0
@@ -109,17 +109,22 @@ def open_serial(port: str, baud: int):
     return ser
 
 
-def pack_csv_row(fields: list[str]) -> bytes | None:
-    """Convert CSV seq,ax,...,cam (9 fields) to one Open Ephys frame."""
-    if len(fields) < 9:
+def pack_csv_row(fields: list[str], num_channels: int = DEFAULT_NUM_CHANNELS) -> bytes | None:
+    """Convert CSV seq plus channel values to one Open Ephys int16 frame."""
+    if num_channels <= 0 or len(fields) < 2:
         return None
     try:
         _seq = int(fields[0])
-        ch = [int(fields[i]) for i in range(1, 9)]
+        ch = [int(v) for v in fields[1 : 1 + num_channels]]
     except ValueError:
         return None
-    hdr = HEADER.pack(0, FRAME_PAYLOAD, OE_BIT_DEPTH_S16, 2, 8, 1)
-    return hdr + struct.pack("<8h", *ch)
+
+    if len(ch) < num_channels:
+        ch.extend([0] * (num_channels - len(ch)))
+
+    payload_bytes = num_channels * 2
+    hdr = HEADER.pack(0, payload_bytes, OE_BIT_DEPTH_S16, 2, num_channels, 1)
+    return hdr + struct.pack(f"<{num_channels}h", *ch)
 
 
 def payload_bytes_from_header(hdr: tuple) -> int | None:

@@ -336,14 +336,15 @@ public:
     bool getIsEsp32Node() const { return isEsp32Node; }
 
     /*
-        ESP32_DEFAULT_CHANNELS = 13 - the ESP32-S3 STEP node always sends exactly
-        13 channels per frame in this order:
+        ESP32_DEFAULT_CHANNELS = 14 - the ESP32-S3 STEP node sends exactly
+        14 channels per frame in this order:
           0=ax (accel X, g)   1=ay   2=az
           3=gx (gyro X, dps)  4=gy   5=gz
           6=mx (mag X, uT)    7=my   8=mz
           9=qw  10=qx  11=qy  12=qz  (VQF quaternion, scaled Q15)
+          13=dio (bit0 level, bits1-15 edge count)
     */
-    static constexpr int ESP32_DEFAULT_CHANNELS = 13;
+    static constexpr int ESP32_DEFAULT_CHANNELS = 14;
 
     void resetCommandSocket();
     bool connectCommandSocketToHost (const String& host);

@@ -61,16 +61,16 @@ There is **no** separate Ephys Socket implementation in that repo; streaming log
 |------|--------------------------------------------|----------------------------------|
 | TCP port | **5000** (control only) | **5000** (control **and** sample stream) |
 | Data transport | **UDP 55001** (`sendto` per sample) | **Same TCP socket** after `START` |
-| `REDPITAYA\n` reply | `OK CHANNELS:<N>\n` | `11 channels; sample_rate=<Hz>; node=esp32s3_arduino; filter=on\|off\n` + `OK CHANNELS:11\n` |
+| `REDPITAYA\n` reply | `OK CHANNELS:<N>\n` | `14 channels; sample_rate=<Hz>; node=esp32s3_arduino; filter=on\|off\n` + `OK CHANNELS:14\n` |
 | `START\n` reply | `STARTED BIN:… CSV:…\n` then `SENSORS:0,ICM20948;…\n` | `STARTED BIN:…` + `SENSORS:0,ICM20948\n` (USB bridge synthesizes if needed) |
 | Sample rate | Configurable (`FREQ:`), default 100 Hz | **`FREQ:<Hz>`** any integer **≥ 1** (default 100 Hz; no firmware/plugin cap — user finds true min/max by testing) |
 | `CFG` / `FILTER` | Yes | **`CFG 0 ACC|GYR <0-3>`**, **`FILTER ON|OFF`** |
-| Channels | Dynamic (sensors × raw + quat + analog) | Fixed **11** int16 (firmware ≥1.5.0) |
+| Channels | Dynamic (sensors × raw + quat + analog) | Fixed **14** int16 (firmware ≥1.5.0) |
 | Packet header | 22-byte LE `iiHiii` | **Same** 22-byte layout (see [Binary frame header](#binary-frame-header-v170)) |
 | Payload | int16 channel-major | int16 channel-major |
 | Raw IMU | Always in first `num_raw` slots per sensor (e.g. MPU6050: ch0–2 acc, ch3–5 gyr) | **Always** ch0–2 acc, ch3–5 gyr (never replaced by quat) |
-| Filter / quat | Next 4 slots after raw (`num_raw`…`num_raw+3`), Q15; **0 when `FILTER OFF`** | ch7–10 qw,qx,qy,qz Q15; **0 when `FILTER OFF`** |
-| ch6 | Part of sensor layout / DIO varies | DIO packed (level + edge count) |
+| Filter / quat | Next 4 slots after raw (`num_raw`…`num_raw+3`), Q15; **0 when `FILTER OFF`** | ch9-12 qw,qx,qy,qz Q15; **0 when `FILTER OFF`** |
+| ch13 | Part of sensor layout / DIO varies | DIO packed (level + edge count) |
 | Host discovery | Hardcoded `rp-f0f85a.local`, `rp-f0cd35.local` | Wi-Fi IP from Serial Monitor |
 
 ### Channel map (ESP32 firmware ≥1.5.0)
@@ -79,16 +79,17 @@ There is **no** separate Ephys Socket implementation in that repo; streaming log
 |----|---------------------------|------|--------------|-------------|
 | 0–2 | `ax`, `ay`, `az` | Accel raw (ICM int16) | IMU | IMU |
 | 3–5 | `gx`, `gy`, `gz` | Gyro raw (ICM int16) | IMU | IMU |
-| 6 | `dio` | DIO (bit0 level, bits1–15 edge count) | DIO | DIO |
-| 7–10 | `qw`, `qx`, `qy`, `qz` | Filter quaternion Q15 | **0** (flat) | VQF (Plugin `vqf.c`) |
+| 6-8 | `mx`, `my`, `mz` | Magnetometer raw (AK09916 int16) | Mag | Mag |
+| 9-12 | `qw`, `qx`, `qy`, `qz` | Filter quaternion Q15 | **0** (flat) | VQF |
+| 13 | `dio` | DIO (bit0 level, bits1-15 edge count) | DIO | DIO |
 
-**Flat channels in the GUI:** With **Filter OFF**, ch7–10 are intentionally zero. With **Filter ON**, quat channels are Q15 (±32767) while accel/gyro are raw LSB — auto-scaled traces can make quats look “flat” if the Y axis is tuned for ~16k accel counts. Toggle filter or rescale the display.
+**Flat channels in the GUI:** With **Filter OFF**, ch9-12 are intentionally zero. With **Filter ON**, quat channels are Q15 (±32767) while accel/gyro are raw LSB — auto-scaled traces can make quats look “flat” if the Y axis is tuned for ~16k accel counts. Toggle filter or rescale the display.
 
-**OpenSim (one IMU):** Plugin sends UDP v2 with `n_sensors=1` only. Enable **Filter ON** (firmware VQF on ch7–10, or plugin Madgwick fallback on 6–8 ch packets). Do not use the pre-1.5.0 layout that treated gyro slots as quaternion components.
+**OpenSim (one IMU):** Plugin sends UDP v2 with `n_sensors=1` only. Enable **Filter ON** (firmware VQF on ch9-12, or plugin Madgwick fallback on 6–8 ch packets). Do not use the pre-1.5.0 layout that treated gyro slots as quaternion components.
 
 **Before v1.5.0 (8 ch, deprecated):** ch3–5 and ch7 held gyro **or** quat (mutually exclusive on wire). Plugin ≥ current still decodes legacy 8-ch packets if `channelsInPacket < 11`.
 
-**Red Pitaya reference (one MPU6050-class sensor):** 6 raw + 4 quat = 10 stream slots (+ analog tail). ESP32 uses 6 raw + DIO + 4 quat = 11.
+**Red Pitaya reference (one MPU6050-class sensor):** 6 raw + 4 quat = 10 stream slots (+ analog tail). Current ESP32 uses 6 accel/gyro + 3 mag + 4 quat + DIO = 14.
 
 **What already matches:** port 5000, `REDPITAYA` / `START` command names, 22-byte Open Ephys header, int16 channel-major samples, configurable rate via `FREQ:` (Hz ≥ 1 only).
 
@@ -99,10 +100,10 @@ There is **no** separate Ephys Socket implementation in that repo; streaming log
 | Offset (bytes) | Field | Type | ESP32-S3 (≥1.7.0) | Legacy (≤1.6.0) |
 |----------------|-------|------|-------------------|-----------------|
 | 0 | `offset` | int32 LE | **Hardware time:** low 32 bits of `esp_timer_get_time()` µs since boot (monotonic per board; wraps ~71 min) | Always `0` |
-| 4 | `num_bytes` | int32 LE | `NUM_CHANNELS × 2` (22 for 11 ch) | Same |
+| 4 | `num_bytes` | int32 LE | `NUM_CHANNELS × 2` (28 for 14 ch) | Same |
 | 8 | `bit_depth` | uint16 LE | `3` (Open Ephys S16 enum) | Same |
 | 10 | `element_size` | int32 LE | `2` (int16) | Same |
-| 14 | `num_channels` | int32 LE | `11` | Same |
+| 14 | `num_channels` | int32 LE | `14` | Same |
 | 18 | `samples_per_channel` | int32 LE | `1` | Same |
 | 22+ | payload | int16[] | Channel-major samples | Same |
 
@@ -157,7 +158,7 @@ Use the **built-in Open Ephys Ephys Socket** plugin when you are **not** buildin
 2. Note node IP from Serial Monitor.
 3. In Open Ephys GUI: add **Ephys Socket** → TCP client → `<node-ip>:5000`.
 4. **Connect only** — built-in Ephys Socket is a TCP client that immediately reads **22-byte binary packet headers**; it does **not** send `REDPITAYA` / `START`. ESP32 firmware TCP mode still expects that text handshake today; for Open Ephys use **USB + `serial_tcp_bridge.py`** (see [arduino-ide-guide.md](arduino-ide-guide.md)) or adapt firmware to stream binary on connect.
-5. Expect **8 channels @ 100 Hz**; scale ax–gz on the host (raw int16 ÷ sensitivity — see `host/esp32_tcp_client.py` env `ICM_ACCEL_SCALE` / `ICM_GYRO_SCALE`).
+5. Expect **14 channels @ 100 Hz**; scale ax–gz on the host (raw int16 ÷ sensitivity — see `host/esp32_tcp_client.py` env `ICM_ACCEL_SCALE` / `ICM_GYRO_SCALE`).
 
 Verify with Python first:
 
@@ -178,7 +179,7 @@ To use **AcqBoardRedPitaya** from [Minkeejung0415/Plugin](https://github.com/Min
 
 **Today:** Requires response containing `"OK"` and parses `CHANNELS:N`.
 
-**Change:** Also accept ESP32 reply, e.g. parse `8 channels` or `sample_rate=100`, set `numAdcChannels = 8`, `deviceFound = true` without requiring `"OK"`.
+**Change:** Also accept ESP32 reply, e.g. parse `14 channels` or `sample_rate=100`, set `numAdcChannels` from the reply, `deviceFound = true` without requiring `"OK"`.
 
 ### 2. `acqboard.ccp` — `kRedPitayaHosts[]` / connect path
 
@@ -205,7 +206,7 @@ To use **AcqBoardRedPitaya** from [Minkeejung0415/Plugin](https://github.com/Min
 
 **Today:** Per-sensor ACC/GYR presets from Red Pitaya `CFG` commands; quaternion slots after raw IMU.
 
-**Change:** For 8-ch ESP32 map, fixed scale factors for ch0–5 (ICM20948 ±2g / ±250°/s defaults or match sketch), ch6 = DIO (bit0 level), ch7 = 0; disable quaternion OpenSim path unless fusion added on ESP32.
+**Change:** For legacy 8-ch ESP32 map, fixed scale factors for ch0–5 (ICM20948 ±2g / ±250°/s defaults or match sketch), ch6 = DIO (bit0 level), ch7 = 0; disable quaternion OpenSim path unless fusion added on ESP32.
 
 ### 6. `devices/redpitaya/AcqBoardRedPitaya.h` + `devicethread.cpp`
 
@@ -223,7 +224,7 @@ Optional: IP/host field and “ESP32 fixed 8 ch” toggle in UI.
 
 Instead of editing the Plugin, you could extend `step_node.ino` to:
 
-- Reply `OK CHANNELS:8\n` to `REDPITAYA`
+- Reply `OK CHANNELS:14\n` to `REDPITAYA`
 - Reply `STARTED\n` + `SENSORS:0,ICM20948\n` to `START`
 - Stream samples on **UDP 55001** (keep TCP for commands)
 
@@ -238,7 +239,7 @@ After AcqBoard streams into Open Ephys, run Plugin-repo scripts (not in ESP32-S3
 - `ephys_to_opensim_bridge.py`
 - `opensim_live_realtime.py`
 
-Use the **fixed 8-channel ESP32 map** (ch0–5 ICM int16, ch6 DIO bit0, ch7 = 0). Red Pitaya quaternion tail slots do not apply unless firmware adds fusion.
+Legacy note: older builds used the **fixed 8-channel ESP32 map** (ch0–5 ICM int16, ch6 DIO bit0, ch7 = 0). Red Pitaya quaternion tail slots do not apply unless firmware adds fusion.
 
 ---
 

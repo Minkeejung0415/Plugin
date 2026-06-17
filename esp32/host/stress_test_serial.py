@@ -145,6 +145,7 @@ class RateResult:
     hz: int
     filter_on: bool
     sd_on: bool
+    stream_on: bool
     mean_hz: float | None
     dup_seq: int
     gap_seq: int
@@ -447,25 +448,48 @@ def test_one_rate(
     binary_mode: bool | None,
     filter_on: bool,
     sd_on: bool,
+    stream_on: bool,
 ) -> tuple[RateResult, bool | None]:
+    if not sd_on and not stream_on:
+        raise ValueError("stream-off mode requires --sd on; otherwise there is no observable data path")
+
     send_line(ser, "FILTER ON" if filter_on else "FILTER OFF")
     time.sleep(0.15)
     send_line(ser, f"FREQ:{hz}")
     wait_for_text(ser, 2.0)
     drain_serial(ser, 0.2)
 
-    if sd_on:
+    if sd_on and stream_on:
         send_line(ser, "RECORD ON")
         time.sleep(0.25)
         drain_serial(ser, 0.1)
 
-    send_line(ser, "START")
-    time.sleep(0.1)
+    if stream_on:
+        send_line(ser, "START")
+        time.sleep(0.1)
 
-    mode_tag = f"filter_{'on' if filter_on else 'off'}__sd_{'on' if sd_on else 'off'}"
+    mode_tag = (
+        f"filter_{'on' if filter_on else 'off'}__sd_{'on' if sd_on else 'off'}"
+        f"__stream_{'on' if stream_on else 'off'}"
+    )
     out_path = RESULTS_DIR / f"rate_{hz}__{mode_tag}.csv"
     dup_payload = 0
-    if binary_mode is False:
+    capture_started = time.monotonic()
+    if not stream_on:
+        if sd_on:
+            send_line(ser, "RECORD ON")
+            time.sleep(0.25)
+            drain_serial(ser, 0.1)
+        remaining = max(0.0, capture_s - (time.monotonic() - capture_started))
+        time.sleep(remaining)
+        rows = 0
+        dup = 0
+        gap = 0
+        mean_hz = None
+        gap_time = 0
+        mode = binary_mode
+        out_path.write_text("", encoding="utf-8")
+    elif binary_mode is False:
         rows = capture_text_csv(ser, capture_s, out_path)
         dup, gap, mean_hz, gap_time = run_analyzer(out_path)
         mode = False
@@ -478,13 +502,15 @@ def test_one_rate(
         expected = int(hz * capture_s * 0.85)
         if rows < expected:
             gap += max(0, int(hz * capture_s) - rows)
+    capture_elapsed = max(time.monotonic() - capture_started, 0.001)
 
     status: dict[str, str] = {}
     sd_final_seen = False
     if sd_on:
-        send_line(ser, "STOP")
-        wait_for_text(ser, 2.0)
-        drain_serial(ser, 0.25)
+        if stream_on:
+            send_line(ser, "STOP")
+            wait_for_text(ser, 2.0)
+            drain_serial(ser, 0.25)
         send_line(ser, "RECORD OFF")
         final_status = wait_for_sd_final(ser, 20.0)
         sd_final_seen = bool(final_status)
@@ -497,12 +523,14 @@ def test_one_rate(
         status.update(read_status(ser, 5.0))
 
     expected = int(hz * capture_s * 0.85)
-    rate_ok = mean_hz is not None and (0.95 * hz <= mean_hz <= 1.15 * hz)
     sd_saved = first_int(status, "saved", "sd_saved")
     sd_errors = first_int(status, "errors", "sd_errors")
     max_sd_write_us = maybe_int(status, "max_sd_write_us")
     max_loop_us = maybe_int(status, "max_loop_us")
     loop_overruns = first_int(status, "overrun", "loop_overruns")
+    if not stream_on and sd_saved is not None:
+        mean_hz = sd_saved / capture_elapsed
+    rate_ok = mean_hz is not None and (0.95 * hz <= mean_hz <= 1.15 * hz)
     sd_ok = True
     if sd_on:
         sd_ok = (
@@ -513,7 +541,10 @@ def test_one_rate(
             and (sd_errors or 0) == 0
             and (loop_overruns or 0) == 0
         )
-    passed = dup == 0 and gap == 0 and rows >= expected and rate_ok and sd_ok
+    transport_ok = True
+    if stream_on:
+        transport_ok = rows >= expected and rate_ok
+    passed = dup == 0 and gap == 0 and transport_ok and rate_ok and sd_ok
     result = "PASS" if passed else "FAIL"
     note = ""
     if binary_mode is None:
@@ -522,11 +553,33 @@ def test_one_rate(
         note = (note + "; " if note else "") + "missing SD_FINAL"
         result = "UNKNOWN"
     if rows < 2:
-        note = (note + "; " if note else "") + "insufficient rows"
+        if stream_on:
+            note = (note + "; " if note else "") + "insufficient rows"
+        else:
+            note = (note + "; " if note else "") + "stream_off"
     if sd_on and sd_saved is None:
         note = (note + "; " if note else "") + "no SD counters"
     if sd_on and sd_errors:
         note = (note + "; " if note else "") + f"sd_errors={sd_errors}"
+    sd_detail_keys = [
+        "queue_drops",
+        "write_errors",
+        "header_errors",
+        "open_errors",
+        "begin_errors",
+        "mutex_timeouts",
+        "max_queue_depth",
+        "flush_count",
+        "max_flush_us",
+        "spi_mutex_timeouts",
+    ]
+    sd_detail_parts = []
+    for key in sd_detail_keys:
+        value = maybe_int(status, key)
+        if value is not None:
+            sd_detail_parts.append(f"{key}={value}")
+    if sd_detail_parts:
+        note = (note + "; " if note else "") + "sd_detail " + " ".join(sd_detail_parts)
     if loop_overruns:
         note = (note + "; " if note else "") + f"loop_overruns={loop_overruns}"
     if binary_mode is not False and dup_payload:
@@ -554,6 +607,7 @@ def test_one_rate(
             hz=hz,
             filter_on=filter_on,
             sd_on=sd_on,
+            stream_on=stream_on,
             mean_hz=mean_hz,
             dup_seq=dup,
             gap_seq=gap,
@@ -643,13 +697,14 @@ def write_summary(results: list[RateResult], port: str, baud: int) -> None:
         "",
         f"Port: `{port}` baud {baud}",
         "",
-        "| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass | note |",
-        "|----|--------|----|---------|------|---------|---------|----------|--------|-----------|---------|------|------|",
+        "| Hz | filter | sd | stream | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass | note |",
+        "|----|--------|----|--------|---------|------|---------|---------|----------|--------|-----------|---------|------|------|",
     ]
     for r in results:
         mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
         lines.append(
             f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
+            f"{'on' if r.stream_on else 'off'} | "
             f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
             f"{r.sd_saved if r.sd_saved is not None else 'n/a'} | "
             f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "
@@ -698,6 +753,12 @@ def main() -> int:
         help="SD recording mode sweep. Use both to isolate SD write cost.",
     )
     p.add_argument(
+        "--stream",
+        choices=("on", "off", "both"),
+        default="on",
+        help="Sample stream mode. Use off with --sd on to isolate SD acquisition from USB serial transport.",
+    )
+    p.add_argument(
         "--sd-file",
         type=Path,
         help="Analyze a copied STEP SD binary file and exit.",
@@ -720,6 +781,8 @@ def main() -> int:
             return 1
         import json as _json
         raw = _json.loads(json_path.read_text(encoding="utf-8"))
+        for item in raw:
+            item.setdefault("stream_on", True)
         results = [RateResult(**r) for r in raw]
         write_summary(results, port="(rebuilt)", baud=115200)
         print(f"Summary rebuilt from {json_path}")
@@ -774,7 +837,13 @@ def main() -> int:
     try:
         time.sleep(2.0)
         drain_serial(ser, 1.0)
-        if binary_mode is None:
+        stream_modes = expand_mode(args.stream)
+        sd_modes = expand_mode(args.sd)
+        if not any(stream_modes) and not any(sd_modes):
+            print("--stream off requires --sd on because no host-visible samples are captured.", file=sys.stderr)
+            return 2
+
+        if binary_mode is None and any(stream_modes):
             try:
                 binary_mode = detect_mode(ser)
             except RuntimeError as exc:
@@ -782,13 +851,25 @@ def main() -> int:
                 return 3
             print(f"Detected {'binary' if binary_mode else 'CSV'} serial stream")
 
-        modes = list(itertools.product(expand_mode(args.filter), expand_mode(args.sd)))
-        for filter_on, sd_on in modes:
-            print(f"\n=== Mode: filter={'on' if filter_on else 'off'} sd={'on' if sd_on else 'off'} ===")
+        modes = list(itertools.product(expand_mode(args.filter), sd_modes, stream_modes))
+        for filter_on, sd_on, stream_on in modes:
+            if not sd_on and not stream_on:
+                print("\n=== Skipping mode: sd=off stream=off has no observable output ===")
+                continue
+            print(
+                f"\n=== Mode: filter={'on' if filter_on else 'off'} "
+                f"sd={'on' if sd_on else 'off'} stream={'on' if stream_on else 'off'} ==="
+            )
             for hz in args.hz:
                 t_start = time.monotonic()
                 res, binary_mode = test_one_rate(
-                    ser, hz, per_test, binary_mode, filter_on=filter_on, sd_on=sd_on
+                    ser,
+                    hz,
+                    per_test,
+                    binary_mode,
+                    filter_on=filter_on,
+                    sd_on=sd_on,
+                    stream_on=stream_on,
                 )
                 results.append(res)
                 elapsed = time.monotonic() - t_start
@@ -798,17 +879,19 @@ def main() -> int:
                 print(
                     f"Hz={hz}: rows={res.rows} mean_hz={res.mean_hz} dup={res.dup_seq} "
                     f"gap={res.gap_seq} sd_saved={res.sd_saved} sd_err={res.sd_errors} "
-                    f"max_sd_us={res.max_sd_write_us} overrun={res.loop_overruns} pass={res.result}"
+                    f"max_sd_us={res.max_sd_write_us} overrun={res.loop_overruns} "
+                    f"stream={'on' if res.stream_on else 'off'} pass={res.result}"
                 )
 
-        print("\n| Hz | filter | sd | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass |")
-        print("|----|--------|----|---------|------|---------|---------|----------|--------|-----------|---------|------|")
+        print("\n| Hz | filter | sd | stream | mean_hz | rows | dup_seq | gap_seq | sd_saved | sd_err | max_sd_us | overrun | pass |")
+        print("|----|--------|----|--------|---------|------|---------|---------|----------|--------|-----------|---------|------|")
         last_good = 0
         for r in results:
             mh = f"{r.mean_hz:.1f}" if r.mean_hz is not None else "n/a"
             pf = r.result
             print(
                 f"| {r.hz} | {'on' if r.filter_on else 'off'} | {'on' if r.sd_on else 'off'} | "
+                f"{'on' if r.stream_on else 'off'} | "
                 f"{mh} | {r.rows} | {r.dup_seq} | {r.gap_seq} | "
                 f"{r.sd_saved if r.sd_saved is not None else 'n/a'} | "
                 f"{r.sd_errors if r.sd_errors is not None else 'n/a'} | "

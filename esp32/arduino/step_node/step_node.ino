@@ -166,6 +166,8 @@ struct SdLogRecord {
 #define SD_LOG_VERSION 1
 #define REC_RECONNECT_GRACE_MS 90000UL
 #define SD_QUEUE_DEPTH 1024
+#define SD_WRITE_BATCH_RECORDS 256
+#define SD_PERIODIC_FLUSH_MS 0
 #define REC_MAX_CHUNK 1024UL
 #define SDRF_HEADER_LEN 64
 #define SDRF_TYPE_DATA 0x01
@@ -223,9 +225,18 @@ static File g_sd_file;
 static uint64_t g_generated_samples = 0;
 static uint64_t g_sd_saved_samples = 0;
 static uint64_t g_sd_write_errors = 0;
+static uint64_t g_sd_queue_drops = 0;
+static uint64_t g_sd_header_errors = 0;
+static uint64_t g_sd_open_errors = 0;
+static uint64_t g_sd_begin_errors = 0;
+static uint64_t g_sd_mutex_timeouts = 0;
+static uint64_t g_sd_flush_count = 0;
 static uint32_t g_max_sd_write_us = 0;
+static uint32_t g_max_sd_flush_us = 0;
+static uint32_t g_sd_queue_max_depth = 0;
 static uint32_t g_max_loop_us = 0;
 static uint32_t g_loop_overruns = 0;
+static uint64_t g_spi_mutex_timeouts = 0;
 static uint64_t g_prof_samples = 0;
 static uint64_t g_prof_imu_sum_us = 0;
 static uint64_t g_prof_mag_sum_us = 0;
@@ -257,6 +268,7 @@ static bool g_transfer_active = false;
 
 static QueueHandle_t g_sd_queue = nullptr;
 static SemaphoreHandle_t g_sd_mutex = nullptr;
+static SemaphoreHandle_t g_spi_mutex = nullptr;
 
 static const float kAccLsbPerG[4] = {16384.0f, 8192.0f, 4096.0f, 2048.0f};
 static const float kGyrLsbPerDps[4] = {131.072f, 65.536f, 32.768f, 16.384f};
@@ -277,6 +289,11 @@ static uint32_t g_last_mag_poll_us = 0;
 static bool g_have_mag = false;
 
 static bool useWifi() { return ENABLE_TCP; }
+
+static uint64_t sdErrorTotal() {
+  return g_sd_queue_drops + g_sd_write_errors + g_sd_header_errors +
+         g_sd_open_errors + g_sd_begin_errors + g_sd_mutex_timeouts;
+}
 
 static void profAdd(uint32_t elapsed_us, uint64_t *sum_us, uint32_t *max_us) {
   *sum_us += elapsed_us;
@@ -302,6 +319,7 @@ static void profReset() {
   g_prof_vqf_mag_max_us = 0;
   g_prof_quat_max_us = 0;
   g_prof_serial_max_us = 0;
+  g_spi_mutex_timeouts = 0;
 }
 
 static uint8_t icmConfig1(uint8_t fs_sel) {
@@ -499,29 +517,45 @@ static void icmSpiBegin() {
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
 }
 
+static bool spiBusTake(TickType_t timeout) {
+  if (!g_spi_mutex) return true;
+  if (xSemaphoreTake(g_spi_mutex, timeout) == pdTRUE) return true;
+  g_spi_mutex_timeouts++;
+  return false;
+}
+
+static void spiBusGive() {
+  if (g_spi_mutex) xSemaphoreGive(g_spi_mutex);
+}
+
 static bool icmWriteAddr(uint8_t addr, uint8_t reg, uint8_t val) {
   (void)addr;
+  if (!spiBusTake(0)) return false;
   SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_ICM_CS, LOW);
   SPI.transfer(reg & 0x7F);
   SPI.transfer(val);
   digitalWrite(PIN_ICM_CS, HIGH);
   SPI.endTransaction();
+  spiBusGive();
   return true;
 }
 
 static bool icmReadAddr(uint8_t addr, uint8_t reg, uint8_t *val) {
   (void)addr;
+  if (!spiBusTake(0)) return false;
   SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_ICM_CS, LOW);
   SPI.transfer(reg | 0x80);
   *val = SPI.transfer(0x00);
   digitalWrite(PIN_ICM_CS, HIGH);
   SPI.endTransaction();
+  spiBusGive();
   return true;
 }
 
 static bool icmReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
+  if (!spiBusTake(0)) return false;
   SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_ICM_CS, LOW);
   SPI.transfer(reg | 0x80);
@@ -530,6 +564,7 @@ static bool icmReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
   }
   digitalWrite(PIN_ICM_CS, HIGH);
   SPI.endTransaction();
+  spiBusGive();
   return true;
 }
 
@@ -806,7 +841,7 @@ static void sendSerialBench() {
 #if ENABLE_SERIAL_BENCH
   if (g_transfer_active || !streaming) return;
   if (!csv_banner_sent) {
-    Serial.printf("# STEP boot complete icm=%s spi_cs=%d mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz\n",
+    Serial.printf("# STEP boot complete icm=%s spi_cs=%d mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz,dio\n",
                   icm_ok ? "OK" : "FALLBACK", PIN_ICM_CS, mag_ok ? "OK" : "FALLBACK");
     csv_banner_sent = true;
   }
@@ -854,8 +889,13 @@ static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
   uint8_t buf[128];
   uint32_t crc = 0;
   uint64_t total = 0;
+  if (!spiBusTake(portMAX_DELAY)) {
+    if (size_out) *size_out = 0;
+    return 0;
+  }
   File f = SD.open(path, FILE_READ);
   if (!f) {
+    spiBusGive();
     if (size_out) *size_out = 0;
     return 0;
   }
@@ -866,6 +906,7 @@ static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
     total += n;
   }
   f.close();
+  spiBusGive();
   if (size_out) *size_out = total;
   return crc;
 #else
@@ -940,30 +981,56 @@ static void writeSdrfFrame(const char *session_id, uint8_t type, uint32_t chunk_
 
 #if ENABLE_SD
 static void sdWriteTask(void *) {
-  SdLogRecord rec;
+  SdLogRecord batch[SD_WRITE_BATCH_RECORDS];
   uint32_t last_flush_ms = 0;
   while (true) {
-    if (g_sd_queue && xQueueReceive(g_sd_queue, &rec, pdMS_TO_TICKS(100)) == pdTRUE) {
+    size_t batch_count = 0;
+    if (g_sd_queue && xQueueReceive(g_sd_queue, &batch[batch_count], pdMS_TO_TICKS(100)) == pdTRUE) {
+      batch_count = 1;
+      while (batch_count < SD_WRITE_BATCH_RECORDS &&
+             xQueueReceive(g_sd_queue, &batch[batch_count], 0) == pdTRUE) {
+        batch_count++;
+      }
       if (g_sd_mutex && xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         if (g_sd_file) {
-          uint32_t t0 = micros();
-          size_t written = g_sd_file.write((uint8_t *)&rec, sizeof(rec));
-          uint32_t wu = (uint32_t)(micros() - t0);
-          if (wu > g_max_sd_write_us) g_max_sd_write_us = wu;
-          if (written == sizeof(rec)) g_sd_saved_samples++;
-          else g_sd_write_errors++;
+          const size_t bytes_to_write = batch_count * sizeof(SdLogRecord);
+          if (spiBusTake(portMAX_DELAY)) {
+            uint32_t t0 = micros();
+            size_t written = g_sd_file.write((uint8_t *)batch, bytes_to_write);
+            uint32_t wu = (uint32_t)(micros() - t0);
+            spiBusGive();
+            if (wu > g_max_sd_write_us) g_max_sd_write_us = wu;
+            if (written == bytes_to_write) {
+              g_sd_saved_samples += batch_count;
+            } else {
+              g_sd_write_errors += batch_count;
+            }
+          }
         }
         xSemaphoreGive(g_sd_mutex);
+      } else {
+        g_sd_mutex_timeouts += batch_count;
       }
     }
+#if SD_PERIODIC_FLUSH_MS > 0
     uint32_t now_ms = millis();
-    if ((now_ms - last_flush_ms) >= 1000) {
+    if ((now_ms - last_flush_ms) >= SD_PERIODIC_FLUSH_MS) {
       last_flush_ms = now_ms;
       if (g_sd_mutex && xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (g_sd_file) g_sd_file.flush();
+        if (g_sd_file && spiBusTake(portMAX_DELAY)) {
+          uint32_t t0 = micros();
+          g_sd_file.flush();
+          uint32_t fu = (uint32_t)(micros() - t0);
+          spiBusGive();
+          g_sd_flush_count++;
+          if (fu > g_max_sd_flush_us) g_max_sd_flush_us = fu;
+        }
         xSemaphoreGive(g_sd_mutex);
+      } else {
+        g_sd_mutex_timeouts++;
       }
     }
+#endif
   }
 }
 #endif
@@ -980,7 +1047,10 @@ static void logSd() {
   rec.time_us = t_us;
   memcpy(rec.ch, channels, sizeof(channels));
   if (xQueueSend(g_sd_queue, &rec, 0) != pdTRUE) {
-    g_sd_write_errors++;
+    g_sd_queue_drops++;
+  } else {
+    uint32_t depth = uxQueueMessagesWaiting(g_sd_queue);
+    if (depth > g_sd_queue_max_depth) g_sd_queue_max_depth = depth;
   }
 #endif
 }
@@ -996,7 +1066,7 @@ static bool sdEnsureReady() {
 static bool sdRecordStart(const char *path_or_null) {
 #if ENABLE_SD
   if (!sdEnsureReady()) {
-    g_sd_write_errors++;
+    g_sd_begin_errors++;
     strncpy(g_rec_state, "failed", sizeof(g_rec_state) - 1);
     strncpy(g_last_rec_error, "sd_not_ready", sizeof(g_last_rec_error) - 1);
     controlPrintf("SD_STATUS enabled=1 ready=0 recording=0 error=begin_failed\n");
@@ -1008,8 +1078,11 @@ static bool sdRecordStart(const char *path_or_null) {
     if (g_sd_queue) while (uxQueueMessagesWaiting(g_sd_queue) > 0) vTaskDelay(pdMS_TO_TICKS(10));
     vTaskDelay(pdMS_TO_TICKS(30));
     if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
-    g_sd_file.flush();
-    g_sd_file.close();
+    if (spiBusTake(portMAX_DELAY)) {
+      g_sd_file.flush();
+      g_sd_file.close();
+      spiBusGive();
+    }
     if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   }
 
@@ -1022,11 +1095,14 @@ static bool sdRecordStart(const char *path_or_null) {
   }
 
   if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
-  g_sd_file = SD.open(g_sd_path, FILE_WRITE);
+  if (spiBusTake(portMAX_DELAY)) {
+    g_sd_file = SD.open(g_sd_path, FILE_WRITE);
+    spiBusGive();
+  }
   if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   if (!g_sd_file) {
     g_sd_recording = false;
-    g_sd_write_errors++;
+    g_sd_open_errors++;
     strncpy(g_rec_state, "failed", sizeof(g_rec_state) - 1);
     strncpy(g_last_rec_error, "open_failed", sizeof(g_last_rec_error) - 1);
     controlPrintf("SD_STATUS enabled=1 ready=1 recording=0 error=open_failed path=%s\n", g_sd_path);
@@ -1035,7 +1111,15 @@ static bool sdRecordStart(const char *path_or_null) {
 
   g_sd_saved_samples = 0;
   g_sd_write_errors = 0;
+  g_sd_queue_drops = 0;
+  g_sd_header_errors = 0;
+  g_sd_open_errors = 0;
+  g_sd_begin_errors = 0;
+  g_sd_mutex_timeouts = 0;
+  g_sd_flush_count = 0;
   g_max_sd_write_us = 0;
+  g_max_sd_flush_us = 0;
+  g_sd_queue_max_depth = 0;
   g_final_file_size = 0;
   g_final_file_checksum = 0;
   strncpy(g_rec_state, "starting", sizeof(g_rec_state) - 1);
@@ -1050,9 +1134,13 @@ static bool sdRecordStart(const char *path_or_null) {
   hdr.sample_hz = g_sample_hz;
   hdr.channel_count = NUM_CHANNELS;
   hdr.start_time_us = (int64_t)esp_timer_get_time();
-  size_t written = g_sd_file.write((uint8_t *)&hdr, sizeof(hdr));
+  size_t written = 0;
+  if (spiBusTake(portMAX_DELAY)) {
+    written = g_sd_file.write((uint8_t *)&hdr, sizeof(hdr));
+    spiBusGive();
+  }
   if (written != sizeof(hdr)) {
-    g_sd_write_errors++;
+    g_sd_header_errors++;
   }
 
   g_sd_recording = true;
@@ -1074,16 +1162,32 @@ static void sdRecordStop() {
   vTaskDelay(pdMS_TO_TICKS(30));
   if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
   if (g_sd_file) {
-    g_sd_file.flush();
-    g_sd_file.close();
+    if (spiBusTake(portMAX_DELAY)) {
+      uint32_t t0 = micros();
+      g_sd_file.flush();
+      uint32_t fu = (uint32_t)(micros() - t0);
+      g_sd_flush_count++;
+      if (fu > g_max_sd_flush_us) g_max_sd_flush_us = fu;
+      g_sd_file.close();
+      spiBusGive();
+    }
   }
   if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
-  controlPrintf("SD_FINAL ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu overrun=%lu\n",
+  controlPrintf("SD_FINAL ready=%d recording=0 path=%s saved=%llu errors=%llu queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu mutex_timeouts=%llu max_queue_depth=%lu max_sd_write_us=%lu flush_count=%llu max_flush_us=%lu overrun=%lu\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_path,
                 (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)sdErrorTotal(),
+                (unsigned long long)g_sd_queue_drops,
                 (unsigned long long)g_sd_write_errors,
+                (unsigned long long)g_sd_header_errors,
+                (unsigned long long)g_sd_open_errors,
+                (unsigned long long)g_sd_begin_errors,
+                (unsigned long long)g_sd_mutex_timeouts,
+                (unsigned long)g_sd_queue_max_depth,
                 (unsigned long)g_max_sd_write_us,
+                (unsigned long long)g_sd_flush_count,
+                (unsigned long)g_max_sd_flush_us,
                 (unsigned long)g_loop_overruns);
   g_final_file_checksum = checksumSdFile(g_sd_path, &g_final_file_size);
   if (strcmp(g_finalization_reason, "none") == 0) {
@@ -1091,12 +1195,21 @@ static void sdRecordStop() {
   }
   strncpy(g_rec_state, "finalized", sizeof(g_rec_state) - 1);
   g_rec_grace_deadline_ms = 0;
-  controlPrintf("SD_STATUS enabled=1 ready=%d recording=0 path=%s saved=%llu errors=%llu max_sd_write_us=%lu\n",
+  controlPrintf("SD_STATUS enabled=1 ready=%d recording=0 path=%s saved=%llu errors=%llu queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu mutex_timeouts=%llu max_queue_depth=%lu max_sd_write_us=%lu flush_count=%llu max_flush_us=%lu\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_path,
                 (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)sdErrorTotal(),
+                (unsigned long long)g_sd_queue_drops,
                 (unsigned long long)g_sd_write_errors,
-                (unsigned long)g_max_sd_write_us);
+                (unsigned long long)g_sd_header_errors,
+                (unsigned long long)g_sd_open_errors,
+                (unsigned long long)g_sd_begin_errors,
+                (unsigned long long)g_sd_mutex_timeouts,
+                (unsigned long)g_sd_queue_max_depth,
+                (unsigned long)g_max_sd_write_us,
+                (unsigned long long)g_sd_flush_count,
+                (unsigned long)g_max_sd_flush_us);
 #else
   controlPrintf("SD_STATUS enabled=0 ready=0 recording=0 error=compile_disabled\n");
 #endif
@@ -1106,7 +1219,9 @@ static void printAcqStatus() {
   Serial.printf("STATUS seq=%lu generated=%llu sample_hz=%u filter=%d streaming=%d "
                 "icm_ok=%d mag_ok=%d "
                 "sd_enabled=%d sd_ready=%d sd_recording=%d sd_saved=%llu sd_errors=%llu "
-                "max_sd_write_us=%lu max_loop_us=%lu loop_overruns=%lu "
+                "queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu "
+                "mutex_timeouts=%llu max_queue_depth=%lu max_sd_write_us=%lu flush_count=%llu max_flush_us=%lu "
+                "spi_mutex_timeouts=%llu max_loop_us=%lu loop_overruns=%lu "
                 "prof_n=%llu "
                 "avg_imu_us=%lu max_imu_us=%lu "
                 "avg_mag_us=%lu max_mag_us=%lu "
@@ -1129,8 +1244,18 @@ static void printAcqStatus() {
                 g_sd_ready ? 1 : 0,
                 g_sd_recording ? 1 : 0,
                 (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)sdErrorTotal(),
+                (unsigned long long)g_sd_queue_drops,
                 (unsigned long long)g_sd_write_errors,
+                (unsigned long long)g_sd_header_errors,
+                (unsigned long long)g_sd_open_errors,
+                (unsigned long long)g_sd_begin_errors,
+                (unsigned long long)g_sd_mutex_timeouts,
+                (unsigned long)g_sd_queue_max_depth,
                 (unsigned long)g_max_sd_write_us,
+                (unsigned long long)g_sd_flush_count,
+                (unsigned long)g_max_sd_flush_us,
+                (unsigned long long)g_spi_mutex_timeouts,
                 (unsigned long)g_max_loop_us,
                 (unsigned long)g_loop_overruns,
                 (unsigned long long)g_prof_samples,
@@ -1159,9 +1284,9 @@ static void printAcqStatus() {
 static void recReplyToHost(const char *text);
 
 static void printRecStatus() {
-  char buf[1024];
+  char buf[1536];
   snprintf(buf, sizeof(buf),
-                "REC STATUS_OK protocol=rec-v1 capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream transport=usb_bridge sd_ready=%d sd_open=%d recording_state=%s transfer_state=%s session_id=%s sd_path_token=sd:%s generated_samples=%llu saved_samples=%llu queue_drops=0 write_errors=%llu max_write_latency_us=%lu overrun_count=%lu finalization_reason=%s file_byte_size=%llu file_checksum=%08lx checksum_type=crc32 last_error=%s grace_ms_remaining=%lu local_result_path=unknown local_analyzer_result=unknown\n",
+                "REC STATUS_OK protocol=rec-v1 capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream transport=usb_bridge sd_ready=%d sd_open=%d recording_state=%s transfer_state=%s session_id=%s sd_path_token=sd:%s generated_samples=%llu saved_samples=%llu queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu mutex_timeouts=%llu max_queue_depth=%lu max_write_latency_us=%lu flush_count=%llu max_flush_us=%lu overrun_count=%lu finalization_reason=%s file_byte_size=%llu file_checksum=%08lx checksum_type=crc32 last_error=%s grace_ms_remaining=%lu local_result_path=unknown local_analyzer_result=unknown\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_recording ? 1 : 0,
                 g_rec_state,
@@ -1170,8 +1295,16 @@ static void printRecStatus() {
                 g_rec_session_id,
                 (unsigned long long)g_generated_samples,
                 (unsigned long long)g_sd_saved_samples,
+                (unsigned long long)g_sd_queue_drops,
                 (unsigned long long)g_sd_write_errors,
+                (unsigned long long)g_sd_header_errors,
+                (unsigned long long)g_sd_open_errors,
+                (unsigned long long)g_sd_begin_errors,
+                (unsigned long long)g_sd_mutex_timeouts,
+                (unsigned long)g_sd_queue_max_depth,
                 (unsigned long)g_max_sd_write_us,
+                (unsigned long long)g_sd_flush_count,
+                (unsigned long)g_max_sd_flush_us,
                 (unsigned long)g_loop_overruns,
                 g_finalization_reason,
                 (unsigned long long)g_final_file_size,
@@ -1311,19 +1444,26 @@ static void handleRecLine(const String &line) {
     }
     if (length > REC_MAX_CHUNK) length = REC_MAX_CHUNK;
     if (offset + length > g_final_file_size) length = (uint32_t)(g_final_file_size - offset);
+    if (!spiBusTake(portMAX_DELAY)) {
+      replyToHost("REC ERR code=sd_error retryable=true detail=spi_lock\n");
+      return;
+    }
     File f = SD.open(g_sd_path, FILE_READ);
     if (!f) {
+      spiBusGive();
       replyToHost("REC ERR code=sd_error retryable=true detail=read\n");
       return;
     }
     if (!f.seek(offset)) {
       f.close();
+      spiBusGive();
       replyToHost("REC ERR code=offset_out_of_range retryable=false detail=seek\n");
       return;
     }
     uint8_t buf[REC_MAX_CHUNK];
     size_t got = f.read(buf, length);
     f.close();
+    spiBusGive();
     strncpy(g_transfer_state, "chunking", sizeof(g_transfer_state) - 1);
     g_transfer_active = true;
     writeSdrfFrame(g_rec_session_id, SDRF_TYPE_DATA, chunk_index, offset, buf, got,
@@ -1741,6 +1881,8 @@ void setup() {
   Serial.println();
   Serial.println("STEP node (Arduino) starting");
 
+  g_spi_mutex = xSemaphoreCreateMutex();
+
   initDio();
 
   printBootDiagnostics();
@@ -1758,11 +1900,17 @@ void setup() {
 
 #if ENABLE_SD
   g_sd_mutex = xSemaphoreCreateMutex();
-  g_sd_ready = SD.begin(PIN_SD_CS, SPI, 25000000);
+  if (spiBusTake(portMAX_DELAY)) {
+    g_sd_ready = SD.begin(PIN_SD_CS, SPI, 25000000);
+    spiBusGive();
+  } else {
+    g_sd_ready = false;
+    g_sd_begin_errors++;
+  }
   Serial.println(g_sd_ready ? "SD ready" : "SD init failed");
   g_sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(SdLogRecord));
   if (g_sd_queue) {
-    xTaskCreatePinnedToCore(sdWriteTask, "sd_write", 4096, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(sdWriteTask, "sd_write", 16384, NULL, 4, NULL, 0);
   }
 #endif
 
@@ -1775,7 +1923,7 @@ void setup() {
   Serial.println("Serial bench active @115200");
   Serial.println(SERIAL_OUTPUT_BINARY
                      ? "Format: Open Ephys binary on Serial"
-                     : "Format: CSV seq,ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz");
+                     : "Format: CSV seq,ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz,dio");
 #endif
 
   boot_ms = millis();

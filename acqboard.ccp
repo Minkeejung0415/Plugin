@@ -370,11 +370,11 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
 
     std::cout << "Red Pitaya: handshake response: " << response << std::endl;
 
-    // ESP32-S3 STEP node: "8 channels; sample_rate=100; node=esp32s3_arduino".
+    // ESP32-S3 STEP node: "14 channels; sample_rate=100; node=esp32s3_arduino".
     // Check this BEFORE the generic Red Pitaya "OK" branch: the ESP32 firmware and
-    // the USB bridge both follow the esp32 marker line with "OK CHANNELS:8", and over
+    // the USB bridge both follow the esp32 marker line with "OK CHANNELS:N", and over
     // a localhost/TCP connection the two writes usually coalesce into a single read.
-    // If we tested for "OK" first, that "OK CHANNELS:8" would misclassify the ESP32 as
+    // If we tested for "OK" first, that "OK CHANNELS:N" would misclassify the ESP32 as
     // a Red Pitaya, sending run() down the UDP:55001 path while the board streams
     // binary over TCP — i.e. a successful "detect" that never produces any samples.
     if (isEsp32HandshakeResponse (response))
@@ -756,7 +756,7 @@ bool AcqBoardRedPitaya::startAcquisition()
         const char* hello = "REDPITAYA\n";
         commandSocket->write (hello, (int) strlen (hello));
 
-        // Drain the handshake reply ("8 channels…" + "OK CHANNELS:N"); stop after the
+        // Drain the handshake reply ("14 channels..." + "OK CHANNELS:N"); stop after the
         // terminal line so START is sent only once the reply is consumed.
         String replyLine;
         for (int guard = 0; guard < 4; ++guard)
