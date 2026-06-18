@@ -84,6 +84,11 @@
 
 **Key files:** `acqboard.ccp`, `devicethread.cpp`, `esp32/host/serial_tcp_bridge.py`, `esp32/host/stress_test_serial.py`, SD artifacts from Phase 3
 
+**Plans:** 1/2 complete
+
+- [x] 04-01: Restore the 14-channel ESP32/Open Ephys contract
+- [ ] 04-02: Isolate lossy UDP streaming from lossless SD acquisition
+
 ---
 
 ### Phase 5: Hardware UAT & Operator Docs

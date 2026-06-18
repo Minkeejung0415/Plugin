@@ -134,3 +134,31 @@ Bench/manual:
 - Record a short session and confirm exported/plugin-retrieved CSV includes `mx,my,mz`.
 - Rotate or move the IMU near a magnet and confirm magnetometer values change from baseline.
 
+
+---
+
+## 2026-06-18 Addendum: Lossy UDP Streaming Isolation
+
+The active Arduino firmware isolates SD writes on core 0, but live TCP/serial writes still
+run synchronously in the core-1 acquisition loop before `logSd()`. Hardware results show
+filter+SD with stream off passes at requested 1000 Hz (`mean_hz=975.75`, `sd_err=0`),
+while stream-on runs flatten near 890-900 Hz. This identifies live transport work in the
+acquisition task as the remaining coupling.
+
+The required architecture is SD-first and loss-tolerant:
+
+1. Core 1 acquires, filters, timestamps, and non-blockingly enqueues the SD record first.
+2. Core 1 makes a non-blocking offer to a small bounded stream queue.
+3. A low-priority UDP task on core 0 sends to the TCP controller's IP on port 55001.
+4. The existing SD writer remains higher priority than the UDP task.
+5. A full stream queue drops the oldest live packet and increments counters; it never
+   delays acquisition or changes SD queue behavior.
+
+The plugin already has a UDP 55001 receive path for Red Pitaya frames. The ESP32 branch
+currently bypasses it for TCP sample data, so both firmware and plugin routing must change
+while TCP remains the control and rec-v1 retrieval channel.
+
+Verification must treat SD as ground truth. UDP drops are permitted and reported through
+offered/enqueued/sent/drop/error/max-depth counters. With the Open Ephys receiver slowed or
+stopped, SD must retain zero sequence gaps, zero queue drops/write errors, and generated
+versus saved agreement after finalization.
