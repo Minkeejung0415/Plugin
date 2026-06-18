@@ -13,7 +13,7 @@
 | 1 | Measurement Contract & Baseline | Define file/counter contract and measure today's failure modes | SD-01, SD-03, SD-04, SD-05, LOSS-01, STALL-01, STALL-02 | Complete 2026-06-12 |
 | 2 | Buffered SD Logger | Make SD recording non-blocking and measurable | SD-01-05, LOSS-01, STALL-01, STALL-02 | Planned |
 | 3 | Stress Harness & Analyzer | 1/2 | In Progress|  |
-| 4 | Open Ephys Stall Isolation | Separate device loss from host/Open Ephys/transport buffering | STALL-03, STALL-04 | Planned |
+| 4 | Open Ephys Stall Isolation | 2/2 | Implementation complete; hardware UAT pending | 2026-06-18 |
 | 5 | Hardware UAT & Operator Docs | Prove no-loss operating envelope and document checklist | LOSS-04, STRESS-03, OPS-01-03 | Planned |
 
 ---
@@ -23,7 +23,7 @@
 - [x] **Phase 1: Measurement Contract & Baseline** (completed 2026-06-12)
 - [ ] **Phase 2: Buffered SD Logger**
 - [ ] **Phase 3: Stress Harness & Analyzer** *(planned — 1 plan ready)*
-- [ ] **Phase 4: Open Ephys Stall Isolation**
+- [ ] **Phase 4: Open Ephys Stall Isolation** *(implementation complete; hardware UAT pending)*
 - [ ] **Phase 5: Hardware UAT & Operator Docs**
 
 ---
@@ -84,10 +84,10 @@
 
 **Key files:** `acqboard.ccp`, `devicethread.cpp`, `esp32/host/serial_tcp_bridge.py`, `esp32/host/stress_test_serial.py`, SD artifacts from Phase 3
 
-**Plans:** 1/2 complete
+**Plans:** 2/2 plans complete
 
 - [x] 04-01: Restore the 14-channel ESP32/Open Ephys contract
-- [ ] 04-02: Isolate lossy UDP streaming from lossless SD acquisition
+- [x] 04-02: Isolate lossy UDP streaming from lossless SD acquisition
 
 ---
 

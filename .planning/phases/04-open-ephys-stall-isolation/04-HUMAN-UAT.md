@@ -3,47 +3,47 @@ status: partial
 phase: 04-open-ephys-stall-isolation
 source: [04-VERIFICATION.md]
 started: 2026-06-17
-updated: 2026-06-17
+updated: 2026-06-18
 ---
 
-# Human UAT: Phase 04 Magnetometer Channel Verification
-
-## Current Test
-
-Awaiting device + Open Ephys GUI verification.
+# Human UAT: Phase 04
 
 ## Tests
 
-### 1. Handshake Reports 14 Channels
+### 1. UDP Capability And Channels
 
-expected: USB bridge or direct Wi-Fi path reports `14 channels` and `OK CHANNELS:14`.
+expected: Plugin handshake reports UDP samples plus TCP control, and Open Ephys shows all 14 channels including `mx`, `my`, and `mz`.
 result: pending
 
-### 2. Open Ephys Channel List Includes Magnetometer
+### 2. Normal Receiver SD Integrity
 
-expected: Open Ephys Acq Board channel list includes `mx`, `my`, and `mz`.
+expected: At 950 and 1000 Hz with filter, SD, and UDP enabled for 60 seconds, finalized SD has zero gaps, duplicates, drops, or write errors.
 result: pending
 
-### 3. Saved CSV Includes Magnetometer
+### 3. Receiver-Stall Isolation
 
-expected: recorded/exported or retrieved CSV includes `mx,my,mz` columns or values.
+expected: Pausing or disconnecting Open Ephys may increase UDP drops, but SD remains perfect and reaches at least 97% of the corresponding stream-off baseline.
 result: pending
 
-### 4. Magnetometer Values Change
+### 4. Datagram Recovery
 
-expected: moving the IMU or applying a nearby magnet changes `mx`, `my`, or `mz`; flat zeros are classified as `mag=FALLBACK` / `mag_ok=0` or a downstream export issue.
+expected: Open Ephys resumes on later valid UDP datagrams after loss or receiver interruption without restarting acquisition.
+result: pending
+
+### 5. Magnetometer End-To-End
+
+expected: Moving the IMU or applying a nearby magnet changes `mx`, `my`, or `mz`, and the saved/retrieved data includes those channels.
 result: pending
 
 ## Summary
 
-total: 4
+total: 5
 passed: 0
 issues: 0
-pending: 4
+pending: 5
 skipped: 0
 blocked: 0
 
 ## Gaps
 
-None yet. Awaiting human/device test results.
-
+Awaiting device, SD card, network, and Open Ephys bench results.
