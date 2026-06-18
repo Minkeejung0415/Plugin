@@ -59,10 +59,10 @@ There is **no** separate Ephys Socket implementation in that repo; streaming log
 
 | Item | Red Pitaya (`RedPitaya_justin.c` + Plugin) | ESP32-S3 STEP (`step_node.ino`) |
 |------|--------------------------------------------|----------------------------------|
-| TCP port | **5000** (control only) | **5000** (control **and** sample stream) |
-| Data transport | **UDP 55001** (`sendto` per sample) | **Same TCP socket** after `START` |
-| `REDPITAYA\n` reply | `OK CHANNELS:<N>\n` | `14 channels; sample_rate=<Hz>; node=esp32s3_arduino; filter=on\|off\n` + `OK CHANNELS:14\n` |
-| `START\n` reply | `STARTED BIN:… CSV:…\n` then `SENSORS:0,ICM20948;…\n` | `STARTED BIN:…` + `SENSORS:0,ICM20948\n` (USB bridge synthesizes if needed) |
+| TCP port | 5000 (control only) | 5000 (control, status, rec-v1 retrieval) |
+| Data transport | UDP 55001 per sample | UDP 55001 in direct Wi-Fi mode; queued serial/TCP bridge in USB mode |
+| REDPITAYA reply | OK CHANNELS:N | Includes transport=udp for direct Wi-Fi or transport=tcp for USB bridge mode |
+| START reply | STARTED then SENSORS | STARTED includes transport and UDP port, followed by SENSORS:0,ICM20948 |
 | Sample rate | Configurable (`FREQ:`), default 100 Hz | **`FREQ:<Hz>`** any integer **≥ 1** (default 100 Hz; no firmware/plugin cap — user finds true min/max by testing) |
 | `CFG` / `FILTER` | Yes | **`CFG 0 ACC|GYR <0-3>`**, **`FILTER ON|OFF`** |
 | Channels | Dynamic (sensors × raw + quat + analog) | Fixed **14** int16 (firmware ≥1.5.0) |
@@ -93,6 +93,24 @@ There is **no** separate Ephys Socket implementation in that repo; streaming log
 
 **What already matches:** port 5000, `REDPITAYA` / `START` command names, 22-byte Open Ephys header, int16 channel-major samples, configurable rate via `FREQ:` (Hz ≥ 1 only).
 
+### SD-first task isolation (2026-06-18)
+
+The acquisition loop runs on ESP32 core 1. It enqueues the SD record first, then makes one
+non-blocking offer to a 16-record live-stream queue. Core 0 runs two writers:
+
+- SD writer: priority 4, deep 1024-record queue, persistence path.
+- Stream writer: priority 1, shallow latest-data queue, UDP or queued USB serial output.
+
+If the stream queue fills, the oldest live packet is discarded. Stream queue drops and
+send errors may increase, but they do not contribute to SD errors or recording success.
+STATUS reports stream offered, enqueued, sent, drop, error, depth, and latency counters.
+
+UDP is a live view, not evidence of data integrity. Only finalized SD sequence continuity,
+generated/saved agreement, and zero SD queue/write errors support a no-loss claim.
+
+For direct Wi-Fi operation set USB_OPEN_EPHYS_MODE false. Open Ephys connects to TCP
+port 5000 for handshake/control, then receives sample datagrams on UDP port 55001. Permit
+inbound UDP 55001 through the Windows firewall.
 ### Binary frame header (v1.7.0)
 
 **`HEADER_SIZE` = 22 bytes** — unchanged from Ephys Socket / Red Pitaya layout (`struct "<iiHiii"`). No extra bytes; backward compatible parsers that ignore unknown fields still work.
@@ -137,7 +155,7 @@ Each slave stamps frames with **its own** monotonic µs since boot. Slaves do **
 
 **OpenSim:** Plugin reads filter slots ch7–10 (Q15), same convention as Red Pitaya quat tail — flat zeros when `FILTER OFF`, live quat when `FILTER ON`.
 
-**What does not match the custom Plugin:** handshake text, STARTED/SENSORS lines, UDP vs TCP streaming, ESP32 IP vs `.local` Red Pitaya hosts (Plugin `e298679+` handles TCP ESP32 path).
+**Current plugin behavior:** handshake negotiation selects ESP32 UDP or legacy TCP explicitly. Direct Wi-Fi uses UDP 55001 for samples and TCP 5000 for control/retrieval; USB bridge mode remains TCP-compatible.
 
 ### Sample rate (no fixed cap)
 

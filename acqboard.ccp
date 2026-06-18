@@ -380,6 +380,7 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
     if (isEsp32HandshakeResponse (response))
     {
         isEsp32Node = true;
+        esp32UsesUdpStream = response.containsIgnoreCase ("transport=udp");
         numAdcChannels = parseEsp32ChannelCountFromHandshake (
             response, AcqBoardRedPitaya::ESP32_DEFAULT_CHANNELS);
         settings.boardSampleRate = 100.0f;
@@ -402,7 +403,9 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
         deviceFound = true;
         std::cout << "Detected ESP32-S3 node at " << activeRedPitayaHost << " with "
                   << numAdcChannels << " channels @ "
-                  << (int) settings.boardSampleRate << " Hz (TCP stream)." << std::endl;
+                  << (int) settings.boardSampleRate << " Hz ("
+                  << (esp32UsesUdpStream ? "UDP samples + TCP control" : "TCP stream")
+                  << ")." << std::endl;
 
         // Negotiate rec-v1 SD recording protocol.  sendEsp32RecHello() also checks for
         // any timeout-finalized session retained by firmware (D-10).
@@ -415,6 +418,7 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
     if (response.contains ("OK"))
     {
         isEsp32Node = false;
+        esp32UsesUdpStream = false;
 
         if (response.contains ("CHANNELS:"))
         {
@@ -830,8 +834,10 @@ bool AcqBoardRedPitaya::startAcquisition()
             readReplyLine (okFilter, 200);
         }
 
-        std::cout << "ESP32-S3: Streaming started (TCP binary, "
-                  << numAdcChannels << " ch @ " << targetHz << " Hz)." << std::endl;
+        std::cout << "ESP32-S3: Streaming started ("
+                  << (esp32UsesUdpStream ? "UDP samples + TCP control" : "TCP binary")
+                  << ", " << numAdcChannels << " ch @ " << targetHz << " Hz)."
+                  << std::endl;
 
         startThread();
         writeJointDisplayConfig();
@@ -1805,7 +1811,7 @@ void AcqBoardRedPitaya::run()
     if (numAdcChannelsLocal <= 0 || numAdcChannelsLocal > MAX_CHANNELS || samplesPerBuffer <= 0)
         return;
 
-    // ESP32-S3: binary samples on the same TCP socket after START (not UDP 55001).
+    // ESP32-S3: UDP-capable firmware keeps TCP for control; legacy firmware streams samples on TCP.
     if (isEsp32Node)
     {
         constexpr int headerSize = 22;
@@ -1816,6 +1822,14 @@ void AcqBoardRedPitaya::run()
         double lastFrameWallSec = 0.0;
         uint32_t lastHwUs32 = 0;
         bool haveLastHw = false;
+        DatagramSocket esp32UdpSocket;
+        uint8_t udpDatagram[65507];
+
+        if (esp32UsesUdpStream && ! esp32UdpSocket.bindToPort (55001))
+        {
+            std::cout << "ESP32 ERROR: Failed to bind UDP sample port 55001" << std::endl;
+            return;
+        }
 
         while (! threadShouldExit())
         {
@@ -1827,13 +1841,48 @@ void AcqBoardRedPitaya::run()
                 continue;
             }
 
-            if (commandSocket->waitUntilReady (true, 100))
+            if (esp32UsesUdpStream)
+            {
+                if (esp32UdpSocket.waitUntilReady (true, 100))
+                {
+                    const int nRead = esp32UdpSocket.read (
+                        (char*) udpDatagram, (int) sizeof (udpDatagram), false);
+
+                    if (nRead < headerSize)
+                        continue;
+
+                    int32_t numBytes = 0;
+                    uint16_t bitDepth = 0;
+                    int32_t elemType = 0;
+                    int32_t channelsInHeader = 0;
+                    int32_t samplesInHeader = 0;
+                    std::memcpy (&numBytes, udpDatagram + 4, 4);
+                    std::memcpy (&bitDepth, udpDatagram + 8, 2);
+                    std::memcpy (&elemType, udpDatagram + 10, 4);
+                    std::memcpy (&channelsInHeader, udpDatagram + 14, 4);
+                    std::memcpy (&samplesInHeader, udpDatagram + 18, 4);
+
+                    const bool valid = elemType == 2
+                                       && (bitDepth == 3 || bitDepth == 16)
+                                       && samplesInHeader == 1
+                                       && channelsInHeader > 0
+                                       && channelsInHeader <= MAX_CHANNELS
+                                       && numBytes == channelsInHeader * elemType
+                                       && nRead == headerSize + numBytes;
+
+                    if (! valid)
+                        continue;
+
+                    tcpRx.insertArray (tcpRx.size(), udpDatagram, nRead);
+                }
+            }
+            else if (commandSocket->waitUntilReady (true, 100))
             {
                 char chunk[4096];
                 const int nRead = commandSocket->read (chunk, (int) sizeof (chunk), false);
 
                 if (nRead <= 0)
-                    break; // peer closed or socket error — exit acquisition loop
+                    break;
 
                 tcpRx.insertArray (tcpRx.size(), (const uint8*) chunk, nRead);
             }

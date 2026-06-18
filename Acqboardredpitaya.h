@@ -328,6 +328,9 @@ public:
     */
     bool isEsp32Node = false;
 
+    /** True when the ESP32 handshake advertises transport=udp. TCP remains control-only. */
+    bool esp32UsesUdpStream = false;
+
     /** Set/clear user-configured node IP or hostname (e.g. 192.168.4.1). */
     void setNodeHost (const String& host) { configurableNodeHost = host.trim(); }
 

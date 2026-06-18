@@ -51,7 +51,7 @@ Outputs:
 
 ## No-SD SPI Characterization
 
-2026-06-16 hardware result, with ICM20948 on SPI and CS wired to XIAO D7 / GPIO44:
+2026-06-16 hardware result, with ICM20948 on the SD-card SPI bus and CS wired to XIAO D7 / GPIO44:
 
 - boot confirmed `WHO_AM_I 0xEA` and AK09916 through the ICM SPI auxiliary bus
 - SD card was intentionally absent, so every run used `--sd off`
@@ -102,12 +102,13 @@ The firmware now splits SD failures into explicit fields:
 - `mutex_timeouts=`: SD writer could not take its SD/file mutex
 - `max_queue_depth=`: deepest observed SD queue backlog
 - `flush_count=`, `max_flush_us=`: flush cadence and worst flush latency
-- `spi_mutex_timeouts=`: ICM/SD shared SPI lock timeout count
+- `spi_mutex_timeouts=`: ICM SPI lock timeout count. Historical SD-on runs also used
+  this as the ICM/SD shared SPI lock timeout count before the ICM moved to HSPI.
 
 Interpret SD-on failures from these split counters before increasing queue depth. A 1024-record queue
-should absorb ordinary 100 ms stalls at 500 Hz; if errors remain, suspect SPI bus contention, small
-per-sample writes, or card/filesystem behavior. The Arduino firmware serializes SD and ICM SPI access
-with a shared SPI mutex and batches queued SD records into larger writes for the next SD-on run.
+should absorb ordinary 100 ms stalls at 500 Hz; if errors remain, suspect small per-sample writes,
+card/filesystem behavior, or SPI contention on older shared-bus wiring. The Arduino firmware batches
+queued SD records into larger writes. Current wiring keeps ICM on HSPI and SD on the board SD bus.
 
 Low-rate SD-on proof command:
 
@@ -128,7 +129,7 @@ Hardware results with batch=32, ICM/mag timeout=5 ms (firmware before this tunin
 
 Root-cause model:
 
-- ICM and SD share the same physical SPI bus (GPIO7/8/9 on XIAO Sense).
+- Historical shared-bus state: ICM and SD shared the same physical SPI bus (GPIO7/8/9 on XIAO Sense).
 - SD batch of 32 records fires every `32/Hz` ms. Average SD write latency ≈ 10–12 ms.
 - During each write the ICM read waits up to 5 ms (timeout), and at ≤100 Hz the mag read
   also waits up to 5 ms (mag polls every 10 ms = every sample at 100 Hz).
@@ -142,6 +143,14 @@ Tuning applied (plan 03-05):
 - `SD_WRITE_BATCH_RECORDS` increased 32 → 128. Writes fire 4× less often.
 - ICM/mag `spiBusTake` timeout reduced 5 ms → 2 ms. Contended loop = 2+2+1 = 5 ms.
 - `sdWriteTask` stack increased 4096 → 8192 bytes to hold the larger batch buffer.
+
+Hardware update (2026-06-18):
+
+- ICM20948 moved off the SD-card SPI bus onto HSPI.
+- ICM wiring: CS D6/GPIO43, MISO D5/GPIO6, MOSI D4/GPIO5, SCK D3/GPIO4.
+- SD remains on the board SD/Sense SPI wiring via `SD.begin(PIN_SD_CS, SPI, 25000000)`.
+- Firmware uses `SPIClass ICM_SPI(HSPI)` for ICM transfers and no longer takes the ICM SPI mutex
+  around SD file operations.
 
 Projected outcomes:
 
@@ -241,3 +250,59 @@ python host\analyze_sample_rate.py step_session.bin --format sd-bin
 - Host gaps while SD is clean: downstream USB/TCP/Open Ephys transport is the likely issue.
 
 Filter type on ESP32 >= v1.6.0: VQF, with ch7-10 as Q15 quaternion when `FILTER ON`.
+
+## SD-First UDP Isolation (2026-06-18)
+
+The ICM20948 now uses HSPI while SD stays on the Sense board SPI bus. Live transport is
+also moved out of the acquisition loop:
+
+- Core 1: acquire, filter, enqueue SD first, then non-blocking stream offer.
+- Core 0 priority 4: batched SD writer.
+- Core 0 priority 1: UDP or queued USB serial writer.
+- Stream queue: 16 records, oldest live record dropped when full.
+- SD queue: 1024 records and remains the integrity path.
+
+Stream-off hardware baseline with filter and SD enabled:
+
+| Requested Hz | SD-derived Hz | Result |
+|---|---:|---|
+| 950 | 944.5 | PASS |
+| 1000 | 975.8 | PASS |
+| 1050 | 991.7 | FAIL, below 95% |
+| 1100 | 992.1 | FAIL, saturated near 1 kHz |
+
+The earlier 900 Hz stream-on ceiling included synchronous serial transport work and is
+historical. The current architecture must be judged by finalized SD, not UDP delivery.
+
+### Direct Wi-Fi UDP test
+
+Set USB_OPEN_EPHYS_MODE false, flash the firmware, connect Open Ephys to TCP port 5000,
+and allow inbound UDP port 55001 through the host firewall. Keep Open Ephys connected so
+the firmware learns the UDP destination from the TCP controller IP.
+
+With Open Ephys receiving UDP, use COM only for commands and status:
+
+    python esp32\host\stress_test_serial.py --port COM4 --hz 950 1000 ^
+      --capture-s 60 --filter on --sd on --stream on --stream-transport udp
+
+The output reports sd_pass separately from stream_quality. COUNTERS_ONLY means samples
+were intentionally not captured from COM because the live path is UDP.
+
+### Receiver-stall test
+
+1. Start the same filter+SD+UDP run.
+2. Pause, close, or firewall the Open Ephys UDP receiver for part of the 60-second capture.
+3. Leave acquisition and SD recording running.
+4. Stop/finalize, retrieve the SD file, and run the SD analyzer.
+5. Compare stream counters with SD counters.
+
+Expected behavior:
+
+- stream_queue_drops or stream_send_errors may increase.
+- SD queue_drops, write_errors, and mutex_timeouts remain zero.
+- Finalized SD has zero duplicate or missing sequences.
+- generated and saved counts agree after queue drain/finalization.
+- SD-derived rate remains at least 97% of the matching stream-off baseline.
+- Open Ephys resumes on later valid datagrams; UDP loss is not replayed.
+
+A no-loss claim applies only to the finalized SD file. UDP/Open Ephys is a lossy live view.

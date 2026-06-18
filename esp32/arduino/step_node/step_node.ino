@@ -16,7 +16,7 @@
  * #define ENABLE_SERIAL_BENCH true
  * #define ENABLE_ESPNOW false
  * #define ENABLE_SD false
- * #define PIN_ICM_CS 44
+ * #define PIN_ICM_CS 43
  * --- end preset ---
  *
  * --- USB_OPEN_EPHYS_MODE (USB power + PC — Wi-Fi not required for Open Ephys) ---
@@ -37,6 +37,7 @@
 
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiUdp.h>
 #if ENABLE_ESPNOW
 #include <esp_now.h>
 #include "esp_wifi.h"
@@ -64,6 +65,8 @@ extern "C" {
 #define WIFI_SSID "YOUR_HOTSPOT"
 #define WIFI_PASS "yourpassword"
 
+#define WIFI_FORCE_SOFT_AP true
+
 // Soft AP fallback after STA timeout (automatic — do not need to edit unless renaming lab AP)
 #define WIFI_AP_SSID "STEP_ESP32"
 #define WIFI_AP_PASS "step1234"
@@ -75,6 +78,7 @@ extern "C" {
 #define WIFI_TX_POWER_AP WIFI_POWER_8_5dBm
 
 #define TCP_PORT 5000
+#define UDP_STREAM_PORT 55001
 #define SAMPLE_HZ_DEFAULT 100
 #define NUM_CHANNELS 14
 
@@ -85,18 +89,18 @@ extern "C" {
 #define ICM_BANK2_ACCEL_SMPLRT_DIV_2 0x11
 #define ICM_BANK2_ACCEL_CONFIG_1 0x14
 
-#define PIN_SPI_SCK 7    // XIAO D8 / GPIO7
-#define PIN_SPI_MISO 8   // XIAO D9 / GPIO8
-#define PIN_SPI_MOSI 9   // XIAO D10 / GPIO9
-#define PIN_ICM_CS 44    // XIAO D7 / GPIO44
+#define PIN_SPI_SCK 4    // XIAO D3 / GPIO4, HSPI SCK
+#define PIN_SPI_MISO 6   // XIAO D5 / GPIO6, HSPI MISO
+#define PIN_SPI_MOSI 5   // XIAO D4 / GPIO5, HSPI MOSI
+#define PIN_ICM_CS 43    // XIAO D6 / GPIO43, ICM CS
 #define PIN_DIO 1       // XIAO D0 / GPIO1 — change via #define if wired elsewhere
 
 #define NODE_IS_MASTER true
 #define ENABLE_SD true
 
-// true = USB binary @100 Hz 8ch → serial_tcp_bridge.py [--plugin] → 127.0.0.1:5000 (no Wi-Fi for OE).
+// true = USB binary @100 Hz 14ch -> serial_tcp_bridge.py [--plugin] -> 127.0.0.1:5000 (no Wi-Fi for OE).
 // false = Wi-Fi TCP :5000 on board; Plugin uses Serial Monitor IP, not 127.0.0.1.
-#define USB_OPEN_EPHYS_MODE true
+#define USB_OPEN_EPHYS_MODE false
 
 #if USB_OPEN_EPHYS_MODE
 #define ENABLE_TCP false
@@ -109,6 +113,8 @@ extern "C" {
 #endif
 
 #define PIN_SD_CS 21
+
+static SPIClass ICM_SPI(HSPI);
 
 #define ICM_REG_BANK_SEL 0x7F
 #define ICM_WHO_AM_I 0x00
@@ -160,6 +166,12 @@ struct SdLogRecord {
   int64_t time_us;
   int16_t ch[NUM_CHANNELS];
 };
+
+struct StreamRecord {
+  OeHeader header;
+  int16_t ch[NUM_CHANNELS];
+  uint32_t seq;
+};
 #pragma pack(pop)
 
 #define SD_LOG_MAGIC 0x31505453UL  // "STP1" little-endian
@@ -168,6 +180,9 @@ struct SdLogRecord {
 #define SD_QUEUE_DEPTH 1024
 #define SD_WRITE_BATCH_RECORDS 256
 #define SD_PERIODIC_FLUSH_MS 0
+#define STREAM_QUEUE_DEPTH 16
+#define SD_TASK_PRIORITY 4
+#define STREAM_TASK_PRIORITY 1
 #define REC_MAX_CHUNK 1024UL
 #define SDRF_HEADER_LEN 64
 #define SDRF_TYPE_DATA 0x01
@@ -193,6 +208,7 @@ struct SdrfHeader {
 
 WiFiServer server(TCP_PORT);
 WiFiClient client;
+WiFiUDP stream_udp;
 bool streaming = false;
 bool wifi_up = false;
 bool wifi_soft_ap = false;
@@ -205,7 +221,7 @@ uint32_t boot_ms = 0;
 bool csv_banner_sent = false;
 uint32_t last_status_ms = 0;
 
-// DIO input is kept for commands/sync, but it is not part of the 13-channel OE stream.
+// DIO input is included in the 14-channel OE stream.
 struct {
   bool stable_high;
   bool pending_raw;
@@ -237,6 +253,14 @@ static uint32_t g_sd_queue_max_depth = 0;
 static uint32_t g_max_loop_us = 0;
 static uint32_t g_loop_overruns = 0;
 static uint64_t g_spi_mutex_timeouts = 0;
+static uint64_t g_stream_offered = 0;
+static uint64_t g_stream_enqueued = 0;
+static uint64_t g_stream_sent = 0;
+static uint64_t g_stream_queue_drops = 0;
+static uint64_t g_stream_send_errors = 0;
+static uint32_t g_stream_queue_max_depth = 0;
+static uint32_t g_max_stream_send_us = 0;
+static volatile uint32_t g_stream_target_ip = 0;
 static uint64_t g_prof_samples = 0;
 static uint64_t g_prof_imu_sum_us = 0;
 static uint64_t g_prof_mag_sum_us = 0;
@@ -267,6 +291,7 @@ static uint32_t g_rec_grace_deadline_ms = 0;
 static bool g_transfer_active = false;
 
 static QueueHandle_t g_sd_queue = nullptr;
+static QueueHandle_t g_stream_queue = nullptr;
 static SemaphoreHandle_t g_sd_mutex = nullptr;
 static SemaphoreHandle_t g_spi_mutex = nullptr;
 
@@ -514,7 +539,7 @@ void onEspNowSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 static void icmSpiBegin() {
   pinMode(PIN_ICM_CS, OUTPUT);
   digitalWrite(PIN_ICM_CS, HIGH);
-  SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
+  ICM_SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_ICM_CS);
 }
 
 static bool spiBusTake(TickType_t timeout) {
@@ -531,12 +556,12 @@ static void spiBusGive() {
 static bool icmWriteAddr(uint8_t addr, uint8_t reg, uint8_t val) {
   (void)addr;
   if (!spiBusTake(0)) return false;
-  SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
+  ICM_SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_ICM_CS, LOW);
-  SPI.transfer(reg & 0x7F);
-  SPI.transfer(val);
+  ICM_SPI.transfer(reg & 0x7F);
+  ICM_SPI.transfer(val);
   digitalWrite(PIN_ICM_CS, HIGH);
-  SPI.endTransaction();
+  ICM_SPI.endTransaction();
   spiBusGive();
   return true;
 }
@@ -544,26 +569,26 @@ static bool icmWriteAddr(uint8_t addr, uint8_t reg, uint8_t val) {
 static bool icmReadAddr(uint8_t addr, uint8_t reg, uint8_t *val) {
   (void)addr;
   if (!spiBusTake(0)) return false;
-  SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
+  ICM_SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_ICM_CS, LOW);
-  SPI.transfer(reg | 0x80);
-  *val = SPI.transfer(0x00);
+  ICM_SPI.transfer(reg | 0x80);
+  *val = ICM_SPI.transfer(0x00);
   digitalWrite(PIN_ICM_CS, HIGH);
-  SPI.endTransaction();
+  ICM_SPI.endTransaction();
   spiBusGive();
   return true;
 }
 
 static bool icmReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
   if (!spiBusTake(0)) return false;
-  SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
+  ICM_SPI.beginTransaction(SPISettings(kIcmSpiHz, MSBFIRST, SPI_MODE0));
   digitalWrite(PIN_ICM_CS, LOW);
-  SPI.transfer(reg | 0x80);
+  ICM_SPI.transfer(reg | 0x80);
   for (size_t i = 0; i < len; i++) {
-    buf[i] = SPI.transfer(0x00);
+    buf[i] = ICM_SPI.transfer(0x00);
   }
   digitalWrite(PIN_ICM_CS, HIGH);
-  SPI.endTransaction();
+  ICM_SPI.endTransaction();
   spiBusGive();
   return true;
 }
@@ -593,7 +618,7 @@ static void printBootDiagnostics() {
   Serial.println("========================================");
   Serial.printf("Firmware: %s\n", FIRMWARE_VERSION);
   Serial.printf("Board target: XIAO_ESP32S3 (Sense)\n");
-  Serial.printf("SPI SCK: GPIO%d (D8)  MISO: GPIO%d (D9)  MOSI: GPIO%d (D10)  ICM CS: GPIO%d (D7)\n",
+  Serial.printf("ICM HSPI SCK: GPIO%d (D3)  MISO: GPIO%d (D5)  MOSI: GPIO%d (D4)  CS: GPIO%d (D6)\n",
                 PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_ICM_CS);
   Serial.printf("ICM ODR: gyro_div=%u accel_div=%u odr_align=1 dlpf=%s dlpf_cfg=%u\n",
                 kIcmGyroSmplrtDiv, kIcmAccelSmplrtDiv,
@@ -619,7 +644,7 @@ static void initDio() {
   dio_state.pending_since_ms = millis();
   Serial.printf("DIO: GPIO%d (pad D0) pull-up — initial level=%d (1=idle, 0=GND)\n",
                 PIN_DIO, level ? 1 : 0);
-  Serial.println("DIO: input active for sync/commands; not included in 13-channel OE stream");
+  Serial.println("DIO: input active for sync/commands; included as channel 13 in 14-channel OE stream");
 }
 
 static void updateDio() {
@@ -829,37 +854,107 @@ static void sendEspNowSync() {
 static void sendEspNowSync() {}
 #endif
 
-static void packAndSendTcp() {
-  if (!client || !client.connected() || !streaming) return;
-  OeHeader hdr;
-  fillOeHeader(&hdr);
-  client.write((uint8_t *)&hdr, sizeof(hdr));
-  client.write((uint8_t *)channels, sizeof(channels));
+static void resetStreamStats() {
+  g_stream_offered = 0;
+  g_stream_enqueued = 0;
+  g_stream_sent = 0;
+  g_stream_queue_drops = 0;
+  g_stream_send_errors = 0;
+  g_stream_queue_max_depth = 0;
+  g_max_stream_send_us = 0;
+  if (g_stream_queue) xQueueReset(g_stream_queue);
 }
 
-static void sendSerialBench() {
-#if ENABLE_SERIAL_BENCH
-  if (g_transfer_active || !streaming) return;
-  if (!csv_banner_sent) {
-    Serial.printf("# STEP boot complete icm=%s spi_cs=%d mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz,dio\n",
-                  icm_ok ? "OK" : "FALLBACK", PIN_ICM_CS, mag_ok ? "OK" : "FALLBACK");
-    csv_banner_sent = true;
+static void queueStreamRecord() {
+  if (!streaming || !g_stream_queue || g_transfer_active) return;
+
+  StreamRecord rec = {};
+  fillOeHeader(&rec.header);
+  memcpy(rec.ch, channels, sizeof(rec.ch));
+  rec.seq = seq;
+  g_stream_offered++;
+
+  if (xQueueSend(g_stream_queue, &rec, 0) != pdTRUE) {
+    StreamRecord stale;
+    if (xQueueReceive(g_stream_queue, &stale, 0) == pdTRUE) {
+      g_stream_queue_drops++;
+    }
+    if (xQueueSend(g_stream_queue, &rec, 0) != pdTRUE) {
+      g_stream_queue_drops++;
+      return;
+    }
   }
-#if SERIAL_OUTPUT_BINARY
-  OeHeader hdr;
-  fillOeHeader(&hdr);
-  Serial.write((uint8_t *)&hdr, sizeof(hdr));
-  Serial.write((uint8_t *)channels, sizeof(channels));
-#else
-  Serial.printf("%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-                (unsigned long)seq, channels[0], channels[1], channels[2],
-                channels[3], channels[4], channels[5], channels[6], channels[7],
-                channels[8], channels[9], channels[10], channels[11], channels[12],
-                channels[13]);
-#endif
-#endif
+
+  g_stream_enqueued++;
+  uint32_t depth = uxQueueMessagesWaiting(g_stream_queue);
+  if (depth > g_stream_queue_max_depth) g_stream_queue_max_depth = depth;
 }
 
+static void streamWriteTask(void *) {
+  Serial.printf("Stream writer: core=%d priority=%u queue=%u transport=%s\n",
+                xPortGetCoreID(), (unsigned)uxTaskPriorityGet(NULL),
+                (unsigned)STREAM_QUEUE_DEPTH,
+#if ENABLE_TCP
+                "udp:55001"
+#else
+                "usb-serial"
+#endif
+  );
+
+  StreamRecord rec;
+  while (true) {
+    if (!g_stream_queue ||
+        xQueueReceive(g_stream_queue, &rec, pdMS_TO_TICKS(100)) != pdTRUE) {
+      continue;
+    }
+    if (!streaming || g_transfer_active) continue;
+
+    uint32_t t0 = micros();
+    bool sent = false;
+#if ENABLE_TCP
+    const uint32_t target_raw = g_stream_target_ip;
+    if (wifi_up && target_raw != 0) {
+      IPAddress target(target_raw);
+      const int began = stream_udp.beginPacket(target, UDP_STREAM_PORT);
+      size_t written = 0;
+      if (began == 1) {
+        written += stream_udp.write((const uint8_t *)&rec.header, sizeof(rec.header));
+        written += stream_udp.write((const uint8_t *)rec.ch, sizeof(rec.ch));
+        const int ended = stream_udp.endPacket();
+        sent = written == sizeof(rec.header) + sizeof(rec.ch) && ended == 1;
+      }
+    }
+#elif ENABLE_SERIAL_BENCH
+    if (!csv_banner_sent) {
+      Serial.printf("# STEP boot complete icm=%s spi_cs=%d mag=%s channels=ax,ay,az,gx,gy,gz,mx,my,mz,qw,qx,qy,qz,dio\n",
+                    icm_ok ? "OK" : "FALLBACK", PIN_ICM_CS,
+                    mag_ok ? "OK" : "FALLBACK");
+      csv_banner_sent = true;
+    }
+#if SERIAL_OUTPUT_BINARY
+    const size_t header_written =
+        Serial.write((const uint8_t *)&rec.header, sizeof(rec.header));
+    const size_t payload_written =
+        Serial.write((const uint8_t *)rec.ch, sizeof(rec.ch));
+    sent = header_written == sizeof(rec.header) &&
+           payload_written == sizeof(rec.ch);
+#else
+    sent = Serial.printf("%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                         (unsigned long)rec.seq,
+                         rec.ch[0], rec.ch[1], rec.ch[2], rec.ch[3], rec.ch[4],
+                         rec.ch[5], rec.ch[6], rec.ch[7], rec.ch[8], rec.ch[9],
+                         rec.ch[10], rec.ch[11], rec.ch[12], rec.ch[13]) > 0;
+#endif
+#endif
+    const uint32_t elapsed = (uint32_t)(micros() - t0);
+    if (elapsed > g_max_stream_send_us) g_max_stream_send_us = elapsed;
+    if (sent) {
+      g_stream_sent++;
+    } else {
+      g_stream_send_errors++;
+    }
+  }
+}
 static void sdRecordStop();
 static void recReplyToHost(const char *text);
 
@@ -889,13 +984,8 @@ static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
   uint8_t buf[128];
   uint32_t crc = 0;
   uint64_t total = 0;
-  if (!spiBusTake(portMAX_DELAY)) {
-    if (size_out) *size_out = 0;
-    return 0;
-  }
   File f = SD.open(path, FILE_READ);
   if (!f) {
-    spiBusGive();
     if (size_out) *size_out = 0;
     return 0;
   }
@@ -906,7 +996,6 @@ static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
     total += n;
   }
   f.close();
-  spiBusGive();
   if (size_out) *size_out = total;
   return crc;
 #else
@@ -981,6 +1070,9 @@ static void writeSdrfFrame(const char *session_id, uint8_t type, uint32_t chunk_
 
 #if ENABLE_SD
 static void sdWriteTask(void *) {
+  Serial.printf("SD writer: core=%d priority=%u queue=%u batch=%u\n",
+                xPortGetCoreID(), (unsigned)uxTaskPriorityGet(NULL),
+                (unsigned)SD_QUEUE_DEPTH, (unsigned)SD_WRITE_BATCH_RECORDS);
   SdLogRecord batch[SD_WRITE_BATCH_RECORDS];
   uint32_t last_flush_ms = 0;
   while (true) {
@@ -994,17 +1086,14 @@ static void sdWriteTask(void *) {
       if (g_sd_mutex && xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         if (g_sd_file) {
           const size_t bytes_to_write = batch_count * sizeof(SdLogRecord);
-          if (spiBusTake(portMAX_DELAY)) {
-            uint32_t t0 = micros();
-            size_t written = g_sd_file.write((uint8_t *)batch, bytes_to_write);
-            uint32_t wu = (uint32_t)(micros() - t0);
-            spiBusGive();
-            if (wu > g_max_sd_write_us) g_max_sd_write_us = wu;
-            if (written == bytes_to_write) {
-              g_sd_saved_samples += batch_count;
-            } else {
-              g_sd_write_errors += batch_count;
-            }
+          uint32_t t0 = micros();
+          size_t written = g_sd_file.write((uint8_t *)batch, bytes_to_write);
+          uint32_t wu = (uint32_t)(micros() - t0);
+          if (wu > g_max_sd_write_us) g_max_sd_write_us = wu;
+          if (written == bytes_to_write) {
+            g_sd_saved_samples += batch_count;
+          } else {
+            g_sd_write_errors += batch_count;
           }
         }
         xSemaphoreGive(g_sd_mutex);
@@ -1017,11 +1106,10 @@ static void sdWriteTask(void *) {
     if ((now_ms - last_flush_ms) >= SD_PERIODIC_FLUSH_MS) {
       last_flush_ms = now_ms;
       if (g_sd_mutex && xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (g_sd_file && spiBusTake(portMAX_DELAY)) {
+        if (g_sd_file) {
           uint32_t t0 = micros();
           g_sd_file.flush();
           uint32_t fu = (uint32_t)(micros() - t0);
-          spiBusGive();
           g_sd_flush_count++;
           if (fu > g_max_sd_flush_us) g_max_sd_flush_us = fu;
         }
@@ -1078,11 +1166,8 @@ static bool sdRecordStart(const char *path_or_null) {
     if (g_sd_queue) while (uxQueueMessagesWaiting(g_sd_queue) > 0) vTaskDelay(pdMS_TO_TICKS(10));
     vTaskDelay(pdMS_TO_TICKS(30));
     if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
-    if (spiBusTake(portMAX_DELAY)) {
-      g_sd_file.flush();
-      g_sd_file.close();
-      spiBusGive();
-    }
+    g_sd_file.flush();
+    g_sd_file.close();
     if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   }
 
@@ -1095,10 +1180,7 @@ static bool sdRecordStart(const char *path_or_null) {
   }
 
   if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
-  if (spiBusTake(portMAX_DELAY)) {
-    g_sd_file = SD.open(g_sd_path, FILE_WRITE);
-    spiBusGive();
-  }
+  g_sd_file = SD.open(g_sd_path, FILE_WRITE);
   if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   if (!g_sd_file) {
     g_sd_recording = false;
@@ -1135,10 +1217,7 @@ static bool sdRecordStart(const char *path_or_null) {
   hdr.channel_count = NUM_CHANNELS;
   hdr.start_time_us = (int64_t)esp_timer_get_time();
   size_t written = 0;
-  if (spiBusTake(portMAX_DELAY)) {
-    written = g_sd_file.write((uint8_t *)&hdr, sizeof(hdr));
-    spiBusGive();
-  }
+  written = g_sd_file.write((uint8_t *)&hdr, sizeof(hdr));
   if (written != sizeof(hdr)) {
     g_sd_header_errors++;
   }
@@ -1162,15 +1241,12 @@ static void sdRecordStop() {
   vTaskDelay(pdMS_TO_TICKS(30));
   if (g_sd_mutex) xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
   if (g_sd_file) {
-    if (spiBusTake(portMAX_DELAY)) {
-      uint32_t t0 = micros();
-      g_sd_file.flush();
-      uint32_t fu = (uint32_t)(micros() - t0);
-      g_sd_flush_count++;
-      if (fu > g_max_sd_flush_us) g_max_sd_flush_us = fu;
-      g_sd_file.close();
-      spiBusGive();
-    }
+    uint32_t t0 = micros();
+    g_sd_file.flush();
+    uint32_t fu = (uint32_t)(micros() - t0);
+    g_sd_flush_count++;
+    if (fu > g_max_sd_flush_us) g_max_sd_flush_us = fu;
+    g_sd_file.close();
   }
   if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   controlPrintf("SD_FINAL ready=%d recording=0 path=%s saved=%llu errors=%llu queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu mutex_timeouts=%llu max_queue_depth=%lu max_sd_write_us=%lu flush_count=%llu max_flush_us=%lu overrun=%lu\n",
@@ -1222,6 +1298,9 @@ static void printAcqStatus() {
                 "queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu "
                 "mutex_timeouts=%llu max_queue_depth=%lu max_sd_write_us=%lu flush_count=%llu max_flush_us=%lu "
                 "spi_mutex_timeouts=%llu max_loop_us=%lu loop_overruns=%lu "
+                "stream_offered=%llu stream_enqueued=%llu stream_sent=%llu "
+                "stream_queue_drops=%llu stream_send_errors=%llu "
+                "stream_max_queue_depth=%lu max_stream_send_us=%lu "
                 "prof_n=%llu "
                 "avg_imu_us=%lu max_imu_us=%lu "
                 "avg_mag_us=%lu max_mag_us=%lu "
@@ -1258,6 +1337,13 @@ static void printAcqStatus() {
                 (unsigned long long)g_spi_mutex_timeouts,
                 (unsigned long)g_max_loop_us,
                 (unsigned long)g_loop_overruns,
+                (unsigned long long)g_stream_offered,
+                (unsigned long long)g_stream_enqueued,
+                (unsigned long long)g_stream_sent,
+                (unsigned long long)g_stream_queue_drops,
+                (unsigned long long)g_stream_send_errors,
+                (unsigned long)g_stream_queue_max_depth,
+                (unsigned long)g_max_stream_send_us,
                 (unsigned long long)g_prof_samples,
                 (unsigned long)profAvg(g_prof_imu_sum_us),
                 (unsigned long)g_prof_imu_max_us,
@@ -1444,26 +1530,19 @@ static void handleRecLine(const String &line) {
     }
     if (length > REC_MAX_CHUNK) length = REC_MAX_CHUNK;
     if (offset + length > g_final_file_size) length = (uint32_t)(g_final_file_size - offset);
-    if (!spiBusTake(portMAX_DELAY)) {
-      replyToHost("REC ERR code=sd_error retryable=true detail=spi_lock\n");
-      return;
-    }
     File f = SD.open(g_sd_path, FILE_READ);
     if (!f) {
-      spiBusGive();
       replyToHost("REC ERR code=sd_error retryable=true detail=read\n");
       return;
     }
     if (!f.seek(offset)) {
       f.close();
-      spiBusGive();
       replyToHost("REC ERR code=offset_out_of_range retryable=false detail=seek\n");
       return;
     }
     uint8_t buf[REC_MAX_CHUNK];
     size_t got = f.read(buf, length);
     f.close();
-    spiBusGive();
     strncpy(g_transfer_state, "chunking", sizeof(g_transfer_state) - 1);
     g_transfer_active = true;
     writeSdrfFrame(g_rec_session_id, SDRF_TYPE_DATA, chunk_index, offset, buf, got,
@@ -1518,8 +1597,14 @@ static void handleLine(const String &line) {
   } else if (line.startsWith("REDPITAYA")) {
     char buf[96];
     snprintf(buf, sizeof(buf),
-             "%d channels; sample_rate=%u; node=esp32s3_arduino; filter=%s\n",
-             NUM_CHANNELS, (unsigned)g_sample_hz, g_filter_on ? "on" : "off");
+             "%d channels; sample_rate=%u; node=esp32s3_arduino; filter=%s; transport=%s\n",
+             NUM_CHANNELS, (unsigned)g_sample_hz, g_filter_on ? "on" : "off",
+#if ENABLE_TCP
+             "udp"
+#else
+             "tcp"
+#endif
+    );
     replyToHost(buf);
     char okCh[24];
     snprintf(okCh, sizeof(okCh), "OK CHANNELS:%d\n", NUM_CHANNELS);
@@ -1571,8 +1656,13 @@ static void handleLine(const String &line) {
     g_loop_overruns = 0;
     g_max_loop_us = 0;
     profReset();
+    resetStreamStats();
     streaming = true;
-    replyToHost("STARTED BIN:esp32s3_arduino\n");
+#if ENABLE_TCP
+    replyToHost("STARTED BIN:esp32s3_arduino transport=udp port=55001\n");
+#else
+    replyToHost("STARTED BIN:esp32s3_arduino transport=tcp\n");
+#endif
     replyToHost("SENSORS:0,ICM20948\n");
 #if !SERIAL_OUTPUT_BINARY
     Serial.println("START accepted (USB: bridge streams; Wi-Fi: TCP binary)");
@@ -1652,6 +1742,20 @@ static void printWifiFailureHelp(wl_status_t status) {
 }
 
 static void printWifiStatus() {
+  if (ENABLE_SERIAL_BENCH) {
+    Serial.println("--- USB Open Ephys status ---");
+    Serial.println("Wi-Fi TCP disabled; Open Ephys uses serial_tcp_bridge.py on the PC");
+    Serial.println("Open Ephys Plugin AcqBoard: Node IP 127.0.0.1 port 5000");
+    Serial.printf("Serial stream: %s  channels=%d  streaming=%s\n",
+                  SERIAL_OUTPUT_BINARY ? "Open Ephys binary" : "CSV",
+                  NUM_CHANNELS,
+                  streaming ? "yes" : "no");
+    Serial.printf("ESP-NOW WiFi: STA mode ch=%d for sync only; no TCP/IP address expected\n",
+                  ESPNOW_WIFI_CHANNEL);
+    Serial.println("Serial command: STATUS  (repeat)");
+    return;
+  }
+
   if (!wifi_up) {
     Serial.println("[WiFi] not up (USB mode or init failed)");
     return;
@@ -1717,6 +1821,12 @@ static void setupWifi() {
     Serial.println("Wi-Fi skipped — USB serial bench mode");
     Serial.println("PC: host\\run_usb_plugin_bridge.ps1 COMx  (Plugin) or serial_tcp_bridge.py COMx");
     Serial.println("Open Ephys: 127.0.0.1:5000 — not ESP32 Wi-Fi IP");
+    return;
+  }
+
+  if (WIFI_FORCE_SOFT_AP) {
+    Serial.printf("Wi-Fi STA skipped — starting Soft AP %s\n", WIFI_AP_SSID);
+    startSoftApFallback();
     return;
   }
 
@@ -1863,7 +1973,7 @@ static void maybeRepeatStatus() {
     return;
   }
   if (!icm_ok) {
-    Serial.println("ICM20948: synthetic fallback - check 3V3, GND, SCK->D8, MISO->D9, MOSI->D10, CS->D7");
+    Serial.println("ICM20948: synthetic fallback - check 3V3, GND, SCK->D3, MISO->D5, MOSI->D4, CS->D6");
   }
   if (!mag_ok) {
     Serial.println("MAG unavailable: ch6-8=0, VQF 6-DOF only (no heading). See boot log for cause.");
@@ -1900,19 +2010,22 @@ void setup() {
 
 #if ENABLE_SD
   g_sd_mutex = xSemaphoreCreateMutex();
-  if (spiBusTake(portMAX_DELAY)) {
-    g_sd_ready = SD.begin(PIN_SD_CS, SPI, 25000000);
-    spiBusGive();
-  } else {
-    g_sd_ready = false;
-    g_sd_begin_errors++;
-  }
+  g_sd_ready = SD.begin(PIN_SD_CS, SPI, 25000000);
   Serial.println(g_sd_ready ? "SD ready" : "SD init failed");
   g_sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(SdLogRecord));
   if (g_sd_queue) {
-    xTaskCreatePinnedToCore(sdWriteTask, "sd_write", 16384, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(sdWriteTask, "sd_write", 16384, NULL, SD_TASK_PRIORITY, NULL, 0);
   }
 #endif
+
+  g_stream_queue = xQueueCreate(STREAM_QUEUE_DEPTH, sizeof(StreamRecord));
+  if (g_stream_queue) {
+    xTaskCreatePinnedToCore(streamWriteTask, "stream_write", 8192, NULL,
+                            STREAM_TASK_PRIORITY, NULL, 0);
+  }
+  Serial.printf("Acquisition loop: core=%d priority=%u\n",
+                xPortGetCoreID(), (unsigned)uxTaskPriorityGet(NULL));
+
 
 #if ENABLE_TCP && !ENABLE_SERIAL_BENCH
   if (wifi_up) {
@@ -1939,10 +2052,13 @@ void loop() {
   if (wifi_up) {
     if (!client || !client.connected()) {
       recMarkControlDisconnected();
+      streaming = false;
+      g_stream_target_ip = 0;
       WiFiClient incoming = server.available();
       if (incoming && incoming.connected()) {
         client = incoming;
         streaming = false;
+        g_stream_target_ip = (uint32_t)client.remoteIP();
         recMarkControlConnected();
         Serial.printf("Client connected from %s\n",
                       client.remoteIP().toString().c_str());
@@ -1986,12 +2102,8 @@ void loop() {
   packChannelsFromImu(imu, mag_ok ? mag : nullptr, mag_fresh);
 
   sendEspNowSync();
-  packAndSendTcp();
-  prof_start_us = micros();
-  sendSerialBench();
-  profAdd((uint32_t)(micros() - prof_start_us), &g_prof_serial_sum_us,
-          &g_prof_serial_max_us);
   logSd();
+  queueStreamRecord();
 
   g_generated_samples++;
   g_prof_samples++;
