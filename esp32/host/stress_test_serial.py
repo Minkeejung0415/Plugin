@@ -515,8 +515,10 @@ def test_one_rate(
     wait_for_text(ser, 2.0)
     drain_serial(ser, 0.2)
 
+    record_started: float | None = None
     if sd_on and stream_on:
         send_line(ser, "RECORD ON")
+        record_started = time.monotonic()
         time.sleep(0.25)
         drain_serial(ser, 0.1)
 
@@ -534,6 +536,7 @@ def test_one_rate(
     if not stream_on or not capture_stream:
         if sd_on and not stream_on:
             send_line(ser, "RECORD ON")
+            record_started = time.monotonic()
             time.sleep(0.25)
             drain_serial(ser, 0.1)
         remaining = max(0.0, capture_s - (time.monotonic() - capture_started))
@@ -562,12 +565,15 @@ def test_one_rate(
 
     status: dict[str, str] = {}
     sd_final_seen = False
+    sd_elapsed = capture_elapsed
     if sd_on:
+        # Stop persistence at the capture boundary. Waiting for the stream STOP
+        # acknowledgement first adds up to two seconds of samples to sd_saved.
+        send_line(ser, "RECORD OFF")
+        if record_started is not None:
+            sd_elapsed = max(time.monotonic() - record_started, 0.001)
         if stream_on:
             send_line(ser, "STOP")
-            wait_for_text(ser, 2.0)
-            drain_serial(ser, 0.25)
-        send_line(ser, "RECORD OFF")
         final_status = wait_for_sd_final(ser, 20.0)
         sd_final_seen = bool(final_status)
         status.update(read_status(ser, 1.0))
@@ -592,7 +598,7 @@ def test_one_rate(
         sd_on=sd_on,
         stream_on=stream_on,
         hz=hz,
-        capture_elapsed=capture_elapsed,
+        capture_elapsed=sd_elapsed,
         expected=expected,
         sd_final_seen=sd_final_seen,
         sd_saved=sd_saved,

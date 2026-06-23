@@ -380,7 +380,8 @@ bool AcqBoardRedPitaya::performDetectionHandshake()
     if (isEsp32HandshakeResponse (response))
     {
         isEsp32Node = true;
-        esp32UsesUdpStream = response.containsIgnoreCase ("transport=udp");
+        esp32UsesUdpStream = response.containsIgnoreCase ("transport=udp")
+                             || activeRedPitayaHost != "127.0.0.1";
         numAdcChannels = parseEsp32ChannelCountFromHandshake (
             response, AcqBoardRedPitaya::ESP32_DEFAULT_CHANNELS);
         settings.boardSampleRate = 100.0f;
@@ -1026,7 +1027,43 @@ bool AcqBoardRedPitaya::sendRecordOnCommand()
 {
     if (isEsp32Node)
     {
-        return sendEsp32RecStart();
+        const juce::ScopedLock sl (esp32RecordLock);
+
+        if (esp32RecordStream != nullptr)
+            return true;
+
+        const juce::File outDir { String (kEsp32RecordDir) };
+        outDir.createDirectory();
+
+        const juce::File csvFile = outDir.getChildFile (
+            "recording_" + Time::getCurrentTime().formatted ("%Y%m%d_%H%M%S") + ".csv");
+
+        std::unique_ptr<juce::FileOutputStream> out (csvFile.createOutputStream());
+        if (out == nullptr || ! out->openedOk())
+        {
+            const juce::ScopedLock statusSl (esp32RecStatusLock);
+            esp32RecStatusText = "ESP32 CSV recording: failed to open " + csvFile.getFullPathName();
+            esp32RecState.store (Esp32RecState::Failed);
+            return false;
+        }
+
+        const char* header = "timestamp,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,mx_uT,my_uT,mz_uT,qw,qx,qy,qz,dio\n";
+        out->write (header, std::strlen (header));
+        out->flush();
+
+        esp32RecordStream = std::move (out);
+        esp32RecordSampleCount = 0;
+        lastRecordingPath = csvFile.getFullPathName();
+        lastRecordingCsvPath = csvFile.getFullPathName();
+
+        {
+            const juce::ScopedLock statusSl (esp32RecStatusLock);
+            esp32RecStatusText = "Recording CSV to " + lastRecordingCsvPath;
+            esp32RecState.store (Esp32RecState::RecordingConfirmed);
+        }
+
+        std::cout << "ESP32 CSV recording started: " << lastRecordingCsvPath << std::endl;
+        return true;
     }
 
     // Red Pitaya: tell the board to save locally.
@@ -1055,7 +1092,24 @@ bool AcqBoardRedPitaya::sendRecordOffCommand()
 {
     if (isEsp32Node)
     {
-        return sendEsp32RecStop();
+        const juce::ScopedLock sl (esp32RecordLock);
+
+        if (esp32RecordStream != nullptr)
+        {
+            esp32RecordStream->flush();
+            esp32RecordStream.reset();
+
+            const juce::ScopedLock statusSl (esp32RecStatusLock);
+            esp32RecStatusText = "Recording saved. CSV: " + lastRecordingCsvPath;
+            esp32RecState.store (Esp32RecState::LocalCopyWritten);
+
+            std::cout << "ESP32 CSV recording saved: " << lastRecordingCsvPath << std::endl;
+            return true;
+        }
+
+        const juce::ScopedLock statusSl (esp32RecStatusLock);
+        esp32RecStatusText = "ESP32 CSV recording: no active recording";
+        return false;
     }
 
     if (commandSocket == nullptr)
@@ -2007,15 +2061,16 @@ void AcqBoardRedPitaya::run()
                             rqy = float (channels[11]) * kQ15inv;
                             rqz = float (channels[12]) * kQ15inv;
                         }
+                        const float rdio = channelsInPacket > 13 ? float (channels[13]) : 0.0f;
 
                         const double nominalRate = jmax (1.0, static_cast<double> (settings.boardSampleRate));
                         const double csvTimestamp = static_cast<double> (esp32RecordSampleCount) / nominalRate;
 
                         char row[224];
                         const int len = snprintf (row, sizeof (row),
-                            "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%.6f,%.6f\n",
+                            "%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%.6f,%.6f,%.0f\n",
                             csvTimestamp, rax, ray, raz, rgx, rgy, rgz, rmx, rmy, rmz,
-                            rqw, rqx, rqy, rqz);
+                            rqw, rqx, rqy, rqz, rdio);
 
                         if (len > 0 && len < (int) sizeof (row))
                             esp32RecordStream->write (row, (size_t) len);

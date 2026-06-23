@@ -16,7 +16,7 @@
  * #define ENABLE_SERIAL_BENCH true
  * #define ENABLE_ESPNOW false
  * #define ENABLE_SD false
- * #define PIN_ICM_CS 43
+ * #define PIN_ICM_CS D3
  * --- end preset ---
  *
  * --- USB_OPEN_EPHYS_MODE (USB power + PC — Wi-Fi not required for Open Ephys) ---
@@ -89,18 +89,18 @@ extern "C" {
 #define ICM_BANK2_ACCEL_SMPLRT_DIV_2 0x11
 #define ICM_BANK2_ACCEL_CONFIG_1 0x14
 
-#define PIN_SPI_SCK 4    // XIAO D3 / GPIO4, HSPI SCK
-#define PIN_SPI_MISO 6   // XIAO D5 / GPIO6, HSPI MISO
-#define PIN_SPI_MOSI 5   // XIAO D4 / GPIO5, HSPI MOSI
-#define PIN_ICM_CS 43    // XIAO D6 / GPIO43, ICM CS
-#define PIN_DIO 1       // XIAO D0 / GPIO1 — change via #define if wired elsewhere
+#define PIN_SPI_SCK D6    // GPIO4, HSPI SCK
+#define PIN_SPI_MISO D4   // GPIO6, HSPI MISO (SDO)
+#define PIN_SPI_MOSI D5   // GPIO2, HSPI MOSI (SDA)
+#define PIN_ICM_CS D3     // GPIO5, ICM CS
+#define PIN_DIO D0        // GPIO1; change if wired elsewhere
 
 #define NODE_IS_MASTER true
 #define ENABLE_SD true
 
 // true = USB binary @100 Hz 14ch -> serial_tcp_bridge.py [--plugin] -> 127.0.0.1:5000 (no Wi-Fi for OE).
 // false = Wi-Fi TCP :5000 on board; Plugin uses Serial Monitor IP, not 127.0.0.1.
-#define USB_OPEN_EPHYS_MODE false
+#define USB_OPEN_EPHYS_MODE true
 
 #if USB_OPEN_EPHYS_MODE
 #define ENABLE_TCP false
@@ -609,7 +609,6 @@ static bool icmWrite(uint8_t reg, uint8_t val) {
 static bool icmReadReg(uint8_t reg, uint8_t *val) {
   return icmReadAddr(0, reg, val);
 }
-
 static void printBootDiagnostics() {
 #if BOOT_DIAGNOSTICS
   Serial.println();
@@ -618,13 +617,14 @@ static void printBootDiagnostics() {
   Serial.println("========================================");
   Serial.printf("Firmware: %s\n", FIRMWARE_VERSION);
   Serial.printf("Board target: XIAO_ESP32S3 (Sense)\n");
-  Serial.printf("ICM HSPI SCK: GPIO%d (D3)  MISO: GPIO%d (D5)  MOSI: GPIO%d (D4)  CS: GPIO%d (D6)\n",
+  Serial.printf("ICM HSPI SCK: GPIO%d (D3)  MISO: GPIO%d (D5)  MOSI: GPIO%d (D1)  CS: GPIO%d (D4)\n",
                 PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_ICM_CS);
   Serial.printf("ICM ODR: gyro_div=%u accel_div=%u odr_align=1 dlpf=%s dlpf_cfg=%u\n",
                 kIcmGyroSmplrtDiv, kIcmAccelSmplrtDiv,
                 kIcmDlpfEnabled ? "on" : "off", kIcmDlpfCfg);
   Serial.printf("Mag poll: %.0f Hz, cached between polls\n", kMagRateHz);
   Serial.printf("Sample rate: %d Hz  channels: %d\n", g_sample_hz, NUM_CHANNELS);
+
   Serial.println("--- ICM20948 SPI WHO_AM_I (expect 0xEA) ---");
   icmSpiBegin();
   delay(50);
@@ -716,7 +716,7 @@ static bool initIcm20948() {
 }
 
 static bool readImuRaw(int16_t out[6]) {
-  uint8_t raw[14];
+  uint8_t raw[12];
   icmSelectBank(0, 0);
   if (!icmReadBytes(ICM_ACCEL_XOUT_H, raw, sizeof(raw))) return false;
 
@@ -726,9 +726,9 @@ static bool readImuRaw(int16_t out[6]) {
   out[0] = read16be(&raw[0]);
   out[1] = read16be(&raw[2]);
   out[2] = read16be(&raw[4]);
-  out[3] = read16be(&raw[8]);
-  out[4] = read16be(&raw[10]);
-  out[5] = read16be(&raw[12]);
+  out[3] = read16be(&raw[6]);
+  out[4] = read16be(&raw[8]);
+  out[5] = read16be(&raw[10]);
   return true;
 }
 
@@ -756,7 +756,8 @@ static bool initAk09916() {
   icmSelectBank(0, 3);
   icmWrite(ICM_I2C_SLV0_ADDR, (uint8_t)(0x80 | AK09916_ADDR));
   icmWrite(ICM_I2C_SLV0_REG, AK09916_ST1);
-  icmWrite(ICM_I2C_SLV0_CTRL, 0x88);
+  // Read ST1, XYZ, TMPS, and ST2. Reading ST2 completes the AK09916 sample.
+  icmWrite(ICM_I2C_SLV0_CTRL, 0x89);
   delay(10);
   icmSelectBank(0, 0);
 
@@ -768,7 +769,7 @@ static bool readMagRaw(int16_t out[3], bool *fresh) {
   if (fresh != nullptr) *fresh = false;
   if (!mag_ok) return false;
 
-  uint8_t mag_raw[8];
+  uint8_t mag_raw[9];
   icmSelectBank(0, 0);
   if (!icmReadBytes(ICM_EXT_SENS_DATA_00, mag_raw, sizeof(mag_raw))) return false;
 
@@ -782,7 +783,7 @@ static bool readMagRaw(int16_t out[3], bool *fresh) {
     return false;
   }
 
-  uint8_t st2 = mag_raw[7];
+  uint8_t st2 = mag_raw[8];
   if ((st2 & 0x08) != 0) {
     if (g_have_mag) {
       out[0] = g_last_mag[0];
@@ -1750,8 +1751,12 @@ static void printWifiStatus() {
                   SERIAL_OUTPUT_BINARY ? "Open Ephys binary" : "CSV",
                   NUM_CHANNELS,
                   streaming ? "yes" : "no");
+#if ENABLE_ESPNOW
     Serial.printf("ESP-NOW WiFi: STA mode ch=%d for sync only; no TCP/IP address expected\n",
                   ESPNOW_WIFI_CHANNEL);
+#else
+    Serial.println("ESP-NOW disabled; Wi-Fi radio off");
+#endif
     Serial.println("Serial command: STATUS  (repeat)");
     return;
   }
@@ -1966,6 +1971,10 @@ static void setupEspNow() {
 
 static void maybeRepeatStatus() {
 #if REPEAT_STATUS_SEC > 0
+#if ENABLE_SERIAL_BENCH && SERIAL_OUTPUT_BINARY
+  // Text inserted after streaming starts would corrupt USB Open Ephys frames.
+  return;
+#endif
   if (millis() - last_status_ms < (uint32_t)REPEAT_STATUS_SEC * 1000UL) return;
   last_status_ms = millis();
   if (wifi_up) {
