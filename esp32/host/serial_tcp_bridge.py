@@ -440,12 +440,46 @@ async def relay_rec_command(
             if frame_type in (SDRF_TYPE_EOF, SDRF_TYPE_ABORT, SDRF_TYPE_ERROR):
                 return
 
-    response = await loop.run_in_executor(None, source.get_response, timeout)
-    if response is None:
-        writer.write(b"REC ERR code=internal_error retryable=true detail=bridge_timeout\n")
-    else:
+    def is_terminal_rec_response(response: bytes) -> bool:
+        text = response.decode("utf-8", errors="replace").strip().upper()
+        if upper.startswith("REC START"):
+            return text.startswith("REC STARTED") or text.startswith("REC ERR")
+        if upper.startswith("REC STOP"):
+            return text.startswith("REC FINALIZED") or text.startswith("REC ERR")
+        if upper.startswith("REC STATUS"):
+            return text.startswith("REC STATUS_OK") or text.startswith("REC ERR")
+        if upper.startswith("REC SESSION"):
+            return text.startswith("REC SESSION_OK") or text.startswith("REC ERR")
+        if upper.startswith("REC COMPLETE"):
+            return text.startswith("REC COMPLETE_OK") or text.startswith("REC ERR")
+        if upper.startswith("REC ABORT"):
+            return text.startswith("REC ABORTED") or text.startswith("REC ERR")
+        if upper.startswith("REC CLEAR"):
+            return text.startswith("REC CLEAR_OK") or text.startswith("REC ERR")
+        if upper.startswith("REC HELLO"):
+            return text.startswith("REC HELLO_OK") or text.startswith("REC ERR")
+        return text.startswith("REC ") or text.startswith("SD_STATUS")
+
+    deadline = time.monotonic() + timeout
+    saw_response = False
+    while True:
+        remaining = max(0.05, deadline - time.monotonic())
+        response = await loop.run_in_executor(None, source.get_response, remaining)
+        if response is None:
+            if not saw_response:
+                writer.write(b"REC ERR code=internal_error retryable=true detail=bridge_timeout\n")
+                await writer.drain()
+            return
+
+        saw_response = True
         writer.write(response)
-    await writer.drain()
+        await writer.drain()
+
+        if is_terminal_rec_response(response):
+            return
+
+        if time.monotonic() >= deadline:
+            return
 
 
 async def handle_plugin_handshake(

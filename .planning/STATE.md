@@ -6,18 +6,18 @@ current_phase: 04
 status: executing
 last_updated: "2026-06-18T18:45:35.942Z"
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 4
-  total_plans: 13
+  total_plans: 16
   completed_plans: 11
-  percent: 57
+  percent: 50
 ---
 
 # Project State
 
 **Project:** Open Ephys ESP32 Acquisition Reliability
-**Current phase:** 04
-**Status:** Phase 04 hardware verification required
+**Current phase:** 08
+**Status:** Phase 08 planned - slave monitor, sync evidence, and CSV export ready for execution
 
 ## Progress
 
@@ -28,8 +28,9 @@ progress:
 | 3 | Stress Harness & Analyzer | Planned | 0 |
 | 4 | Open Ephys Stall Isolation | Planned | 0 |
 | 5 | Hardware UAT & Operator Docs | Planned | 0 |
+| 8 | Slave Monitor, Sync Evidence, and CSV Export | Planned | 3 |
 
-**Overall:** 1/5 phases fully verified. Phase 2 code and plugin build are complete; next verification step is ESP-IDF firmware build and SD-card hardware test.
+**Overall:** 4/8 phases have implementation/verification artifacts. Phase 08 is planned to make slave nodes visible in the plugin, add sync evidence, and standardize post-acquisition CSV conversion.
 
 ## Current Focus
 
@@ -39,6 +40,9 @@ OpenSim and HUD work are paused. The active goal is to make acquisition data rel
 - Prove continuity with sequence and timestamp checks.
 - Improve stress tests to find the maximum safe frequency with filter and SD logging enabled.
 - Diagnose whether stalls come from hardware/sensor reads, filter CPU, SD writes, USB/TCP/Open Ephys buffering, or UDP/host-side paths.
+- Add slave monitor/status visibility so Open Ephys can verify slave readiness and sensor response through the master.
+- Standardize copied slave SD `.bin` to CSV conversion after acquisition.
+- Add DIO/sync evidence so multi-node recordings can be aligned and audited.
 
 ## Code Facts From Milestone Start
 

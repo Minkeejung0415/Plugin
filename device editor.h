@@ -165,6 +165,9 @@ public:
     /** Pushes the display-joint combo selection into the board before OpenSim launch. */
     void syncOpenSimDisplayJointToBoard();
 
+    /** Polls/refreshes the compact ESP32 slave monitor controls. */
+    void refreshEsp32SlaveMonitorUi();
+
 private:
     /** Pointer to acquisition board device */
     class AcquisitionBoard* board;
@@ -268,6 +271,12 @@ private:
     // --- Col 6: live joint-angle readout (UDP 5001 feedback from opensim_live_realtime.py) ---
     std::unique_ptr<Label>    openSimAngleTitle;
     std::unique_ptr<Label>    openSimAngleLabel;   // live value, e.g. "37.4 deg"
+
+    // --- Compact ESP32 slave monitor row ---
+    std::unique_ptr<Label>    slaveMonitorTitle;
+    std::unique_ptr<ComboBox> slaveMonitorCombo;
+    std::unique_ptr<Label>    slaveMonitorSummaryLabel;
+    std::unique_ptr<Label>    slaveMonitorDetailLabel;
 
     /** Drains the board's UDP-5001 angle feedback and updates openSimAngleLabel.
         OpenSim 4.5's Python bindings cannot render live text in the 3D viewport,

@@ -2,6 +2,9 @@
 .claude/
 .claude/worktrees/
 
+# Codex local worktree scratch space
+.codex/
+
 # Python generated files
 __pycache__/
 *.py[cod]

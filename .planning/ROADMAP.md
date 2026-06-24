@@ -3,7 +3,7 @@
 **Project:** Open Ephys ESP32 Acquisition Reliability
 **Milestone:** v1.1
 **Created:** 2026-06-12
-**Phases:** 5
+**Phases:** 8
 **Requirement coverage:** 21/21 v1.1 requirements mapped
 
 ## Overview
@@ -15,6 +15,7 @@
 | 3 | Stress Harness & Analyzer | 1/2 | In Progress|  |
 | 4 | Open Ephys Stall Isolation | 2/2 | Implementation complete; hardware UAT pending | 2026-06-18 |
 | 5 | Hardware UAT & Operator Docs | Prove no-loss operating envelope and document checklist | LOSS-04, STRESS-03, OPS-01-03 | Planned |
+| 8 | Slave Monitor, Sync Evidence, and CSV Export | Show slave health in the plugin, prove sync evidence, and batch-convert slave SD recordings to CSV | ESPNOW-01-02, LOSS-01, LOSS-04, STRESS-03, OPS-01-03 | Planned |
 
 ---
 
@@ -25,6 +26,7 @@
 - [ ] **Phase 3: Stress Harness & Analyzer** *(planned — 1 plan ready)*
 - [ ] **Phase 4: Open Ephys Stall Isolation** *(implementation complete; hardware UAT pending)*
 - [ ] **Phase 5: Hardware UAT & Operator Docs**
+- [ ] **Phase 8: Slave Monitor, Sync Evidence, and CSV Export** *(planned — 3 plans ready)*
 
 ---
 
@@ -102,6 +104,29 @@
 4. Residual risks are explicit, including SD-card model dependence and host streaming limitations.
 
 **Key files:** `esp32/docs/stress-test-sample-rate.md`, `docs/esp32-acqboard-integration.md`, generated stress results
+
+---
+
+### Phase 8: Slave Monitor, Sync Evidence, and CSV Export
+
+**Goal:** Make slave ESP32 nodes visible from the existing Acquisition Board plugin, provide auditable DIO/sync evidence, and convert slave SD recordings to CSV after acquisition.
+
+**Success Criteria:**
+1. Master reports live slave health: online age, SD ready, recording, saved samples, errors, sensor status, quaternion status, DIO, sync, and clock offset.
+2. Existing Acquisition Board plugin shows a compact fixed-height Slave Monitor panel with a dropdown for detected slaves.
+3. Moving/rotating a selected slave updates live values at about 5 Hz.
+4. Copied slave SD `.bin` files batch-convert to CSV after acquisition.
+5. Conversion summaries report continuity, quaternion presence, DIO edge count, and basic sync evidence.
+6. Multi-slave identity avoids the current static `192.168.4.2` conflict.
+
+**Key files:** `esp32/arduino/step_node/step_node.ino`, `esp32/arduino/step_node_slave/step_node_slave.ino`, `acqboard.ccp`, `Acqboardredpitaya.h`, `device editor.cpp`, `esp32/host/sd_bin_to_csv.py`, `esp32/host/analyze_sample_rate.py`, `docs/esp32-acqboard-integration.md`
+
+**Plans:** 3/3 plans ready
+
+Plans:
+- [ ] 08-01: Slave Status and Live Preview Firmware Protocol
+- [ ] 08-02: Compact Slave Monitor Panel in Acquisition Board Plugin
+- [ ] 08-03: Post-Acquisition CSV Conversion and Sync Evidence
 
 ---
 

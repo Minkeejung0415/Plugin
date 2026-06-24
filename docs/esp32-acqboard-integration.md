@@ -381,3 +381,73 @@ REC STATUS, REC SESSION, REC GET, and REC COMPLETE exchange.
 | `ed64c35` | rec-v1 header: Esp32RecState, fields, method declarations (Phase 06 plan 03) |
 | `c0f93b4` | rec-v1 implementation: HELLO, START, STOP, async retrieval thread, CRC, analyzer |
 | `e063f42` | DeviceEditor: truthful status, rec-v1 tooltip, openSimAngleTimer polling |
+
+---
+
+## 9. Slave SD workflow, CSV conversion, and DIO sync
+
+### 9.1 Current master/slave topology
+
+The Open Ephys plugin talks only to the master at `192.168.4.1:5000`. The
+master starts the `STEP_ESP32` Soft AP and forwards START/STOP/REC commands to
+slaves over ESP-NOW broadcast. The intended no-master-SD setup is valid:
+
+- master: USB/Wi-Fi control and Open Ephys live stream, no SD required
+- slave: joins `STEP_ESP32`, records the source-of-truth binary file to SD
+- after acquisition: copy or mount the slave SD card on the PC and convert
+
+Slaves use DHCP by default so several slaves can join the same master AP without
+all claiming `192.168.4.2`. For fixed addresses, flash each slave with a unique
+`SLAVE_STATIC_IP_OCTET`.
+
+### 9.2 Convert copied slave SD files to CSV
+
+Binary on the slave SD is the acquisition source of truth. CSV is generated
+after the recording, not during acquisition.
+
+Single file:
+
+```powershell
+python esp32\host\sd_bin_to_csv.py D:\step_000192b00000205a.bin --summary-json
+```
+
+Whole SD card or folder:
+
+```powershell
+python esp32\host\convert_sd_folder.py D:\
+```
+
+The folder converter writes:
+
+- one `.csv` per `step_*.bin`
+- one `*_summary.json` per file
+- `conversion_summary.csv`
+- `conversion_summary.json`
+
+The summary reports record count, duration, sequence loss/duplicates,
+quaternion nonzero percentage, DIO edge count, and whether the DIO data is
+usable for sync estimation.
+
+### 9.3 DIO sync test
+
+`D0` is sampled into the `dio` CSV column. It has pull-up behavior:
+
+- idle/open circuit: level `1`
+- touch or drive D0 to GND: level `0`
+- the CSV `dio` value packs level in bit 0 and edge count in bits 1-15
+
+Single-board sanity test:
+
+1. Start recording.
+2. Briefly connect D0 to GND a few times.
+3. Stop recording and convert the SD file.
+4. Confirm `dio_edge_count` is greater than zero in `*_summary.json`.
+
+Multi-board sync test:
+
+1. Connect all ESP32 grounds together.
+2. Feed the same 3.3 V-safe sync signal to every slave D0.
+3. Record, convert all SD cards with `convert_sd_folder.py`.
+4. Check `conversion_summary.json` `sync.pairs` for first offset and drift.
+
+Do not drive D0 with 5 V.

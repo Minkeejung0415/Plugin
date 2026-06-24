@@ -293,37 +293,34 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimLiveButton->setTooltip ("Start OpenSim live skeleton (Python 3.8). Press Play to stream.");
         addAndMakeVisible (openSimLiveButton.get());
 
-        jointDisplayTitle = std::make_unique<Label> ("jointDisplayTitle", "Joint HUD (max 6)");
-        jointDisplayTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
-        jointDisplayTitle->setBounds (col5, 28, 130, 12);
-        addAndMakeVisible (jointDisplayTitle.get());
+        slaveMonitorTitle = std::make_unique<Label> ("slaveMonitorTitle", "Slave Monitor");
+        slaveMonitorTitle->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        slaveMonitorTitle->setBounds (col5, 28, 130, 12);
+        addAndMakeVisible (slaveMonitorTitle.get());
 
-        const int toggleW = 70;
-        const int toggleH = 18;
-        const int toggleGap = 4;
-        const int toggleCols = 2;
-        const int toggleRow1Y = 42;
+        slaveMonitorSummaryLabel = std::make_unique<Label> ("slaveMonitorSummaryLabel", "S0/0 SD0/0 R0/0 E0");
+        slaveMonitorSummaryLabel->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        slaveMonitorSummaryLabel->setBounds (col5, 42, 130, 18);
+        slaveMonitorSummaryLabel->setColour (Label::backgroundColourId, Colours::black);
+        slaveMonitorSummaryLabel->setColour (Label::textColourId, Colours::white);
+        slaveMonitorSummaryLabel->setJustificationType (Justification::centred);
+        addAndMakeVisible (slaveMonitorSummaryLabel.get());
 
-        // Build 7 joint-toggle checkboxes in a 2-column grid (Col 5).
-        // Each checkbox corresponds to one entry in kOpenSimJointCatalog:
-        //   pelvis_tilt, hip_flexion_r, hip_flexion_l,
-        //   knee_angle_r, knee_angle_l, ankle_angle_r, ankle_angle_l.
-        // The operator checks whichever joints they want on the OpenSim HUD.
-        // When clicked, buttonClicked() updates the board and writes the JSON config.
-        for (int i = 0; i < kOpenSimJointCatalogSize; ++i)
-        {
-            const int col = i % toggleCols;
-            const int row = i / toggleCols;
-            const int tx = col5 + col * (toggleW + toggleGap);
-            const int ty = toggleRow1Y + row * (toggleH + 3);
+        slaveMonitorCombo = std::make_unique<ComboBox> ("slaveMonitorCombo");
+        slaveMonitorCombo->setBounds (col5, 68, 130, 20);
+        slaveMonitorCombo->addItem ("none", 1);
+        slaveMonitorCombo->setSelectedId (1, dontSendNotification);
+        slaveMonitorCombo->setTooltip ("Detected ESP32 slave to inspect.");
+        addAndMakeVisible (slaveMonitorCombo.get());
 
-            jointDisplayToggles[(size_t) i] = std::make_unique<ToggleButton> (kOpenSimJointCatalog[i].abbrev);
-            jointDisplayToggles[(size_t) i]->setComponentID (String (i)); // used in buttonClicked() to identify which toggle fired
-            jointDisplayToggles[(size_t) i]->setBounds (tx, ty, toggleW, toggleH);
-            jointDisplayToggles[(size_t) i]->setTooltip (kOpenSimJointCatalog[i].coordinate);
-            jointDisplayToggles[(size_t) i]->addListener (this);
-            addAndMakeVisible (jointDisplayToggles[(size_t) i].get());
-        }
+        slaveMonitorDetailLabel = std::make_unique<Label> ("slaveMonitorDetailLabel", "none");
+        slaveMonitorDetailLabel->setFont (FontOptions ("Inter", "Regular", 9.0f));
+        slaveMonitorDetailLabel->setBounds (col5, 96, 130, 20);
+        slaveMonitorDetailLabel->setColour (Label::backgroundColourId, Colours::black);
+        slaveMonitorDetailLabel->setColour (Label::textColourId, Colours::orange);
+        slaveMonitorDetailLabel->setJustificationType (Justification::centred);
+        slaveMonitorDetailLabel->setTooltip ("Selected slave: SD/recording/saved samples, quaternion, motion, DIO.");
+        addAndMakeVisible (slaveMonitorDetailLabel.get());
 
         nodeHostTitle = std::make_unique<Label> ("nodeHostTitle", "Node IP");
         nodeHostTitle->setFont (FontOptions ("Inter", "Regular", 10.0f));
@@ -384,6 +381,15 @@ DeviceEditor::DeviceEditor (GenericProcessor* parentNode,
         openSimAngleLabel->setTooltip ("Live angle of the selected Display Joint, streamed back "
                                        "from OpenSim on UDP 5001. Updates ~10x/sec while streaming.");
         addAndMakeVisible (openSimAngleLabel.get());
+
+        if (auto* rp = dynamic_cast<AcqBoardRedPitaya*> (board))
+        {
+            const bool esp32Node = rp->getIsEsp32Node();
+            slaveMonitorTitle->setVisible (esp32Node);
+            slaveMonitorCombo->setVisible (esp32Node);
+            slaveMonitorSummaryLabel->setVisible (esp32Node);
+            slaveMonitorDetailLabel->setVisible (esp32Node);
+        }
 
         openSimAngleTimer.owner = this;
         openSimAngleTimer.startTimer (100);   // ~10 Hz UI refresh
@@ -1314,14 +1320,14 @@ void DeviceEditor::startAcquisition()
             openSimAngleTitle->toFront (false);
         if (openSimAngleLabel != nullptr)
             openSimAngleLabel->toFront (false);
-        if (jointDisplayTitle != nullptr)
-            jointDisplayTitle->toFront (false);
-
-        for (auto& toggle : jointDisplayToggles)
-        {
-            if (toggle != nullptr)
-                toggle->toFront (false);
-        }
+        if (slaveMonitorTitle != nullptr)
+            slaveMonitorTitle->toFront (false);
+        if (slaveMonitorCombo != nullptr)
+            slaveMonitorCombo->toFront (false);
+        if (slaveMonitorSummaryLabel != nullptr)
+            slaveMonitorSummaryLabel->toFront (false);
+        if (slaveMonitorDetailLabel != nullptr)
+            slaveMonitorDetailLabel->toFront (false);
     }
 
     syncRedPitayaBoardSampleRateFromLabel();
@@ -1408,6 +1414,15 @@ void DeviceEditor::refreshOpenSimAngleReadout()
     //   "retrieving" → "transfer checksum passed" → "Recording saved and verified"
     if (rp->getIsEsp32Node())
     {
+        if (slaveMonitorTitle != nullptr)
+            slaveMonitorTitle->setVisible (true);
+        if (slaveMonitorCombo != nullptr)
+            slaveMonitorCombo->setVisible (true);
+        if (slaveMonitorSummaryLabel != nullptr)
+            slaveMonitorSummaryLabel->setVisible (true);
+        if (slaveMonitorDetailLabel != nullptr)
+            slaveMonitorDetailLabel->setVisible (true);
+
         static String lastEsp32Status;
         const String currentStatus = rp->getEsp32RecStatusText();
 
@@ -1416,6 +1431,19 @@ void DeviceEditor::refreshOpenSimAngleReadout()
             lastEsp32Status = currentStatus;
             CoreServices::sendStatusMessage (currentStatus);
         }
+
+        refreshEsp32SlaveMonitorUi();
+    }
+    else
+    {
+        if (slaveMonitorTitle != nullptr)
+            slaveMonitorTitle->setVisible (false);
+        if (slaveMonitorCombo != nullptr)
+            slaveMonitorCombo->setVisible (false);
+        if (slaveMonitorSummaryLabel != nullptr)
+            slaveMonitorSummaryLabel->setVisible (false);
+        if (slaveMonitorDetailLabel != nullptr)
+            slaveMonitorDetailLabel->setVisible (false);
     }
 
     if (openSimAngleLabel == nullptr)
@@ -1428,6 +1456,57 @@ void DeviceEditor::refreshOpenSimAngleReadout()
         openSimAngleLabel->setText (String (angleDeg, 1) + " deg", dontSendNotification);
     else
         openSimAngleLabel->setText ("waiting", dontSendNotification);
+}
+
+void DeviceEditor::refreshEsp32SlaveMonitorUi()
+{
+    if (board == nullptr || board->getBoardType() != AcquisitionBoard::BoardType::RedPitaya)
+        return;
+
+    auto* rp = static_cast<AcqBoardRedPitaya*> (board);
+    if (! rp->getIsEsp32Node())
+        return;
+
+    if (! acquisitionIsActive)
+        rp->pollEsp32SlaveStatus();
+
+    const auto slaves = rp->getEsp32SlaveStatuses();
+
+    if (slaveMonitorCombo != nullptr)
+    {
+        const int previous = slaveMonitorCombo->getSelectedId();
+        slaveMonitorCombo->clear (dontSendNotification);
+
+        if (slaves.size() == 0)
+        {
+            slaveMonitorCombo->addItem ("none", 1);
+            slaveMonitorCombo->setSelectedId (1, dontSendNotification);
+        }
+        else
+        {
+            for (int i = 0; i < slaves.size(); ++i)
+            {
+                const auto& s = slaves.getReference (i);
+                String label = s.slaveId.isNotEmpty() ? s.slaveId : s.mac.fromLastOccurrenceOf (":", false, false);
+                if (label.length() > 10)
+                    label = label.substring (label.length() - 10);
+                slaveMonitorCombo->addItem (label, i + 1);
+            }
+            slaveMonitorCombo->setSelectedId (jlimit (1, slaves.size(), previous > 0 ? previous : 1), dontSendNotification);
+        }
+    }
+
+    if (slaveMonitorSummaryLabel != nullptr)
+        slaveMonitorSummaryLabel->setText (rp->getEsp32SlaveSummaryText(), dontSendNotification);
+
+    if (slaveMonitorDetailLabel != nullptr)
+    {
+        const int selected = slaveMonitorCombo != nullptr ? slaveMonitorCombo->getSelectedId() - 1 : 0;
+        String detail = rp->getEsp32SlaveDetailText (selected);
+        if (acquisitionIsActive)
+            detail = "poll paused while acquiring";
+        slaveMonitorDetailLabel->setText (detail, dontSendNotification);
+    }
 }
 
 /*

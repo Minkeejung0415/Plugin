@@ -338,6 +338,46 @@ public:
 
     bool getIsEsp32Node() const { return isEsp32Node; }
 
+    struct Esp32SlaveStatus
+    {
+        int slot = 0;
+        String slaveId;
+        String mac;
+        int ageMs = 0;
+        bool sdReady = false;
+        bool recording = false;
+        bool streaming = false;
+        bool sync = false;
+        int sampleHz = 0;
+        uint32_t seq = 0;
+        uint64_t generated = 0;
+        uint64_t saved = 0;
+        uint64_t errors = 0;
+        int64_t offsetUs = 0;
+        bool imuOk = false;
+        bool magOk = false;
+        bool quatEnabled = false;
+        int dioLevel = 0;
+        int dioEdges = 0;
+        int ax = 0, ay = 0, az = 0;
+        int gx = 0, gy = 0, gz = 0;
+        int mx = 0, my = 0, mz = 0;
+        int qw = 0, qx = 0, qy = 0, qz = 0;
+    };
+
+    /** Poll master REC STATUS and parse any following SLAVE_STATUS lines. Throttled to ~5 Hz. */
+    void pollEsp32SlaveStatus();
+
+    /** Parse and merge a SLAVE_STATUS line already read by another command path. */
+    bool updateEsp32SlaveStatusFromLine (const String& line);
+
+    /** Thread-safe copy of the latest parsed slave records. */
+    Array<Esp32SlaveStatus> getEsp32SlaveStatuses() const;
+
+    /** Compact UI text for all slaves and one selected slave. */
+    String getEsp32SlaveSummaryText() const;
+    String getEsp32SlaveDetailText (int selectedIndex) const;
+
     /*
         ESP32_DEFAULT_CHANNELS = 14 - the ESP32-S3 STEP node sends exactly
         14 channels per frame in this order:
@@ -506,6 +546,11 @@ public:
 
     /** Mutex that must be held before any commandSocket read/write inside the retrieval thread. */
     juce::CriticalSection esp32CommandLock;
+
+    /** Parsed slave monitor records from master SLAVE_STATUS lines. */
+    Array<Esp32SlaveStatus> esp32SlaveStatuses;
+    mutable juce::CriticalSection esp32SlaveStatusLock;
+    int64 esp32LastSlavePollMs = 0;
 
     // -------------------------------------------------------------------------
     // rec-v1 command methods
