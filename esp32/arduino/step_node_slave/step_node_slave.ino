@@ -5,12 +5,10 @@
  *
  * Guide: docs/arduino-ide-guide.md
  *
- * --- Wi-Fi connect timeout fallback ---
- * If STA join fails (45 s), firmware starts Soft AP: SSID STEP_ESP32, pass step1234.
+ * --- Default Wi-Fi topology ---
+ * Master starts Soft AP: SSID STEP_ESP32, pass step1234, IP 192.168.4.1.
+ * This slave joins STEP_ESP32 by default and uses IP 192.168.4.2.
  * On your PC: join Wi-Fi "STEP_ESP32" (password step1234), then Open Ephys / TCP host 192.168.4.1:5000.
- *
- * --- Phone hotspot: use 2.4 GHz band only (ESP32-S3 does not join 5 GHz-only APs). ---
- * Edit WIFI_SSID / WIFI_PASS below (was ubcvisitor open campus — change for your hotspot).
  *
  * --- WIRING_4WIRE_ICM + USB to PC (copy-paste preset) ---
  * #define ENABLE_TCP false
@@ -62,9 +60,9 @@ extern "C" {
 
 #define DIO_DEBOUNCE_MS 15   // stable toggle within ~20 ms @ 100 Hz
 
-// STA: join your phone/lab hotspot (2.4 GHz). Empty WIFI_PASS = open network (WiFi.begin SSID only).
-#define WIFI_SSID "YOUR_HOTSPOT"
-#define WIFI_PASS "yourpassword"
+// Default network. Slaves join the master's STEP_ESP32 Soft AP.
+#define WIFI_SSID "STEP_ESP32"
+#define WIFI_PASS "step1234"
 
 #define WIFI_FORCE_SOFT_AP false   // slave: STA mode only for ESP-NOW sync; no AP needed
 
@@ -72,8 +70,8 @@ extern "C" {
 #define WIFI_AP_SSID "STEP_ESP32"
 #define WIFI_AP_PASS "step1234"
 #define WIFI_AP_CHANNEL 6       // 2.4 GHz only — use 1, 6, or 11; explicit helps Windows join
-#define WIFI_AP_MAX_CONN 4
-#define WIFI_STA_TIMEOUT_MS 1
+#define WIFI_AP_MAX_CONN 8
+#define WIFI_STA_TIMEOUT_MS 30000
 // XIAO boards: high TX can desense the onboard antenna — try lower if STA/AP both fail
 #define WIFI_TX_POWER_STA WIFI_POWER_8_5dBm
 #define WIFI_TX_POWER_AP WIFI_POWER_8_5dBm
@@ -90,18 +88,17 @@ extern "C" {
 #define ICM_BANK2_ACCEL_SMPLRT_DIV_2 0x11
 #define ICM_BANK2_ACCEL_CONFIG_1 0x14
 
-#define PIN_SPI_SCK D6    // GPIO4, HSPI SCK
-#define PIN_SPI_MISO D4   // GPIO6, HSPI MISO (SDO)
-#define PIN_SPI_MOSI D5   // GPIO2, HSPI MOSI (SDA)
-#define PIN_ICM_CS D3     // GPIO5, ICM CS
+#define PIN_SPI_SCK D3    // GPIO4, HSPI SCK
+#define PIN_SPI_MISO D5   // GPIO6, HSPI MISO (SDO)
+#define PIN_SPI_MOSI D1   // GPIO2, HSPI MOSI (SDA)
+#define PIN_ICM_CS D4     // GPIO5, ICM CS
 #define PIN_DIO D0        // GPIO1; change if wired elsewhere
 
 #define NODE_IS_MASTER false
 #define ENABLE_SD true
 
-// true = USB binary @100 Hz 14ch -> serial_tcp_bridge.py [--plugin] -> 127.0.0.1:5000 (no Wi-Fi for OE).
-// false = Wi-Fi TCP :5000 on board; Plugin uses Serial Monitor IP, not 127.0.0.1.
-#define USB_OPEN_EPHYS_MODE true
+// Slave streams via WiFi TCP to plugin (joins master AP); no USB bridge needed.
+#define USB_OPEN_EPHYS_MODE false
 
 #if USB_OPEN_EPHYS_MODE
 #define ENABLE_TCP false
@@ -112,6 +109,7 @@ extern "C" {
 #define ENABLE_SERIAL_BENCH false
 #define SERIAL_OUTPUT_BINARY false
 #endif
+
 
 #define PIN_SD_CS 21
 
@@ -234,7 +232,7 @@ static uint16_t g_sample_hz = SAMPLE_HZ_DEFAULT;
 static uint32_t g_sample_last_us = 0;
 static uint8_t g_acc_preset = 0;
 static uint8_t g_gyr_preset = 0;
-static bool g_filter_on = false;
+static bool g_filter_on = true;
 
 static bool g_sd_ready = false;
 static bool g_sd_recording = false;
@@ -276,9 +274,11 @@ static uint32_t g_prof_vqf_mag_max_us = 0;
 static uint32_t g_prof_quat_max_us = 0;
 static uint32_t g_prof_serial_max_us = 0;
 #if ENABLE_ESPNOW
-static int64_t  g_clock_offset_us      = 0;
-static bool     g_espnow_sync_received = false;
-static uint32_t g_espnow_last_seq      = 0;
+static int64_t           g_clock_offset_us        = 0;
+static bool              g_espnow_sync_received   = false;
+static uint32_t          g_espnow_last_seq        = 0;
+static volatile bool     g_espnow_rec_start_pending = false;
+static volatile bool     g_espnow_rec_stop_pending  = false;
 #endif
 static char g_sd_path[48] = "/step_session.bin";
 static char g_rec_session_id[33] = "none";
@@ -521,10 +521,73 @@ typedef struct {
   int64_t time_us;
 } SyncPacket;
 
+#define CMD_MAGIC        0xCB
+#define CMD_START_STREAM 0x01
+#define CMD_STOP_STREAM  0x02
+#define CMD_REC_START    0x03
+#define CMD_REC_STOP     0x04
+#define SLAVE_STATUS_MAGIC 0x5A
+#define SLAVE_STATUS_VERSION 1
+#define SLAVE_STATUS_INTERVAL_MS 200UL
+#define SLAVE_STATIC_IP_OCTET 0
+
+#pragma pack(push, 1)
+struct CmdPacket { uint8_t magic; uint8_t cmd; };
+struct SlaveStatusPacket {
+  uint8_t magic;
+  uint8_t version;
+  uint16_t packet_size;
+  uint32_t slave_id;
+  uint8_t sd_ready;
+  uint8_t sd_recording;
+  uint8_t streaming;
+  uint8_t sync_received;
+  uint8_t imu_ok;
+  uint8_t mag_ok;
+  uint8_t quat_enabled;
+  uint8_t dio_level;
+  uint16_t sample_hz;
+  uint16_t dio_edges;
+  uint32_t seq;
+  uint64_t generated_samples;
+  uint64_t saved_samples;
+  uint64_t sd_errors;
+  int64_t clock_offset_us;
+  int16_t ax;
+  int16_t ay;
+  int16_t az;
+  int16_t gx;
+  int16_t gy;
+  int16_t gz;
+  int16_t mx;
+  int16_t my;
+  int16_t mz;
+  int16_t qw;
+  int16_t qx;
+  int16_t qy;
+  int16_t qz;
+};
+#pragma pack(pop)
+
+static bool sdRecordStart(const char *);
+static void sdRecordStop();
+static uint32_t g_last_slave_status_ms = 0;
+
 #if ENABLE_ESPNOW
 void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   (void)info;
   if (NODE_IS_MASTER) return;
+  // Command relay from master (2 bytes)
+  if (len == 2 && data[0] == CMD_MAGIC) {
+    switch (data[1]) {
+      case CMD_START_STREAM: streaming = true; break;
+      case CMD_STOP_STREAM:  streaming = false; break;
+      case CMD_REC_START:    g_espnow_rec_start_pending = true; break;
+      case CMD_REC_STOP:     g_espnow_rec_stop_pending  = true; break;
+    }
+    return;
+  }
+  // Clock sync packet (12 bytes)
   if (len < (int)sizeof(SyncPacket)) return;
   const SyncPacket *pkt = (const SyncPacket *)data;
   int64_t recv_us = (int64_t)esp_timer_get_time();
@@ -855,6 +918,53 @@ static void sendEspNowSync() {
 #else
 static void sendEspNowSync() {}
 #endif
+
+static void sendSlaveStatus() {
+#if ENABLE_ESPNOW
+  if (NODE_IS_MASTER || !wifi_up) return;
+  const uint32_t now_ms = millis();
+  if ((uint32_t)(now_ms - g_last_slave_status_ms) < SLAVE_STATUS_INTERVAL_MS) return;
+  g_last_slave_status_ms = now_ms;
+
+  SlaveStatusPacket pkt = {};
+  pkt.magic = SLAVE_STATUS_MAGIC;
+  pkt.version = SLAVE_STATUS_VERSION;
+  pkt.packet_size = sizeof(SlaveStatusPacket);
+  const uint64_t mac = ESP.getEfuseMac();
+  pkt.slave_id = (uint32_t)(mac & 0xFFFFFFFFULL);
+  pkt.sd_ready = g_sd_ready ? 1 : 0;
+  pkt.sd_recording = g_sd_recording ? 1 : 0;
+  pkt.streaming = streaming ? 1 : 0;
+  pkt.sync_received = g_espnow_sync_received ? 1 : 0;
+  pkt.imu_ok = icm_ok ? 1 : 0;
+  pkt.mag_ok = (mag_ok && g_have_mag) ? 1 : 0;
+  pkt.quat_enabled = g_filter_on ? 1 : 0;
+  pkt.dio_level = dio_state.stable_high ? 1 : 0;
+  pkt.sample_hz = g_sample_hz;
+  pkt.dio_edges = dio_state.edge_count;
+  pkt.seq = seq;
+  pkt.generated_samples = g_generated_samples;
+  pkt.saved_samples = g_sd_saved_samples;
+  pkt.sd_errors = sdErrorTotal();
+  pkt.clock_offset_us = g_clock_offset_us;
+  pkt.ax = channels[0];
+  pkt.ay = channels[1];
+  pkt.az = channels[2];
+  pkt.gx = channels[3];
+  pkt.gy = channels[4];
+  pkt.gz = channels[5];
+  pkt.mx = channels[6];
+  pkt.my = channels[7];
+  pkt.mz = channels[8];
+  pkt.qw = channels[9];
+  pkt.qx = channels[10];
+  pkt.qy = channels[11];
+  pkt.qz = channels[12];
+
+  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  esp_now_send(bcast, (uint8_t *)&pkt, sizeof(pkt));
+#endif
+}
 
 static void resetStreamStats() {
   g_stream_offered = 0;
@@ -1293,6 +1403,32 @@ static void sdRecordStop() {
 #endif
 }
 
+static void relayDebugAppend(const char *event, const char *detail = "") {
+#if ENABLE_SD
+  if (!g_sd_ready) return;
+  File f = SD.open("/relay_debug.txt", FILE_WRITE);
+  if (!f) return;
+  f.printf("%lu %s%s%s session=%s path=%s saved=%llu errors=%llu drops=%llu write_errors=%llu open_errors=%llu begin_errors=%llu state=%s\n",
+           (unsigned long)millis(),
+           event,
+           detail && detail[0] ? " " : "",
+           detail ? detail : "",
+           g_rec_session_id,
+           g_sd_path,
+           (unsigned long long)g_sd_saved_samples,
+           (unsigned long long)sdErrorTotal(),
+           (unsigned long long)g_sd_queue_drops,
+           (unsigned long long)g_sd_write_errors,
+           (unsigned long long)g_sd_open_errors,
+           (unsigned long long)g_sd_begin_errors,
+           g_rec_state);
+  f.close();
+#else
+  (void)event;
+  (void)detail;
+#endif
+}
+
 static void printAcqStatus() {
   Serial.printf("STATUS seq=%lu generated=%llu sample_hz=%u filter=%d streaming=%d "
                 "icm_ok=%d mag_ok=%d "
@@ -1440,7 +1576,7 @@ static void handleRecLine(const String &line) {
       return;
     }
     recMarkControlConnected();
-    char buf[256];
+    char buf[320];
     snprintf(buf, sizeof(buf),
              "REC HELLO_OK protocol=rec-v1 firmware=arduino-step-%s transport=usb_bridge capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream max_chunk=%lu analyzer=sd-bin-v1 grace_ms=%lu\n",
              FIRMWARE_VERSION, (unsigned long)REC_MAX_CHUNK, (unsigned long)REC_RECONNECT_GRACE_MS);
@@ -1608,9 +1744,7 @@ static void handleLine(const String &line) {
 #endif
     );
     replyToHost(buf);
-    char okCh[24];
-    snprintf(okCh, sizeof(okCh), "OK CHANNELS:%d\n", NUM_CHANNELS);
-    replyToHost(okCh);
+    // NOTE: do NOT send a second "OK CHANNELS:N\n" — see step_node.ino comment.
   } else if (line.startsWith("FREQ:") || line.startsWith("FREQ ")) {
     int hz = parseFreqHz(line);
     if (!sampleHzValid(hz)) {
@@ -1885,6 +2019,15 @@ static void setupWifi() {
   }
   WiFi.scanDelete();
 
+#if SLAVE_STATIC_IP_OCTET > 1
+  WiFi.config(IPAddress(192,168,4,SLAVE_STATIC_IP_OCTET),
+              IPAddress(192,168,4,1),
+              IPAddress(255,255,255,0));
+  Serial.printf("Static slave IP requested: 192.168.4.%u\n", (unsigned)SLAVE_STATIC_IP_OCTET);
+#else
+  Serial.println("Slave IP: DHCP from master AP (set SLAVE_STATIC_IP_OCTET per slave for fixed IPs)");
+#endif
+
   if (strlen(pass) == 0) {
     Serial.printf("Connecting to open network \"%s\" len=%u (2.4 GHz)\n",
                   ssid, (unsigned)strlen(ssid));
@@ -1956,15 +2099,18 @@ static void setupEspNow() {
   esp_now_register_send_cb(onEspNowSent);
   esp_now_peer_info_t peer = {};
   memset(peer.peer_addr, 0xFF, 6);
-  peer.channel = 0;
+  peer.channel = ESPNOW_WIFI_CHANNEL;
+  peer.ifidx = wifi_soft_ap ? WIFI_IF_AP : WIFI_IF_STA;
   peer.encrypt = false;
   err = esp_now_add_peer(&peer);
   if (err != ESP_OK) {
     Serial.printf("ESP-NOW add peer failed: %d\n", (int)err);
     return;
   }
-  Serial.printf("ESP-NOW ready (role=%s ch=%d)\n",
-                NODE_IS_MASTER ? "master" : "slave", ESPNOW_WIFI_CHANNEL);
+  Serial.printf("ESP-NOW ready (role=%s ch=%d iface=%s)\n",
+                NODE_IS_MASTER ? "master" : "slave",
+                ESPNOW_WIFI_CHANNEL,
+                wifi_soft_ap ? "AP" : "STA");
 #else
   Serial.println("ESP-NOW disabled — single-node mode");
 #endif
@@ -2022,6 +2168,8 @@ void setup() {
   g_sd_mutex = xSemaphoreCreateMutex();
   g_sd_ready = SD.begin(PIN_SD_CS, SPI, 25000000);
   Serial.println(g_sd_ready ? "SD ready" : "SD init failed");
+  relayDebugAppend(g_sd_ready ? "boot" : "boot_sd_failed",
+                   g_sd_ready ? "sd_ready=1" : "sd_ready=0");
   g_sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(SdLogRecord));
   if (g_sd_queue) {
     xTaskCreatePinnedToCore(sdWriteTask, "sd_write", 16384, NULL, SD_TASK_PRIORITY, NULL, 0);
@@ -2056,6 +2204,42 @@ void setup() {
 
 void loop() {
   pollSerialCommands();
+#if ENABLE_ESPNOW
+  if (g_espnow_rec_start_pending) {
+    g_espnow_rec_start_pending = false;
+    Serial.println("[RELAY] got REC_START from master");
+    relayDebugAppend("got_rec_start");
+    if (!g_sd_recording) {
+      const bool ok = sdRecordStart(nullptr);
+      Serial.printf("[RELAY] sdRecordStart %s session=%s path=%s ready=%d\n",
+                    ok ? "OK" : "FAILED",
+                    g_rec_session_id,
+                    g_sd_path,
+                    g_sd_ready ? 1 : 0);
+      relayDebugAppend(ok ? "sd_start_ok" : "sd_start_failed");
+    } else {
+      Serial.println("[RELAY] REC_START ignored; already recording");
+      relayDebugAppend("sd_start_ignored", "already_recording=1");
+    }
+  }
+  if (g_espnow_rec_stop_pending) {
+    g_espnow_rec_stop_pending = false;
+    Serial.println("[RELAY] got REC_STOP from master");
+    relayDebugAppend("got_rec_stop");
+    if (g_sd_recording) {
+      sdRecordStop();
+      Serial.printf("[RELAY] sdRecordStop done session=%s saved=%llu errors=%llu path=%s\n",
+                    g_rec_session_id,
+                    (unsigned long long)g_sd_saved_samples,
+                    (unsigned long long)sdErrorTotal(),
+                    g_sd_path);
+      relayDebugAppend("sd_stop_done");
+    } else {
+      Serial.println("[RELAY] REC_STOP ignored; not recording");
+      relayDebugAppend("sd_stop_ignored", "recording=0");
+    }
+  }
+#endif
   recMaybeFinalizeTimeout();
 
 #if ENABLE_TCP && !ENABLE_SERIAL_BENCH
@@ -2112,6 +2296,7 @@ void loop() {
   packChannelsFromImu(imu, mag_ok ? mag : nullptr, mag_fresh);
 
   sendEspNowSync();
+  sendSlaveStatus();
   logSd();
   queueStreamRecord();
 

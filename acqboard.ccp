@@ -1027,6 +1027,10 @@ bool AcqBoardRedPitaya::sendRecordOnCommand()
 {
     if (isEsp32Node)
     {
+        if (esp32RecV1Supported)
+            return sendEsp32RecStart();
+
+        // Legacy fallback: PC-side CSV for firmware without SD recording support.
         const juce::ScopedLock sl (esp32RecordLock);
 
         if (esp32RecordStream != nullptr)
@@ -1092,6 +1096,10 @@ bool AcqBoardRedPitaya::sendRecordOffCommand()
 {
     if (isEsp32Node)
     {
+        if (esp32RecV1Supported)
+            return sendEsp32RecStop();
+
+        // Legacy fallback: close PC-side CSV for firmware without SD recording support.
         const juce::ScopedLock sl (esp32RecordLock);
 
         if (esp32RecordStream != nullptr)
@@ -2342,6 +2350,53 @@ namespace
         return val;
     }
 
+    static bool parseEsp32SlaveStatusLine (const String& line, AcqBoardRedPitaya::Esp32SlaveStatus& out)
+    {
+        if (! line.startsWith ("SLAVE_STATUS"))
+            return false;
+
+        const auto parseInt = [&line] (const String& key, int fallback = 0)
+        {
+            const String v = parseRecField (line, key);
+            return v.isNotEmpty() ? v.getIntValue() : fallback;
+        };
+        const auto parseU64 = [&line] (const String& key) -> uint64_t
+        {
+            const String v = parseRecField (line, key);
+            return v.isNotEmpty() ? static_cast<uint64_t> (v.getLargeIntValue()) : 0;
+        };
+        const auto parseI64 = [&line] (const String& key) -> int64_t
+        {
+            const String v = parseRecField (line, key);
+            return v.isNotEmpty() ? static_cast<int64_t> (v.getLargeIntValue()) : 0;
+        };
+
+        out.slot = parseInt ("slot");
+        out.slaveId = parseRecField (line, "slave_id");
+        out.mac = parseRecField (line, "mac");
+        out.ageMs = parseInt ("age_ms");
+        out.sdReady = parseInt ("sd_ready") != 0;
+        out.recording = parseInt ("recording") != 0;
+        out.streaming = parseInt ("streaming") != 0;
+        out.sync = parseInt ("sync") != 0;
+        out.sampleHz = parseInt ("sample_hz");
+        out.seq = static_cast<uint32_t> (parseU64 ("seq"));
+        out.generated = parseU64 ("generated");
+        out.saved = parseU64 ("saved");
+        out.errors = parseU64 ("errors");
+        out.offsetUs = parseI64 ("offset_us");
+        out.imuOk = parseInt ("imu") != 0;
+        out.magOk = parseInt ("mag") != 0;
+        out.quatEnabled = parseInt ("quat") != 0;
+        out.dioLevel = parseInt ("dio_level");
+        out.dioEdges = parseInt ("dio_edges");
+        out.ax = parseInt ("ax"); out.ay = parseInt ("ay"); out.az = parseInt ("az");
+        out.gx = parseInt ("gx"); out.gy = parseInt ("gy"); out.gz = parseInt ("gz");
+        out.mx = parseInt ("mx"); out.my = parseInt ("my"); out.mz = parseInt ("mz");
+        out.qw = parseInt ("qw"); out.qx = parseInt ("qx"); out.qy = parseInt ("qy"); out.qz = parseInt ("qz");
+        return out.mac.isNotEmpty() || out.slaveId.isNotEmpty();
+    }
+
     // Standard (Ethernet / PKZIP) CRC-32 table.
     static const uint32_t kCrc32Table[256] = {
         0x00000000,0x77073096,0xEE0E612C,0x990951BA,0x076DC419,0x706AF48F,0xE963A535,0x9E6495A3,
@@ -2540,8 +2595,19 @@ bool AcqBoardRedPitaya::sendEsp32RecStart()
         esp32RecStatusText = "ESP32 SD recording: command sent — waiting for confirmation";
     }
 
-    const String resp = readSocketLine (commandSocket, 1000);
-    std::cout << "ESP32 REC START response: [" << resp << "]" << std::endl;
+    // Firmware may emit intermediate "SD_STATUS ..." lines before the "REC STARTED" reply.
+    // Read lines until we get one beginning with "REC " or the timeout expires.
+    String resp;
+    const int64 deadline = Time::currentTimeMillis() + 2000;
+    while (Time::currentTimeMillis() < deadline)
+    {
+        resp = readSocketLine (commandSocket, 200);
+        std::cout << "ESP32 REC START line: [" << resp << "]" << std::endl;
+        updateEsp32SlaveStatusFromLine (resp);
+        if (resp.startsWith ("REC "))
+            break;
+        resp.clear();
+    }
 
     if (resp.startsWith ("REC STARTED"))
     {
@@ -2618,6 +2684,20 @@ bool AcqBoardRedPitaya::sendEsp32RecStop()
             esp32RecState.store (Esp32RecState::Failed);
             return false;
         }
+
+        // Drain "REC FINALIZING" + "REC FINALIZED" from the socket buffer now,
+        // so the retrieval thread's STATUS polling doesn't read stale lines.
+        {
+            const int64 drainDeadline = Time::currentTimeMillis() + 3000;
+            while (Time::currentTimeMillis() < drainDeadline)
+            {
+                const String r = readSocketLine (commandSocket, 500);
+                std::cout << "ESP32 REC STOP drain: [" << r << "]" << std::endl;
+                updateEsp32SlaveStatusFromLine (r);
+                if (r.isEmpty() || r.startsWith ("REC FINALIZED") || r.startsWith ("REC ERR"))
+                    break;
+            }
+        }
     }
 
     esp32RecState.store (Esp32RecState::Finalizing);
@@ -2638,6 +2718,139 @@ String AcqBoardRedPitaya::getEsp32RecStatusText() const
 {
     const juce::ScopedLock sl (esp32RecStatusLock);
     return esp32RecStatusText;
+}
+
+void AcqBoardRedPitaya::pollEsp32SlaveStatus()
+{
+    if (! isEsp32Node || ! esp32RecV1Supported || commandSocket == nullptr)
+        return;
+
+    // Keep the editor monitor off the acquisition/control socket while samples
+    // are flowing. During START/record/STOP this socket is also used by the
+    // acquisition thread and rec-v1 commands; polling here can leave stale
+    // SLAVE_STATUS lines that the record path later reads as command replies.
+    if (isThreadRunning())
+        return;
+
+    const auto state = esp32RecState.load();
+    if (state == Esp32RecState::CommandSent
+        || state == Esp32RecState::RecordingConfirmed
+        || state == Esp32RecState::Finalizing
+        || state == Esp32RecState::Retrieving)
+        return;
+
+    const int64 nowMs = Time::currentTimeMillis();
+    if (nowMs - esp32LastSlavePollMs < 200)
+        return;
+    esp32LastSlavePollMs = nowMs;
+
+    Array<Esp32SlaveStatus> parsed;
+    {
+        const juce::ScopedLock cmdLock (esp32CommandLock);
+        if (commandSocket == nullptr)
+            return;
+
+        const char* statusMsg = "REC STATUS\n";
+        if (commandSocket->write (statusMsg, (int) strlen (statusMsg)) <= 0)
+            return;
+
+        const int64 deadline = Time::currentTimeMillis() + 120;
+        bool sawStatus = false;
+        while (Time::currentTimeMillis() < deadline)
+        {
+            const String line = readSocketLine (commandSocket, sawStatus ? 20 : 80);
+            if (line.isEmpty())
+                break;
+
+            if (line.startsWith ("REC STATUS"))
+            {
+                sawStatus = true;
+                continue;
+            }
+
+            Esp32SlaveStatus status;
+            if (parseEsp32SlaveStatusLine (line, status))
+                parsed.add (status);
+        }
+    }
+
+    if (parsed.size() == 0)
+        return;
+
+    const juce::ScopedLock sl (esp32SlaveStatusLock);
+    esp32SlaveStatuses = parsed;
+}
+
+bool AcqBoardRedPitaya::updateEsp32SlaveStatusFromLine (const String& line)
+{
+    Esp32SlaveStatus parsed;
+    if (! parseEsp32SlaveStatusLine (line, parsed))
+        return false;
+
+    const juce::ScopedLock sl (esp32SlaveStatusLock);
+    for (int i = 0; i < esp32SlaveStatuses.size(); ++i)
+    {
+        auto& existing = esp32SlaveStatuses.getReference (i);
+        const bool sameMac = parsed.mac.isNotEmpty() && existing.mac == parsed.mac;
+        const bool sameId = parsed.slaveId.isNotEmpty() && existing.slaveId == parsed.slaveId;
+        if (sameMac || sameId)
+        {
+            existing = parsed;
+            return true;
+        }
+    }
+
+    esp32SlaveStatuses.add (parsed);
+    return true;
+}
+
+Array<AcqBoardRedPitaya::Esp32SlaveStatus> AcqBoardRedPitaya::getEsp32SlaveStatuses() const
+{
+    const juce::ScopedLock sl (esp32SlaveStatusLock);
+    return esp32SlaveStatuses;
+}
+
+String AcqBoardRedPitaya::getEsp32SlaveSummaryText() const
+{
+    const juce::ScopedLock sl (esp32SlaveStatusLock);
+    const int total = esp32SlaveStatuses.size();
+    if (total == 0)
+        return "Slaves: none";
+
+    int online = 0, sdReady = 0, recording = 0, errors = 0;
+    for (int i = 0; i < esp32SlaveStatuses.size(); ++i)
+    {
+        const auto& s = esp32SlaveStatuses.getReference (i);
+        if (s.ageMs < 5000) online++;
+        if (s.sdReady) sdReady++;
+        if (s.recording) recording++;
+        if (s.errors > 0) errors++;
+    }
+
+    return "S" + String (online) + "/" + String (total)
+         + " SD" + String (sdReady) + "/" + String (total)
+         + " R" + String (recording) + "/" + String (total)
+         + " E" + String (errors);
+}
+
+String AcqBoardRedPitaya::getEsp32SlaveDetailText (int selectedIndex) const
+{
+    const juce::ScopedLock sl (esp32SlaveStatusLock);
+    if (esp32SlaveStatuses.size() == 0)
+        return "none";
+
+    const int idx = jlimit (0, esp32SlaveStatuses.size() - 1, selectedIndex);
+    const auto& s = esp32SlaveStatuses.getReference (idx);
+    const bool moving = std::abs (s.ax) + std::abs (s.ay) + std::abs (s.az)
+                      + std::abs (s.gx) + std::abs (s.gy) + std::abs (s.gz) > 0;
+    const bool quatNonzero = s.qw != 0 || s.qx != 0 || s.qy != 0 || s.qz != 0;
+
+    return String (s.sdReady ? "SD" : "noSD")
+         + " " + String (s.recording ? "REC" : "idle")
+         + " sv" + String ((int64) s.saved)
+         + " Q" + String (quatNonzero ? "1" : "0")
+         + " M" + String (moving ? "1" : "0")
+         + " D" + String (s.dioLevel) + "/" + String (s.dioEdges);
 }
 
 // =============================================================================
@@ -2703,6 +2916,7 @@ public:
             }
 
             std::cout << "[ESP32 retrieval] STATUS: " << statusResp << std::endl;
+            board_.updateEsp32SlaveStatusFromLine (statusResp);
 
             const String recState = parseRecField (statusResp, "recording_state");
 
@@ -2753,8 +2967,19 @@ public:
 
             const char* sessionMsg = "REC SESSION session_id=latest_finalized\n";
             board_.commandSocket->write (sessionMsg, (int) strlen (sessionMsg));
-            const String resp = readSocketLine (board_.commandSocket, 2000);
-            std::cout << "[ESP32 retrieval] SESSION: " << resp << std::endl;
+
+            // Skip any stale non-SESSION lines still in the buffer (e.g. STATUS polls).
+            String resp;
+            const int64 sessionDeadline = Time::currentTimeMillis() + 2000;
+            while (Time::currentTimeMillis() < sessionDeadline)
+            {
+                resp = readSocketLine (board_.commandSocket, 200);
+                std::cout << "[ESP32 retrieval] SESSION line: [" << resp << "]" << std::endl;
+                board_.updateEsp32SlaveStatusFromLine (resp);
+                if (resp.startsWith ("REC SESSION") || resp.isEmpty())
+                    break;
+                resp.clear();
+            }
 
             if (! resp.startsWith ("REC SESSION_OK"))
             {
@@ -2778,6 +3003,16 @@ public:
         board_.esp32PendingFileChecksum = fileChecksumHex;
         setState (RecState::SdFinalized);
         setStatus ("ESP32 SD finalized (session=" + sessionId + ", " + String (fileSize) + " bytes) — retrieving...");
+
+        // Relay-only mode: master has no SD card (file_size=0).
+        // Data is on the slave's SD card — skip chunk transfer, report success.
+        if (fileSize == 0)
+        {
+            setState (RecState::LocalCopyWritten);
+            setStatus ("ESP32 SD recording complete — relay-only, data on slave SD card (session=" + sessionId + ")");
+            std::cout << "[ESP32 retrieval] Relay-only mode: file_size=0, skipping chunk transfer. Session: " << sessionId << std::endl;
+            return;
+        }
 
         // -----------------------------------------------------------------------
         // Step 3: Prepare local output directory

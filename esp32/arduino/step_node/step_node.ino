@@ -4,12 +4,10 @@
  *
  * Guide: docs/arduino-ide-guide.md
  *
- * --- Wi-Fi connect timeout fallback ---
- * If STA join fails (45 s), firmware starts Soft AP: SSID STEP_ESP32, pass step1234.
+ * --- Default Wi-Fi topology ---
+ * Master starts Soft AP: SSID STEP_ESP32, pass step1234, IP 192.168.4.1.
+ * Slaves join STEP_ESP32 by default and use IP 192.168.4.2.
  * On your PC: join Wi-Fi "STEP_ESP32" (password step1234), then Open Ephys / TCP host 192.168.4.1:5000.
- *
- * --- Phone hotspot: use 2.4 GHz band only (ESP32-S3 does not join 5 GHz-only APs). ---
- * Edit WIFI_SSID / WIFI_PASS below (was ubcvisitor open campus — change for your hotspot).
  *
  * --- WIRING_4WIRE_ICM + USB to PC (copy-paste preset) ---
  * #define ENABLE_TCP false
@@ -53,6 +51,8 @@ extern "C" {
 #include "vqf.h"
 }
 
+struct SlaveStatusPacket;
+
 #define FIRMWARE_VERSION "1.7.0"
 #define WIFI_HOSTNAME "step-esp32"
 #define BOOT_CSV_DELAY_MS 5000
@@ -61,9 +61,9 @@ extern "C" {
 
 #define DIO_DEBOUNCE_MS 15   // stable toggle within ~20 ms @ 100 Hz
 
-// STA: join your phone/lab hotspot (2.4 GHz). Empty WIFI_PASS = open network (WiFi.begin SSID only).
-#define WIFI_SSID "YOUR_HOTSPOT"
-#define WIFI_PASS "yourpassword"
+// Default network. Master forces Soft AP with these AP credentials; slaves join this SSID.
+#define WIFI_SSID "STEP_ESP32"
+#define WIFI_PASS "step1234"
 
 #define WIFI_FORCE_SOFT_AP true
 
@@ -71,8 +71,8 @@ extern "C" {
 #define WIFI_AP_SSID "STEP_ESP32"
 #define WIFI_AP_PASS "step1234"
 #define WIFI_AP_CHANNEL 6       // 2.4 GHz only — use 1, 6, or 11; explicit helps Windows join
-#define WIFI_AP_MAX_CONN 4
-#define WIFI_STA_TIMEOUT_MS 1
+#define WIFI_AP_MAX_CONN 8
+#define WIFI_STA_TIMEOUT_MS 30000
 // XIAO boards: high TX can desense the onboard antenna — try lower if STA/AP both fail
 #define WIFI_TX_POWER_STA WIFI_POWER_8_5dBm
 #define WIFI_TX_POWER_AP WIFI_POWER_8_5dBm
@@ -100,7 +100,7 @@ extern "C" {
 
 // true = USB binary @100 Hz 14ch -> serial_tcp_bridge.py [--plugin] -> 127.0.0.1:5000 (no Wi-Fi for OE).
 // false = Wi-Fi TCP :5000 on board; Plugin uses Serial Monitor IP, not 127.0.0.1.
-#define USB_OPEN_EPHYS_MODE true
+#define USB_OPEN_EPHYS_MODE false
 
 #if USB_OPEN_EPHYS_MODE
 #define ENABLE_TCP false
@@ -237,6 +237,7 @@ static bool g_filter_on = false;
 
 static bool g_sd_ready = false;
 static bool g_sd_recording = false;
+static bool g_relay_only_recording = false;  // true when master has no SD but relays to slave
 static File g_sd_file;
 static uint64_t g_generated_samples = 0;
 static uint64_t g_sd_saved_samples = 0;
@@ -520,10 +521,125 @@ typedef struct {
   int64_t time_us;
 } SyncPacket;
 
+// Command relay: master → slave via ESP-NOW broadcast.
+// Distinguished from SyncPacket by packet length (2 bytes vs 12).
+#define CMD_MAGIC        0xCB
+#define CMD_START_STREAM 0x01
+#define CMD_STOP_STREAM  0x02
+#define CMD_REC_START    0x03
+#define CMD_REC_STOP     0x04
+#define SLAVE_STATUS_MAGIC 0x5A
+#define SLAVE_STATUS_VERSION 1
+#define MAX_SLAVE_STATUS_SLOTS 6
+#define SLAVE_STATUS_STALE_MS 5000UL
+
+#pragma pack(push, 1)
+struct CmdPacket { uint8_t magic; uint8_t cmd; };
+struct SlaveStatusPacket {
+  uint8_t magic;
+  uint8_t version;
+  uint16_t packet_size;
+  uint32_t slave_id;
+  uint8_t sd_ready;
+  uint8_t sd_recording;
+  uint8_t streaming;
+  uint8_t sync_received;
+  uint8_t imu_ok;
+  uint8_t mag_ok;
+  uint8_t quat_enabled;
+  uint8_t dio_level;
+  uint16_t sample_hz;
+  uint16_t dio_edges;
+  uint32_t seq;
+  uint64_t generated_samples;
+  uint64_t saved_samples;
+  uint64_t sd_errors;
+  int64_t clock_offset_us;
+  int16_t ax;
+  int16_t ay;
+  int16_t az;
+  int16_t gx;
+  int16_t gy;
+  int16_t gz;
+  int16_t mx;
+  int16_t my;
+  int16_t mz;
+  int16_t qw;
+  int16_t qx;
+  int16_t qy;
+  int16_t qz;
+};
+#pragma pack(pop)
+
+struct SlaveStatusSlot {
+  bool used;
+  uint8_t mac[6];
+  uint32_t last_seen_ms;
+  SlaveStatusPacket status;
+};
+
+static SlaveStatusSlot g_slave_status[MAX_SLAVE_STATUS_SLOTS];
+
+static const char *relayCmdName(uint8_t cmd) {
+  switch (cmd) {
+    case CMD_START_STREAM: return "START_STREAM";
+    case CMD_STOP_STREAM:  return "STOP_STREAM";
+    case CMD_REC_START:    return "REC_START";
+    case CMD_REC_STOP:     return "REC_STOP";
+    default:               return "UNKNOWN";
+  }
+}
+
 #if ENABLE_ESPNOW
+static void rememberSlaveStatus(const esp_now_recv_info_t *info, const SlaveStatusPacket *status) {
+  if (!info || !info->src_addr || !status) return;
+
+  int slot = -1;
+  int empty = -1;
+  for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+    if (g_slave_status[i].used &&
+        memcmp(g_slave_status[i].mac, info->src_addr, sizeof(g_slave_status[i].mac)) == 0) {
+      slot = i;
+      break;
+    }
+    if (!g_slave_status[i].used && empty < 0) empty = i;
+  }
+
+  if (slot < 0) slot = empty >= 0 ? empty : 0;
+  g_slave_status[slot].used = true;
+  memcpy(g_slave_status[slot].mac, info->src_addr, sizeof(g_slave_status[slot].mac));
+  g_slave_status[slot].last_seen_ms = millis();
+  g_slave_status[slot].status = *status;
+}
+
+static int slaveStatusCount() {
+  int count = 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+    if (g_slave_status[i].used && (uint32_t)(now - g_slave_status[i].last_seen_ms) < SLAVE_STATUS_STALE_MS)
+      count++;
+  }
+  return count;
+}
+
+static int firstActiveSlaveStatusSlot() {
+  const uint32_t now = millis();
+  for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+    if (g_slave_status[i].used && (uint32_t)(now - g_slave_status[i].last_seen_ms) < SLAVE_STATUS_STALE_MS)
+      return i;
+  }
+  return -1;
+}
+
 void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  (void)info;
-  if (NODE_IS_MASTER) return;
+  if (NODE_IS_MASTER) {
+    if (len >= (int)sizeof(SlaveStatusPacket) && data[0] == SLAVE_STATUS_MAGIC) {
+      const SlaveStatusPacket *status = (const SlaveStatusPacket *)data;
+      if (status->version == SLAVE_STATUS_VERSION && status->packet_size == sizeof(SlaveStatusPacket))
+        rememberSlaveStatus(info, status);
+    }
+    return;
+  }
   if (len < (int)sizeof(SyncPacket)) return;
   const SyncPacket *pkt = (const SyncPacket *)data;
   int64_t recv_us = (int64_t)esp_timer_get_time();
@@ -532,7 +648,8 @@ void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
   g_espnow_last_seq      = pkt->seq;
 }
 void onEspNowSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
-  (void)tx_info; (void)status;
+  (void)tx_info;
+  (void)status;
 }
 #endif
 
@@ -853,6 +970,28 @@ static void sendEspNowSync() {
 }
 #else
 static void sendEspNowSync() {}
+#endif
+
+#if ENABLE_ESPNOW && NODE_IS_MASTER
+static void espNowRelayCmd(uint8_t cmd) {
+  if (!wifi_up) {
+    Serial.printf("[RELAY] skip %s: wifi_up=0\n", relayCmdName(cmd));
+    return;
+  }
+  CmdPacket pkt = {CMD_MAGIC, cmd};
+  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  const bool record_cmd = (cmd == CMD_REC_START || cmd == CMD_REC_STOP);
+  const int attempts = record_cmd ? 5 : 1;
+  esp_err_t last_err = ESP_OK;
+  for (int i = 0; i < attempts; i++) {
+    last_err = esp_now_send(bcast, (uint8_t *)&pkt, sizeof(pkt));
+    if (record_cmd && i + 1 < attempts) delay(20);
+  }
+  Serial.printf("[RELAY] send %s len=%u attempts=%d err=%d\n",
+                relayCmdName(cmd), (unsigned)sizeof(pkt), attempts, (int)last_err);
+}
+#else
+static void espNowRelayCmd(uint8_t) {}
 #endif
 
 static void resetStreamStats() {
@@ -1365,15 +1504,85 @@ static void printAcqStatus() {
                 g_espnow_sync_received ? 1 : 0,
                 (long long)g_clock_offset_us,
                 (unsigned long)g_espnow_last_seq);
+  if (NODE_IS_MASTER) {
+    const uint32_t now_ms = millis();
+    int active = 0, sd_ready = 0, recording = 0, errors = 0;
+    for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+      if (!g_slave_status[i].used) continue;
+      const uint32_t age_ms = now_ms - g_slave_status[i].last_seen_ms;
+      if (age_ms >= SLAVE_STATUS_STALE_MS) continue;
+      const SlaveStatusPacket &s = g_slave_status[i].status;
+      active++;
+      if (s.sd_ready) sd_ready++;
+      if (s.sd_recording) recording++;
+      if (s.sd_errors) errors++;
+    }
+    Serial.printf("SLAVES active=%d sd_ready=%d recording=%d errors=%d\n",
+                  active, sd_ready, recording, errors);
+    for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+      if (!g_slave_status[i].used) continue;
+      const uint32_t age_ms = now_ms - g_slave_status[i].last_seen_ms;
+      if (age_ms >= SLAVE_STATUS_STALE_MS) continue;
+      const SlaveStatusPacket &s = g_slave_status[i].status;
+      Serial.printf("SLAVE_STATUS slot=%d slave_id=%08lx mac=%02X:%02X:%02X:%02X:%02X:%02X age_ms=%lu "
+                    "sd_ready=%u recording=%u streaming=%u sync=%u sample_hz=%u "
+                    "seq=%lu generated=%llu saved=%llu errors=%llu offset_us=%lld "
+                    "imu=%u mag=%u quat=%u dio_level=%u dio_edges=%u "
+                    "ax=%d ay=%d az=%d gx=%d gy=%d gz=%d mx=%d my=%d mz=%d "
+                    "qw=%d qx=%d qy=%d qz=%d\n",
+                    i,
+                    (unsigned long)s.slave_id,
+                    g_slave_status[i].mac[0], g_slave_status[i].mac[1], g_slave_status[i].mac[2],
+                    g_slave_status[i].mac[3], g_slave_status[i].mac[4], g_slave_status[i].mac[5],
+                    (unsigned long)age_ms,
+                    (unsigned)s.sd_ready,
+                    (unsigned)s.sd_recording,
+                    (unsigned)s.streaming,
+                    (unsigned)s.sync_received,
+                    (unsigned)s.sample_hz,
+                    (unsigned long)s.seq,
+                    (unsigned long long)s.generated_samples,
+                    (unsigned long long)s.saved_samples,
+                    (unsigned long long)s.sd_errors,
+                    (long long)s.clock_offset_us,
+                    (unsigned)s.imu_ok,
+                    (unsigned)s.mag_ok,
+                    (unsigned)s.quat_enabled,
+                    (unsigned)s.dio_level,
+                    (unsigned)s.dio_edges,
+                    (int)s.ax, (int)s.ay, (int)s.az,
+                    (int)s.gx, (int)s.gy, (int)s.gz,
+                    (int)s.mx, (int)s.my, (int)s.mz,
+                    (int)s.qw, (int)s.qx, (int)s.qy, (int)s.qz);
+    }
+  }
 #endif
 }
 
 static void recReplyToHost(const char *text);
 
 static void printRecStatus() {
+#if ENABLE_ESPNOW
+  const uint32_t now_ms = millis();
+  int slave_active = 0, slave_sd_ready = 0, slave_recording = 0, slave_errors = 0;
+  if (NODE_IS_MASTER) {
+    for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+      if (!g_slave_status[i].used) continue;
+      const uint32_t age_ms = now_ms - g_slave_status[i].last_seen_ms;
+      if (age_ms >= SLAVE_STATUS_STALE_MS) continue;
+      const SlaveStatusPacket &s = g_slave_status[i].status;
+      slave_active++;
+      if (s.sd_ready) slave_sd_ready++;
+      if (s.sd_recording) slave_recording++;
+      if (s.sd_errors) slave_errors++;
+    }
+  }
+#else
+  const int slave_active = 0, slave_sd_ready = 0, slave_recording = 0, slave_errors = 0;
+#endif
   char buf[1536];
   snprintf(buf, sizeof(buf),
-                "REC STATUS_OK protocol=rec-v1 capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream transport=usb_bridge sd_ready=%d sd_open=%d recording_state=%s transfer_state=%s session_id=%s sd_path_token=sd:%s generated_samples=%llu saved_samples=%llu queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu mutex_timeouts=%llu max_queue_depth=%lu max_write_latency_us=%lu flush_count=%llu max_flush_us=%lu overrun_count=%lu finalization_reason=%s file_byte_size=%llu file_checksum=%08lx checksum_type=crc32 last_error=%s grace_ms_remaining=%lu local_result_path=unknown local_analyzer_result=unknown\n",
+                "REC STATUS_OK protocol=rec-v1 capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream transport=usb_bridge sd_ready=%d sd_open=%d recording_state=%s transfer_state=%s session_id=%s sd_path_token=sd:%s generated_samples=%llu saved_samples=%llu queue_drops=%llu write_errors=%llu header_errors=%llu open_errors=%llu begin_errors=%llu mutex_timeouts=%llu max_queue_depth=%lu max_write_latency_us=%lu flush_count=%llu max_flush_us=%lu overrun_count=%lu finalization_reason=%s file_byte_size=%llu file_checksum=%08lx checksum_type=crc32 last_error=%s grace_ms_remaining=%lu slave_active=%d slave_sd_ready=%d slave_recording=%d slave_errors=%d local_result_path=unknown local_analyzer_result=unknown\n",
                 g_sd_ready ? 1 : 0,
                 g_sd_recording ? 1 : 0,
                 g_rec_state,
@@ -1397,8 +1606,49 @@ static void printRecStatus() {
                 (unsigned long long)g_final_file_size,
                 (unsigned long)g_final_file_checksum,
                 g_last_rec_error,
-                (unsigned long)recGraceRemainingMs());
+                (unsigned long)recGraceRemainingMs(),
+                slave_active,
+                slave_sd_ready,
+                slave_recording,
+                slave_errors);
   recReplyToHost(buf);
+#if ENABLE_ESPNOW
+  if (NODE_IS_MASTER) {
+    for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+      if (!g_slave_status[i].used) continue;
+      const uint32_t age_ms = now_ms - g_slave_status[i].last_seen_ms;
+      if (age_ms >= SLAVE_STATUS_STALE_MS) continue;
+      const SlaveStatusPacket &s = g_slave_status[i].status;
+      snprintf(buf, sizeof(buf),
+               "SLAVE_STATUS slot=%d slave_id=%08lx mac=%02X:%02X:%02X:%02X:%02X:%02X age_ms=%lu sd_ready=%u recording=%u streaming=%u sync=%u sample_hz=%u seq=%lu generated=%llu saved=%llu errors=%llu offset_us=%lld imu=%u mag=%u quat=%u dio_level=%u dio_edges=%u ax=%d ay=%d az=%d gx=%d gy=%d gz=%d mx=%d my=%d mz=%d qw=%d qx=%d qy=%d qz=%d\n",
+               i,
+               (unsigned long)s.slave_id,
+               g_slave_status[i].mac[0], g_slave_status[i].mac[1], g_slave_status[i].mac[2],
+               g_slave_status[i].mac[3], g_slave_status[i].mac[4], g_slave_status[i].mac[5],
+               (unsigned long)age_ms,
+               (unsigned)s.sd_ready,
+               (unsigned)s.sd_recording,
+               (unsigned)s.streaming,
+               (unsigned)s.sync_received,
+               (unsigned)s.sample_hz,
+               (unsigned long)s.seq,
+               (unsigned long long)s.generated_samples,
+               (unsigned long long)s.saved_samples,
+               (unsigned long long)s.sd_errors,
+               (long long)s.clock_offset_us,
+               (unsigned)s.imu_ok,
+               (unsigned)s.mag_ok,
+               (unsigned)s.quat_enabled,
+               (unsigned)s.dio_level,
+               (unsigned)s.dio_edges,
+               (int)s.ax, (int)s.ay, (int)s.az,
+               (int)s.gx, (int)s.gy, (int)s.gz,
+               (int)s.mx, (int)s.my, (int)s.mz,
+               (int)s.qw, (int)s.qx, (int)s.qy, (int)s.qz);
+      recReplyToHost(buf);
+    }
+  }
+#endif
 }
 
 static void replyToHost(const char *text) {
@@ -1439,7 +1689,7 @@ static void handleRecLine(const String &line) {
       return;
     }
     recMarkControlConnected();
-    char buf[256];
+    char buf[320];
     snprintf(buf, sizeof(buf),
              "REC HELLO_OK protocol=rec-v1 firmware=arduino-step-%s transport=usb_bridge capabilities=record_control,status_v1,finalized_metadata,chunk_transfer_v1,whole_file_checksum,reconnect_grace,transfer_isolation=paused_isolated_stream max_chunk=%lu analyzer=sd-bin-v1 grace_ms=%lu\n",
              FIRMWARE_VERSION, (unsigned long)REC_MAX_CHUNK, (unsigned long)REC_RECONNECT_GRACE_MS);
@@ -1448,7 +1698,12 @@ static void handleRecLine(const String &line) {
   }
 
   if (line.startsWith("REC START")) {
-    if (g_sd_recording) {
+    if (g_sd_recording || g_relay_only_recording) {
+      // Idempotent recovery: if the plugin reconnects or retries while the
+      // master is already in relay-only record state, rebroadcast REC_START.
+      // Slaves that are already recording ignore it; slaves that missed the
+      // first ESP-NOW packet can still start and save to SD.
+      espNowRelayCmd(CMD_REC_START);
       char err[128];
       snprintf(err, sizeof(err), "REC ERR code=already_recording session_id=%s retryable=false detail=active\n", g_rec_session_id);
       replyToHost(err);
@@ -1456,9 +1711,18 @@ static void handleRecLine(const String &line) {
     }
     bool ok = sdRecordStart(nullptr);
     if (!ok) {
-      replyToHost("REC ERR code=sd_not_ready retryable=true detail=start_failed\n");
-      return;
+      // No SD card on master — relay-only mode: still trigger slave recording.
+      // sdRecordStart returns early (before makeSessionId) when SD is not ready,
+      // so we must generate the session ID here.
+      makeSessionId();
+      g_relay_only_recording = true;
+      strncpy(g_rec_state, "recording", sizeof(g_rec_state) - 1);
+      strncpy(g_last_rec_error, "none", sizeof(g_last_rec_error) - 1);
+      g_final_file_size = 0;
+      g_final_file_checksum = 0;
+      g_sd_saved_samples = 0;
     }
+    espNowRelayCmd(CMD_REC_START);
     char buf[192];
     snprintf(buf, sizeof(buf),
              "REC STARTED session_id=%s sd_path_token=sd:%s recording_state=recording generated_samples=%llu saved_samples=%llu\n",
@@ -1475,7 +1739,7 @@ static void handleRecLine(const String &line) {
   }
 
   if (line.startsWith("REC STOP")) {
-    if (!g_sd_recording) {
+    if (!g_sd_recording && !g_relay_only_recording) {
       char err[128];
       snprintf(err, sizeof(err), "REC ERR code=not_recording session_id=%s retryable=false detail=idle\n", g_rec_session_id);
       replyToHost(err);
@@ -1485,14 +1749,25 @@ static void handleRecLine(const String &line) {
     char buf[96];
     snprintf(buf, sizeof(buf), "REC FINALIZING session_id=%s\n", g_rec_session_id);
     replyToHost(buf);
-    sdRecordStop();
+    espNowRelayCmd(CMD_REC_STOP);
+    if (g_sd_recording) {
+      sdRecordStop();
+    } else {
+      // relay-only: no SD to stop, just update state
+      g_relay_only_recording = false;
+      g_final_file_size = 0;
+      g_final_file_checksum = 0;
+      g_sd_saved_samples = 0;
+      strncpy(g_last_rec_error, "none", sizeof(g_last_rec_error) - 1);
+      strncpy(g_rec_state, "finalized", sizeof(g_rec_state) - 1);
+    }
     snprintf(buf, sizeof(buf), "REC FINALIZED session_id=%s\n", g_rec_session_id);
     replyToHost(buf);
     return;
   }
 
   if (line.startsWith("REC SESSION")) {
-    if (g_sd_recording) {
+    if (g_sd_recording || g_relay_only_recording) {
       replyToHost("REC ERR code=busy_recording retryable=true detail=session\n");
       return;
     }
@@ -1500,6 +1775,8 @@ static void handleRecLine(const String &line) {
       replyToHost("REC ERR code=not_found retryable=false detail=session\n");
       return;
     }
+    // relay-only mode: no master SD file — return SESSION_OK with file_size=0
+    // so the plugin knows the session completed; data is on the slave's SD card.
     char buf[256];
     snprintf(buf, sizeof(buf),
              "REC SESSION_OK session_id=%s sd_path_token=sd:%s file_size=%llu file_checksum=%08lx checksum_type=crc32 sample_count=%llu finalized_at=unknown finalization_reason=%s analyzer_format=sd-bin-v1\n",
@@ -1607,9 +1884,10 @@ static void handleLine(const String &line) {
 #endif
     );
     replyToHost(buf);
-    char okCh[24];
-    snprintf(okCh, sizeof(okCh), "OK CHANNELS:%d\n", NUM_CHANNELS);
-    replyToHost(okCh);
+    // NOTE: do NOT send a second "OK CHANNELS:N\n" line here.
+    // The plugin reads until it sees "channels" in line 1 then immediately calls
+    // sendEsp32RecHello() — a leftover "OK CHANNELS:N" in the socket buffer would
+    // be read by readSocketLine() instead of the actual "REC HELLO_OK" response.
   } else if (line.startsWith("FREQ:") || line.startsWith("FREQ ")) {
     int hz = parseFreqHz(line);
     if (!sampleHzValid(hz)) {
@@ -1659,6 +1937,7 @@ static void handleLine(const String &line) {
     profReset();
     resetStreamStats();
     streaming = true;
+    espNowRelayCmd(CMD_START_STREAM);
 #if ENABLE_TCP
     replyToHost("STARTED BIN:esp32s3_arduino transport=udp port=55001\n");
 #else
@@ -1670,6 +1949,7 @@ static void handleLine(const String &line) {
 #endif
   } else if (line.startsWith("STOP")) {
     streaming = false;
+    espNowRelayCmd(CMD_STOP_STREAM);
     replyToHost("STOPPED\n");
   } else if (line.equalsIgnoreCase("AP?") || line.equalsIgnoreCase("WIFI?") ||
              line.equalsIgnoreCase("STATUS")) {
@@ -1955,15 +2235,18 @@ static void setupEspNow() {
   esp_now_register_send_cb(onEspNowSent);
   esp_now_peer_info_t peer = {};
   memset(peer.peer_addr, 0xFF, 6);
-  peer.channel = 0;
+  peer.channel = ESPNOW_WIFI_CHANNEL;
+  peer.ifidx = wifi_soft_ap ? WIFI_IF_AP : WIFI_IF_STA;
   peer.encrypt = false;
   err = esp_now_add_peer(&peer);
   if (err != ESP_OK) {
     Serial.printf("ESP-NOW add peer failed: %d\n", (int)err);
     return;
   }
-  Serial.printf("ESP-NOW ready (role=%s ch=%d)\n",
-                NODE_IS_MASTER ? "master" : "slave", ESPNOW_WIFI_CHANNEL);
+  Serial.printf("ESP-NOW ready (role=%s ch=%d iface=%s)\n",
+                NODE_IS_MASTER ? "master" : "slave",
+                ESPNOW_WIFI_CHANNEL,
+                wifi_soft_ap ? "AP" : "STA");
 #else
   Serial.println("ESP-NOW disabled — single-node mode");
 #endif
