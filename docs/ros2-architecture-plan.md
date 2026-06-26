@@ -350,6 +350,30 @@ No firmware update required.
 
 ---
 
+## ESP32-S3 Battery Optimizations
+
+Three power-saving techniques for wireless sensor nodes (XIAO ESP32-S3):
+
+1. **Drop CPU to 80 MHz** (`setCpuFrequencyMhz(80)`) — Cuts baseline draw from
+   ~40 mA to ~20 mA. Still fast enough for IMU reads, sensor fusion, and ESP-NOW
+   at 200 Hz. No functional downside.
+
+2. **De-initialize radio between bursts** (`esp_now_deinit()`) — Collect N samples
+   in a buffer, transmit as a batch, shut down the radio until the next batch.
+   Saves significant power but adds latency equal to batch duration. A 10-sample
+   batch at 200 Hz adds 50 ms, acceptable for body-segment IMUs doing IK. Not
+   suitable for sensors feeding closed-loop motor control.
+
+3. **Use unicast, not broadcast** — Transmit to specific MAC addresses instead of
+   broadcasting. Faster transmission, lower power, and enables ESP-NOW delivery
+   ACKs (broadcast has no ACK). No downside since sensor-to-hub mappings are fixed.
+
+Power profile should be per-node configurable: aggressive batching for
+kinematics-only IMUs, continuous streaming for any sensor in a low-latency
+control loop.
+
+---
+
 ## Key Risks and Mitigations
 
 | Risk                                        | Mitigation                                              |
