@@ -14,6 +14,25 @@ motor control, and VR under a unified Rust-based GUI.
 
 ---
 
+## Summary
+
+We are moving from the current Open Ephys C++/JUCE plugin to a standalone
+system built on ROS2 Humble running on a Jetson (SeedStudio reComputer). Each
+device — Red Pitaya (IMU), EMG, motor controller, VR headset — becomes its own
+ROS2 node. Nodes talk through DDS publish/subscribe instead of our hand-written
+TCP/UDP protocols. The Red Pitaya firmware stays unchanged; a bridge node on the
+Jetson reads its existing TCP frames and republishes them as standard ROS2
+`sensor_msgs/Imu` messages. OpenSim IK runs as a ROS2 node following the
+approach validated by Klein et al. (2025), who measured ~18 ms ROS2 transport
+overhead and 99.1% frame delivery within 500 ms on a full IK+ID+SO pipeline.
+The GUI will be a LabVIEW-style web interface (Tauri or rosbridge) subscribing
+to ROS2 topics for display and publishing commands back. This gives us one
+communication layer across all devices, automatic data recording via `ros2 bag`,
+and the ability to add new sensors or processing nodes without touching existing
+ones.
+
+---
+
 ## Why ROS2
 
 The current system uses hand-written TCP/UDP protocols between the Open Ephys
