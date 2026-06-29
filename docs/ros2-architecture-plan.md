@@ -4,7 +4,7 @@
 
 This document covers the decision to adopt ROS2 as the communication middleware
 for the next-generation system integrating Jetson, Red Pitaya, EMG, IMU,
-motor control, and VR under a unified Rust-based GUI.
+load cells, motor control, and VR under a unified Rust-based GUI.
 
 ### References
 
@@ -18,8 +18,8 @@ motor control, and VR under a unified Rust-based GUI.
 
 We are moving from the current Open Ephys C++/JUCE plugin to a standalone
 system built on ROS2 Humble running on a Jetson (SeedStudio reComputer). Each
-device — Red Pitaya (IMU), EMG, motor controller, VR headset — becomes its own
-ROS2 node. Nodes talk through DDS publish/subscribe instead of our hand-written
+device — Red Pitaya (IMU + load cells), EMG, motor controller, VR headset —
+becomes its own ROS2 node. Nodes talk through DDS publish/subscribe instead of our hand-written
 TCP/UDP protocols. The Red Pitaya firmware stays unchanged; a bridge node on the
 Jetson reads its existing TCP frames and republishes them as standard ROS2
 `sensor_msgs/Imu` messages. OpenSim IK runs as a ROS2 node following the
@@ -241,19 +241,21 @@ ros2 run demo_nodes_py listener
 ```
 ┌─ Jetson (ROS2 Humble) ──────────────────────────────────────────────┐
 │                                                                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐               │
-│  │ rp_imu_node  │  │ emg_node     │  │ motor_node   │               │
-│  │ (C++ or Py)  │  │ (C++ or Py)  │  │ (C++ or Rust)│               │
-│  │              │  │              │  │              │               │
-│  │ Reads Red    │  │ EMG acquire  │  │ Jetson GPIO/ │               │
-│  │ Pitaya TCP,  │  │ + envelope   │  │ serial to    │               │
-│  │ converts to  │  │ extraction   │  │ motor driver │               │
-│  │ ROS Imu msgs │  │              │  │              │               │
-│  └──────┬───────┘  └──────┬───────┘  └──────▲───────┘               │
-│         │ publish         │ publish         │ subscribe              │
-│         ▼                 ▼                 │                        │
-│    /imu/data         /emg/raw          /motor/command                │
-│    /imu/quaternions  /emg/envelope     /motor/state                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐│
+│  │ rp_bridge    │  │ emg_node     │  │ motor_node   │  │ loadcell   ││
+│  │ _node        │  │ (C++ or Py)  │  │ (C++ or Rust)│  │ _node      ││
+│  │ (C++ or Py)  │  │              │  │              │  │ (C++ or Py)││
+│  │              │  │ EMG acquire  │  │ Jetson GPIO/ │  │            ││
+│  │ Reads Red    │  │ + envelope   │  │ serial to    │  │ ADC read + ││
+│  │ Pitaya TCP,  │  │ extraction   │  │ motor driver │  │ zero-force ││
+│  │ converts to  │  │              │  │              │  │ calibration││
+│  │ ROS Imu msgs │  │              │  │              │  │            ││
+│  │ + force data │  │              │  │              │  │            ││
+│  └──────┬───────┘  └──────┬───────┘  └──────▲───────┘  └─────┬──────┘│
+│         │ publish         │ publish         │ subscribe       │ pub   │
+│         ▼                 ▼                 │                 ▼       │
+│    /imu/data         /emg/raw          /motor/command   /loadcell/    │
+│    /imu/quaternions  /emg/envelope     /motor/state      force       │
 │         │                 │                 ▲                        │
 │  ┌──────┴─────────────────┴─────────────────┴────────────────────┐  │
 │  │                    ROS2 DDS Middleware                         │  │
@@ -279,22 +281,23 @@ ros2 run demo_nodes_py listener
 
 | Node           | Language    | Subscribes to                    | Publishes to                  | Function                                    |
 |----------------|-------------|----------------------------------|-------------------------------|---------------------------------------------|
-| `rp_imu_node`  | C++ or Py   | (Red Pitaya TCP hardware)        | `/imu/data`, `/imu/quaternions` | Bridge: RP TCP frames to ROS Imu messages |
-| `emg_node`     | C++ or Py   | (EMG hardware)                   | `/emg/raw`, `/emg/envelope`   | EMG acquisition + envelope extraction       |
-| `motor_node`   | C++ or Rust | `/motor/command`                 | `/motor/state`                | Jetson GPIO/serial to motor driver          |
-| `ik_node`      | C++         | `/imu/data`                      | `/joint_states`               | OpenSimRT inverse kinematics                |
-| `id_node`      | C++         | `/joint_states`                  | `/joint_torques`              | Inverse dynamics (if needed)                |
-| `vr_node`      | C++         | `/joint_states`, `/emg/envelope` | `/vr/events`                  | OpenXR visualization                        |
-| `gui_node`     | Rust        | all of the above                 | `/trigger`, `/motor/command`  | LabVIEW-style control panel                 |
-| `recorder_node`| Python      | all topics                       | (rosbag files)                | `ros2 bag record` for experiment data       |
+| `rp_bridge_node` | C++ or Py | (Red Pitaya TCP hardware)       | `/imu/data`, `/imu/quaternions`, `/loadcell/force` (if via RP AIN) | Bridge: RP TCP frames to ROS messages |
+| `emg_node`       | C++ or Py | (EMG hardware)                  | `/emg/raw`, `/emg/envelope`   | EMG acquisition + envelope extraction       |
+| `loadcell_node`  | C++ or Py | (ADC hardware)                  | `/loadcell/raw`, `/loadcell/force` | Force measurement + zero-force calibration (svc: `/loadcell/zero_force`) |
+| `motor_node`     | C++ or Rust | `/motor/command`              | `/motor/state`                | Jetson GPIO/serial to motor driver          |
+| `ik_node`        | C++       | `/imu/data`                     | `/joint_states`               | OpenSimRT inverse kinematics                |
+| `id_node`        | C++       | `/joint_states`, `/loadcell/force` | `/joint_torques`           | Inverse dynamics using joint angles + external forces |
+| `vr_node`        | C++       | `/joint_states`, `/emg/envelope` | `/vr/events`                 | OpenXR visualization                        |
+| `gui_node`       | Rust      | all of the above                | `/trigger`, `/motor/command`  | LabVIEW-style control panel (calls `/loadcell/zero_force` svc) |
+| `recorder_node`  | Python    | all topics                      | (rosbag files)                | `ros2 bag record` for experiment data       |
 
 ### Standard ROS2 Message Types Used
 
 ```
-sensor_msgs/msg/Imu              — IMU data (quaternion, angular vel, linear accel)
-sensor_msgs/msg/JointState       — joint names, positions, velocities, efforts
-geometry_msgs/msg/WrenchStamped  — forces and torques (for ID)
-std_msgs/msg/Float64MultiArray   — EMG envelope, muscle activations
+sensor_msgs/msg/Imu                 — IMU data (quaternion, angular vel, linear accel)
+sensor_msgs/msg/JointState          — joint names, positions, velocities, efforts
+geometry_msgs/msg/WrenchStamped     — forces and torques (for ID, load cell data)
+std_msgs/msg/Float64MultiArray      — EMG envelope, muscle activations
 trajectory_msgs/msg/JointTrajectory — motor commands (position/velocity targets)
 ```
 
@@ -308,6 +311,8 @@ trajectory_msgs/msg/JointTrajectory — motor commands (position/velocity target
 | `/motor/command`  | Reliable     | Motor commands must not be dropped               |
 | `/trigger`        | Reliable     | Trigger events must be delivered to all subscribers |
 | `/motor/state`    | Best-effort  | Feedback for display, not control-critical       |
+| `/loadcell/force` | Reliable     | Force data feeds ID node — must not be dropped   |
+| `/loadcell/raw`   | Best-effort  | High-rate stream for calibration and debugging    |
 
 ---
 
@@ -366,6 +371,155 @@ The Red Pitaya firmware still sends the same 22-byte TCP frame headers with
 Q15 int16 payloads. The `rp_imu_node` bridge speaks this protocol on the
 device side and publishes standard `sensor_msgs/Imu` messages on the ROS2 side.
 No firmware update required.
+
+---
+
+## Load Cells and Zero-Force Calibration
+
+### What Load Cells Are
+
+A load cell is a force sensor. It contains a metal element (strain gauge) that
+deforms slightly under force. That deformation changes the electrical resistance,
+which is measured as a tiny voltage difference (millivolts). An amplifier
+(typically an HX711 or NAU7802 chip) converts this millivolt signal into a
+digital reading the microcontroller can use.
+
+```
+Force applied
+     │
+     ▼
+┌──────────┐     ┌────────────┐     ┌─────────────┐
+│ Load cell │────→│ Amplifier  │────→│ MCU (ADC)   │
+│ (strain   │ mV  │ HX711 or   │ SPI │ Red Pitaya  │
+│  gauge)   │     │ NAU7802    │ I2C │ or ESP32    │
+└──────────┘     └────────────┘     └─────────────┘
+                  Gain: 64x-128x     Raw count →
+                  ~0.1 µV resolution  force in N
+```
+
+The raw reading from the ADC is just a number (e.g. 834752). It is not in
+newtons or kilograms. You must calibrate: apply a known weight, record the
+raw count, and compute a scale factor.
+
+### What Zero-Force (Tare) Means
+
+Before every experiment session, you "zero" the load cell. This means:
+
+1. Remove all load from the sensor (nothing touching it except its mounting)
+2. Read N samples (e.g. 50-100) and average them — this is the **offset**
+3. Store that offset
+4. All future readings subtract the offset before converting to force
+
+```
+Without zero:  raw reading = 834752  →  force = ??? (includes sensor drift, 
+                                         mounting stress, temperature offset)
+
+After zero:    offset = 834200 (captured at zero load)
+               raw reading = 834752
+               force = (834752 - 834200) × scale_factor = 5.52 N
+```
+
+Zero-force must be redone:
+- At the start of every session (thermal drift from power-on)
+- After physically moving or remounting the sensor
+- Optionally on operator command during an experiment
+
+### Hardware Connection Options
+
+The Red Pitaya already has analog input channels (`AIN_GAIN` command in
+firmware, `analog_input1`/`analog_input2` in the TCP data stream). Load
+cells with an amplifier board can connect directly to these analog inputs.
+
+```
+Option A: Through Red Pitaya analog inputs (simplest)
+  Load cell → HX711 amp → Red Pitaya AIN pins
+  Data arrives in the existing TCP frame alongside IMU channels
+  The bridge node extracts force channels and publishes to /loadcell/force
+
+Option B: Through a dedicated ESP32 node (if more channels needed)
+  Load cell → HX711 amp → ESP32 ADC/SPI → ESP-NOW → Jetson
+  Separate loadcell_node publishes to /loadcell/force
+
+Option C: Through Jetson ADC/I2C directly
+  Load cell → NAU7802 amp (I2C) → Jetson I2C bus
+  loadcell_node reads I2C directly and publishes to /loadcell/force
+```
+
+### ROS2 Integration
+
+#### Topics
+
+```
+/loadcell/raw           — Raw ADC counts (for debugging and calibration)
+/loadcell/force         — Calibrated force in newtons
+/loadcell/zero_status   — Whether the sensor has been zeroed this session
+```
+
+#### Zero-Force as a ROS2 Service
+
+Zero-force calibration is a one-shot command, not a continuous stream.
+This makes it a ROS2 **service** (request → response):
+
+```
+# srv/ZeroForce.srv
+string sensor_id          # which load cell to zero ("left_foot", "right_foot")
+int32 num_samples 100     # how many samples to average for the offset
+---
+bool success
+float64 offset            # the computed offset value
+string message            # "zeroed successfully" or error description
+```
+
+The GUI has a "ZERO" button. When pressed:
+1. GUI calls the `/loadcell/zero_force` service
+2. Load cell node reads 100 samples, averages them, stores the offset
+3. Returns success + offset value
+4. GUI updates the zero status LED from red to green
+5. All subsequent `/loadcell/force` messages subtract this offset
+
+#### Node Specification
+
+| Node             | Language  | Subscribes to     | Publishes to                        | Services                  |
+|------------------|-----------|--------------------|-------------------------------------|---------------------------|
+| `loadcell_node`  | C++ or Py | (hardware ADC)     | `/loadcell/raw`, `/loadcell/force`  | `/loadcell/zero_force`    |
+
+If load cells connect through Red Pitaya analog inputs, the `rp_bridge_node`
+handles both IMU and force data — it reads the combined TCP frame and publishes
+IMU channels to `/imu/data` and force channels to `/loadcell/force`.
+
+#### QoS
+
+| Topic              | QoS Policy  | Rationale                                      |
+|--------------------|-------------|------------------------------------------------|
+| `/loadcell/raw`    | Best-effort | High-rate stream for calibration display        |
+| `/loadcell/force`  | Reliable    | Force data used in ID calculations and control  |
+
+Force data for inverse dynamics (computing joint torques) must not be dropped,
+similar to how the Klein et al. paper required reliable delivery for pressure
+insole data feeding into their ID node.
+
+### Relationship to Inverse Dynamics
+
+The Klein et al. paper used pressure insoles to provide ground reaction forces
+for inverse dynamics. Load cells serve a similar role — they provide external
+force measurements that the ID node needs:
+
+```
+[ik_node] → /joint_states (joint angles q, q_dot, q_ddot)
+                    │
+                    ▼
+              [id_node] ← /loadcell/force (external forces)
+                    │
+                    ▼
+              /joint_torques (how much torque each joint produces)
+                    │
+                    ▼
+              [so_node] (optional: which muscles generate those torques)
+```
+
+Without external force data (load cells or insoles), the ID node cannot compute
+joint torques — it can only do kinematics (positions and angles). Load cells
+enable the full biomechanical chain: IK → ID → static optimization.
 
 ---
 
