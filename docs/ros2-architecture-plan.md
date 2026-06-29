@@ -374,7 +374,7 @@ No firmware update required.
 
 ---
 
-## Load Cells and Zero-Force Calibration
+## Load Cells and Zero-Force Control
 
 ### What Load Cells Are
 
@@ -401,28 +401,73 @@ The raw reading from the ADC is just a number (e.g. 834752). It is not in
 newtons or kilograms. You must calibrate: apply a known weight, record the
 raw count, and compute a scale factor.
 
-### What Zero-Force (Tare) Means
+### What Zero-Force Control Is
 
-Before every experiment session, you "zero" the load cell. This means:
+Zero-force control is a robot control mode where the robot follows the human's
+movement. When a person pushes or guides the robot, the load cell senses the
+applied force, and the controller drives the motor to move in that direction
+until the measured force returns to zero. The result: the robot feels weightless
+and compliant, as if it is moving on its own to follow the person's intent.
 
-1. Remove all load from the sensor (nothing touching it except its mounting)
-2. Read N samples (e.g. 50-100) and average them — this is the **offset**
-3. Store that offset
-4. All future readings subtract the offset before converting to force
+This is NOT the same as zeroing/taring a scale. "Zero-force" refers to the
+control objective: keep the force reading at zero by moving the robot.
 
 ```
-Without zero:  raw reading = 834752  →  force = ??? (includes sensor drift, 
-                                         mounting stress, temperature offset)
+Normal robot (position control):
+  Command: "go to 90 degrees"
+  Robot moves to 90° regardless of the person
+  If the person pushes, the robot resists
 
-After zero:    offset = 834200 (captured at zero load)
-               raw reading = 834752
-               force = (834752 - 834200) × scale_factor = 5.52 N
+Zero-force control:
+  Command: "keep external force at zero"
+  Person pushes right → load cell reads 5N right
+  Controller: "force is not zero → move motor right to reduce it"
+  Motor moves right → load cell reads 0N → motor stops
+  Person feels: the robot follows my hand
 ```
 
-Zero-force must be redone:
-- At the start of every session (thermal drift from power-on)
-- After physically moving or remounting the sensor
-- Optionally on operator command during an experiment
+#### The control loop (1 kHz):
+
+```
+Every 1 ms:
+  1. Read load cell → F_measured (e.g. 5N to the right)
+  2. Compute error: F_error = 0 - F_measured = -5N
+  3. Compute motor command: torque = Kp × F_error
+     (Kp = proportional gain, tuned for responsiveness vs stability)
+  4. Send torque command to motor driver
+  5. Motor moves → robot arm shifts right → force on load cell drops
+  6. Next cycle: F_measured is now 2N → motor keeps moving
+  7. Eventually: F_measured ≈ 0 → motor holds position
+  8. Person pushes again → cycle restarts
+```
+
+#### Why this matters for rehabilitation / exoskeletons:
+
+```
+Patient tries to move their arm
+    │
+    ▼
+Load cell detects the direction and magnitude of intent
+    │
+    ▼
+Robot assists in that direction (amplifies weak patient force)
+    │
+    ▼
+Patient experiences successful movement → motor learning
+Meanwhile: IMU measures joint angles → OpenSim IK analyzes biomechanics
+```
+
+### Tare Calibration (Separate from Zero-Force Control)
+
+Before using the load cell in any mode, you must also "tare" it — capture the
+baseline reading with no external load so that the weight of the robot arm
+itself, mounting hardware, and sensor drift are subtracted out.
+
+1. Move robot to starting position, no person touching it
+2. Read N samples (e.g. 100) and average — this is the **tare offset**
+3. All future force readings subtract this offset
+
+This is done once at session start, via a ROS2 service call from the GUI.
 
 ### Hardware Connection Options
 
@@ -431,57 +476,82 @@ firmware, `analog_input1`/`analog_input2` in the TCP data stream). Load
 cells with an amplifier board can connect directly to these analog inputs.
 
 ```
-Option A: Through Red Pitaya analog inputs (simplest)
+Option A: Through Red Pitaya analog inputs
   Load cell → HX711 amp → Red Pitaya AIN pins
   Data arrives in the existing TCP frame alongside IMU channels
   The bridge node extracts force channels and publishes to /loadcell/force
 
-Option B: Through a dedicated ESP32 node (if more channels needed)
+Option B: Through a dedicated ESP32 node
   Load cell → HX711 amp → ESP32 ADC/SPI → ESP-NOW → Jetson
   Separate loadcell_node publishes to /loadcell/force
 
-Option C: Through Jetson ADC/I2C directly
+Option C: Through Jetson ADC/I2C directly (best for zero-force control)
   Load cell → NAU7802 amp (I2C) → Jetson I2C bus
-  loadcell_node reads I2C directly and publishes to /loadcell/force
+  loadcell_node reads I2C directly — lowest latency for the control loop
 ```
 
-### ROS2 Integration
+For zero-force control, Option C is preferred because the 1 kHz control loop
+needs the lowest possible latency between force reading and motor command. Going
+through the Red Pitaya TCP link (Option A) adds network delay that makes the
+control loop feel sluggish.
+
+### ROS2 Integration — Two-Layer Architecture
+
+The 1 kHz zero-force control loop is too fast for ROS2 DDS (~18 ms overhead
+per hop). The solution: run the fast control loop outside ROS2 with direct
+hardware access, and publish downsampled data to ROS2 for monitoring/recording.
+
+```
+FAST LOOP (1 kHz, outside ROS2, direct hardware):
+  Load cell ──ADC──→ [control law] ──PWM/Serial──→ Motor
+                      runs every 1ms
+                      reads force, computes torque, drives motor
+                      NO ROS2 in this path
+
+SLOW LOOP (100 Hz, ROS2, monitoring/recording):
+  Fast loop downsamples to 100 Hz and publishes:
+    /loadcell/force    → GUI shows live force readings
+    /motor/state       → GUI shows motor position/velocity
+  
+  GUI subscribes and displays:
+    force gauges, waveform charts, motor position indicators
+  
+  ros2 bag records everything for later analysis
+```
 
 #### Topics
 
 ```
 /loadcell/raw           — Raw ADC counts (for debugging and calibration)
-/loadcell/force         — Calibrated force in newtons
-/loadcell/zero_status   — Whether the sensor has been zeroed this session
+/loadcell/force         — Calibrated force in newtons (100 Hz, from fast loop)
+/loadcell/zero_status   — Whether tare calibration has been done this session
+/motor/state            — Current motor position, velocity, applied torque
 ```
 
-#### Zero-Force as a ROS2 Service
-
-Zero-force calibration is a one-shot command, not a continuous stream.
-This makes it a ROS2 **service** (request → response):
+#### Tare as a ROS2 Service
 
 ```
-# srv/ZeroForce.srv
-string sensor_id          # which load cell to zero ("left_foot", "right_foot")
+# srv/TareLoadcell.srv
+string sensor_id          # which load cell to tare
 int32 num_samples 100     # how many samples to average for the offset
 ---
 bool success
-float64 offset            # the computed offset value
-string message            # "zeroed successfully" or error description
+float64 offset            # the computed tare offset value
+string message            # "tare complete" or error description
 ```
 
-The GUI has a "ZERO" button. When pressed:
-1. GUI calls the `/loadcell/zero_force` service
+The GUI has a "TARE" button. When pressed:
+1. GUI calls the `/loadcell/tare` service
 2. Load cell node reads 100 samples, averages them, stores the offset
 3. Returns success + offset value
-4. GUI updates the zero status LED from red to green
+4. GUI updates the tare status LED from red to green
 5. All subsequent `/loadcell/force` messages subtract this offset
 
 #### Node Specification
 
-| Node             | Language  | Subscribes to     | Publishes to                        | Services                  |
-|------------------|-----------|--------------------|-------------------------------------|---------------------------|
-| `loadcell_node`  | C++ or Py | (hardware ADC)     | `/loadcell/raw`, `/loadcell/force`  | `/loadcell/zero_force`    |
+| Node             | Language  | Subscribes to     | Publishes to                        | Services               |
+|------------------|-----------|--------------------|-------------------------------------|------------------------|
+| `loadcell_node`  | C++ or Py | (hardware ADC)     | `/loadcell/raw`, `/loadcell/force`  | `/loadcell/tare`       |
 
 If load cells connect through Red Pitaya analog inputs, the `rp_bridge_node`
 handles both IMU and force data — it reads the combined TCP frame and publishes
@@ -498,28 +568,33 @@ Force data for inverse dynamics (computing joint torques) must not be dropped,
 similar to how the Klein et al. paper required reliable delivery for pressure
 insole data feeding into their ID node.
 
-### Relationship to Inverse Dynamics
+### Relationship to the Full Pipeline
 
-The Klein et al. paper used pressure insoles to provide ground reaction forces
-for inverse dynamics. Load cells serve a similar role — they provide external
-force measurements that the ID node needs:
+Load cells serve two purposes in this system:
+
+1. **Zero-force control** (real-time, fast loop): Directly drives the motor to
+   follow the person's movement. This is the primary use case.
+
+2. **Inverse dynamics** (analysis, slow loop): Provides external force
+   measurements that the ID node needs to compute joint torques, same role as
+   pressure insoles in the Klein et al. paper.
 
 ```
-[ik_node] → /joint_states (joint angles q, q_dot, q_ddot)
-                    │
-                    ▼
-              [id_node] ← /loadcell/force (external forces)
-                    │
-                    ▼
-              /joint_torques (how much torque each joint produces)
-                    │
-                    ▼
-              [so_node] (optional: which muscles generate those torques)
-```
+FAST PATH (zero-force control, 1 kHz):
+  Load cell → control law → motor → robot follows person
 
-Without external force data (load cells or insoles), the ID node cannot compute
-joint torques — it can only do kinematics (positions and angles). Load cells
-enable the full biomechanical chain: IK → ID → static optimization.
+ANALYSIS PATH (biomechanics, 100 Hz via ROS2):
+  [ik_node] → /joint_states (joint angles q, q_dot, q_ddot)
+                      │
+                      ▼
+                [id_node] ← /loadcell/force (external forces)
+                      │
+                      ▼
+                /joint_torques (how much torque each joint produces)
+                      │
+                      ▼
+                [so_node] (optional: which muscles generate those torques)
+```
 
 ---
 
