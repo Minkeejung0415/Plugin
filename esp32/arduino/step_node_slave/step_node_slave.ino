@@ -279,6 +279,7 @@ static bool              g_espnow_sync_received   = false;
 static uint32_t          g_espnow_last_seq        = 0;
 static volatile bool     g_espnow_rec_start_pending = false;
 static volatile bool     g_espnow_rec_stop_pending  = false;
+static char              g_espnow_requested_session[33] = {};
 #endif
 static char g_sd_path[48] = "/step_session.bin";
 static char g_rec_session_id[33] = "none";
@@ -526,13 +527,18 @@ typedef struct {
 #define CMD_STOP_STREAM  0x02
 #define CMD_REC_START    0x03
 #define CMD_REC_STOP     0x04
+#define CMD_SESSION_ID_LEN 32
 #define SLAVE_STATUS_MAGIC 0x5A
 #define SLAVE_STATUS_VERSION 1
 #define SLAVE_STATUS_INTERVAL_MS 200UL
 #define SLAVE_STATIC_IP_OCTET 0
 
 #pragma pack(push, 1)
-struct CmdPacket { uint8_t magic; uint8_t cmd; };
+struct CmdPacket {
+  uint8_t magic;
+  uint8_t cmd;
+  char session_id[CMD_SESSION_ID_LEN + 1];
+};
 struct SlaveStatusPacket {
   uint8_t magic;
   uint8_t version;
@@ -569,7 +575,7 @@ struct SlaveStatusPacket {
 };
 #pragma pack(pop)
 
-static bool sdRecordStart(const char *);
+static bool sdRecordStart(const char *, const char *requested_session = nullptr);
 static void sdRecordStop();
 static uint32_t g_last_slave_status_ms = 0;
 
@@ -577,12 +583,23 @@ static uint32_t g_last_slave_status_ms = 0;
 void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   (void)info;
   if (NODE_IS_MASTER) return;
-  // Command relay from master (2 bytes)
-  if (len == 2 && data[0] == CMD_MAGIC) {
-    switch (data[1]) {
+  // Command relay from master. Old packets are 2 bytes; newer REC_START
+  // packets include the master's requested wall-clock session id.
+  if ((len == 2 || len == (int)sizeof(CmdPacket)) && data[0] == CMD_MAGIC) {
+    const CmdPacket *cmd = len == (int)sizeof(CmdPacket) ? (const CmdPacket *)data : nullptr;
+    const uint8_t command = cmd ? cmd->cmd : data[1];
+    switch (command) {
       case CMD_START_STREAM: streaming = true; break;
       case CMD_STOP_STREAM:  streaming = false; break;
-      case CMD_REC_START:    g_espnow_rec_start_pending = true; break;
+      case CMD_REC_START:
+        if (cmd && cmd->session_id[0]) {
+          strncpy(g_espnow_requested_session, cmd->session_id, sizeof(g_espnow_requested_session) - 1);
+          g_espnow_requested_session[sizeof(g_espnow_requested_session) - 1] = '\0';
+        } else {
+          g_espnow_requested_session[0] = '\0';
+        }
+        g_espnow_rec_start_pending = true;
+        break;
       case CMD_REC_STOP:     g_espnow_rec_stop_pending  = true; break;
     }
     return;
@@ -1116,7 +1133,12 @@ static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
 #endif
 }
 
-static void makeSessionId() {
+static void makeSessionId(const char *requested_session = nullptr) {
+  if (requested_session && requested_session[0]) {
+    strncpy(g_rec_session_id, requested_session, sizeof(g_rec_session_id) - 1);
+    g_rec_session_id[sizeof(g_rec_session_id) - 1] = '\0';
+    return;
+  }
   snprintf(g_rec_session_id, sizeof(g_rec_session_id), "%08lx%08lx",
            (unsigned long)millis(), (unsigned long)seq);
 }
@@ -1263,7 +1285,7 @@ static bool sdEnsureReady() {
 #endif
 }
 
-static bool sdRecordStart(const char *path_or_null) {
+static bool sdRecordStart(const char *path_or_null, const char *requested_session) {
 #if ENABLE_SD
   if (!sdEnsureReady()) {
     g_sd_begin_errors++;
@@ -1283,7 +1305,7 @@ static bool sdRecordStart(const char *path_or_null) {
     if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   }
 
-  makeSessionId();
+  makeSessionId(requested_session);
   if (path_or_null && path_or_null[0]) {
     strncpy(g_sd_path, path_or_null, sizeof(g_sd_path) - 1);
     g_sd_path[sizeof(g_sd_path) - 1] = '\0';
@@ -1585,13 +1607,16 @@ static void handleRecLine(const String &line) {
   }
 
   if (line.startsWith("REC START")) {
+    char requested_session[sizeof(g_rec_session_id)] = {};
+    recFieldValue(line, "requested_session", requested_session, sizeof(requested_session));
+
     if (g_sd_recording) {
       char err[128];
       snprintf(err, sizeof(err), "REC ERR code=already_recording session_id=%s retryable=false detail=active\n", g_rec_session_id);
       replyToHost(err);
       return;
     }
-    bool ok = sdRecordStart(nullptr);
+    bool ok = sdRecordStart(nullptr, requested_session);
     if (!ok) {
       replyToHost("REC ERR code=sd_not_ready retryable=true detail=start_failed\n");
       return;
@@ -2210,7 +2235,7 @@ void loop() {
     Serial.println("[RELAY] got REC_START from master");
     relayDebugAppend("got_rec_start");
     if (!g_sd_recording) {
-      const bool ok = sdRecordStart(nullptr);
+      const bool ok = sdRecordStart(nullptr, g_espnow_requested_session);
       Serial.printf("[RELAY] sdRecordStart %s session=%s path=%s ready=%d\n",
                     ok ? "OK" : "FAILED",
                     g_rec_session_id,

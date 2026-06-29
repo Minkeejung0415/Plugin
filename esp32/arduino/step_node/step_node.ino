@@ -528,13 +528,18 @@ typedef struct {
 #define CMD_STOP_STREAM  0x02
 #define CMD_REC_START    0x03
 #define CMD_REC_STOP     0x04
+#define CMD_SESSION_ID_LEN 32
 #define SLAVE_STATUS_MAGIC 0x5A
 #define SLAVE_STATUS_VERSION 1
 #define MAX_SLAVE_STATUS_SLOTS 6
 #define SLAVE_STATUS_STALE_MS 5000UL
 
 #pragma pack(push, 1)
-struct CmdPacket { uint8_t magic; uint8_t cmd; };
+struct CmdPacket {
+  uint8_t magic;
+  uint8_t cmd;
+  char session_id[CMD_SESSION_ID_LEN + 1];
+};
 struct SlaveStatusPacket {
   uint8_t magic;
   uint8_t version;
@@ -978,7 +983,12 @@ static void espNowRelayCmd(uint8_t cmd) {
     Serial.printf("[RELAY] skip %s: wifi_up=0\n", relayCmdName(cmd));
     return;
   }
-  CmdPacket pkt = {CMD_MAGIC, cmd};
+  CmdPacket pkt = {};
+  pkt.magic = CMD_MAGIC;
+  pkt.cmd = cmd;
+  if (cmd == CMD_REC_START && strcmp(g_rec_session_id, "none") != 0) {
+    strncpy(pkt.session_id, g_rec_session_id, sizeof(pkt.session_id) - 1);
+  }
   uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   const bool record_cmd = (cmd == CMD_REC_START || cmd == CMD_REC_STOP);
   const int attempts = record_cmd ? 5 : 1;
@@ -1144,7 +1154,12 @@ static uint32_t checksumSdFile(const char *path, uint64_t *size_out) {
 #endif
 }
 
-static void makeSessionId() {
+static void makeSessionId(const char *requested_session = nullptr) {
+  if (requested_session && requested_session[0]) {
+    strncpy(g_rec_session_id, requested_session, sizeof(g_rec_session_id) - 1);
+    g_rec_session_id[sizeof(g_rec_session_id) - 1] = '\0';
+    return;
+  }
   snprintf(g_rec_session_id, sizeof(g_rec_session_id), "%08lx%08lx",
            (unsigned long)millis(), (unsigned long)seq);
 }
@@ -1291,7 +1306,7 @@ static bool sdEnsureReady() {
 #endif
 }
 
-static bool sdRecordStart(const char *path_or_null) {
+static bool sdRecordStart(const char *path_or_null, const char *requested_session = nullptr) {
 #if ENABLE_SD
   if (!sdEnsureReady()) {
     g_sd_begin_errors++;
@@ -1311,7 +1326,7 @@ static bool sdRecordStart(const char *path_or_null) {
     if (g_sd_mutex) xSemaphoreGive(g_sd_mutex);
   }
 
-  makeSessionId();
+  makeSessionId(requested_session);
   if (path_or_null && path_or_null[0]) {
     strncpy(g_sd_path, path_or_null, sizeof(g_sd_path) - 1);
     g_sd_path[sizeof(g_sd_path) - 1] = '\0';
@@ -1698,6 +1713,9 @@ static void handleRecLine(const String &line) {
   }
 
   if (line.startsWith("REC START")) {
+    char requested_session[sizeof(g_rec_session_id)] = {};
+    recFieldValue(line, "requested_session", requested_session, sizeof(requested_session));
+
     if (g_sd_recording || g_relay_only_recording) {
       // Idempotent recovery: if the plugin reconnects or retries while the
       // master is already in relay-only record state, rebroadcast REC_START.
@@ -1709,12 +1727,12 @@ static void handleRecLine(const String &line) {
       replyToHost(err);
       return;
     }
-    bool ok = sdRecordStart(nullptr);
+    bool ok = sdRecordStart(nullptr, requested_session);
     if (!ok) {
       // No SD card on master — relay-only mode: still trigger slave recording.
       // sdRecordStart returns early (before makeSessionId) when SD is not ready,
       // so we must generate the session ID here.
-      makeSessionId();
+      makeSessionId(requested_session);
       g_relay_only_recording = true;
       strncpy(g_rec_state, "recording", sizeof(g_rec_state) - 1);
       strncpy(g_last_rec_error, "none", sizeof(g_last_rec_error) - 1);

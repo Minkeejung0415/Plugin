@@ -276,7 +276,7 @@ called right after the REDPITAYA detection handshake succeeds.
 2. Start the bridge (USB path) or join the Wi-Fi network.
 3. In Open Ephys: detect the board (finds `127.0.0.1` or Node IP) → press **Play**.
 4. Press **RECORD** (first press):
-   - Plugin sends `REC START sample_rate_hz=<hz> channels=<n> format=sd-bin sd_required=true`
+   - Plugin sends `REC START sample_rate_hz=<hz> channels=<n> format=sd-bin sd_required=true requested_session=<YYYYMMDD_HHMMSS>`
    - Status bar: "ESP32 SD recording: command sent — waiting for confirmation"
    - On `REC STARTED session_id=<id>`: status → "ESP32 SD recording confirmed (session=...)"
 5. Conduct experiment.
@@ -292,7 +292,7 @@ called right after the REDPITAYA detection handshake succeeds.
      - Status → "ESP32 SD retrieving: <offset> / <total> bytes..."
      - Computes whole-file CRC32; compares with firmware's checksum
      - Status → "ESP32 SD: transfer checksum passed — running analyzer..."
-     - Attempts `analyze_sample_rate.py --format sd-bin session_data.bin`
+     - Attempts `analyze_sample_rate.py --format sd-bin step_<session_id>.bin`
      - Status → "Recording saved and verified (session=...)"
 7. Session files are in:
    `C:\Users\justi\Documents\Arduino\ESP32-S3-1\results\<sessionId>_<timestamp>\`
@@ -304,8 +304,8 @@ Each session produces a directory:
 ```
 results\
   <sessionId>_<timestamp_ms>\
-    session_data.bin          SD binary data (analyzer-compatible)
-    session_data.bin.tmp      staging file during transfer (deleted on success)
+    step_<session_id>.bin     SD binary data (analyzer-compatible)
+    step_<session_id>.bin.tmp staging file during transfer (deleted on success)
     metadata.json             session_id, protocol, file_size, file_checksum, timestamp_ms
     transfer_log.json         per-chunk CRC, byte offsets, whole_file_crc_match
     analyzer_handoff.json     {"command": "python esp32/host/analyze_sample_rate.py ...", ...}
@@ -315,7 +315,7 @@ results\
 Verify with:
 ```powershell
 python esp32\host\analyze_sample_rate.py --format sd-bin `
-  "C:\Users\justi\Documents\Arduino\ESP32-S3-1\results\<dir>\session_data.bin"
+  "C:\Users\justi\Documents\Arduino\ESP32-S3-1\results\<dir>\step_<session_id>.bin"
 ```
 
 ### 6.4 Retry workflow (transfer failure)

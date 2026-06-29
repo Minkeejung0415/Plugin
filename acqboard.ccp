@@ -2576,10 +2576,12 @@ bool AcqBoardRedPitaya::sendEsp32RecStart()
     const int hz = jmax (1, (int) settings.boardSampleRate);
     const int ch = numAdcChannels;
 
-    char msg[128];
+    const String requestedSession = Time::getCurrentTime().formatted ("%Y%m%d_%H%M%S");
+
+    char msg[192];
     snprintf (msg, sizeof (msg),
-              "REC START sample_rate_hz=%d channels=%d format=sd-bin sd_required=true\n",
-              hz, ch);
+              "REC START sample_rate_hz=%d channels=%d format=sd-bin sd_required=true requested_session=%s\n",
+              hz, ch, requestedSession.toRawUTF8());
 
     if (commandSocket->write (msg, (int) strlen (msg)) <= 0)
     {
@@ -2613,7 +2615,7 @@ bool AcqBoardRedPitaya::sendEsp32RecStart()
     {
         esp32SessionId = parseRecField (resp, "session_id");
         if (esp32SessionId.isEmpty())
-            esp32SessionId = "session_" + String (Time::currentTimeMillis());
+            esp32SessionId = requestedSession;
 
         lastRecordingPath = "esp32://sd/" + esp32SessionId;
         lastRecordingCsvPath = {};
@@ -3031,8 +3033,9 @@ public:
 
         board_.esp32LocalResultDir = resultDir;
 
-        const String tmpPath  = resultDir + "\\session_data.bin.tmp";
-        const String binPath  = resultDir + "\\session_data.bin";
+        const String binFileName = "step_" + sessionId + ".bin";
+        const String tmpPath  = resultDir + "\\" + binFileName + ".tmp";
+        const String binPath  = resultDir + "\\" + binFileName;
         const String metaPath = resultDir + "\\metadata.json";
         const String logPath  = resultDir + "\\transfer_log.json";
 
@@ -3365,7 +3368,7 @@ public:
         File binF (binPath);
         if (! tmpF.moveFileTo (binF))
         {
-            setStatus ("ESP32 SD: could not rename temp file to session_data.bin");
+            setStatus ("ESP32 SD: could not rename temp file to " + binFileName);
             setState (RecState::Failed);
             return;
         }
@@ -3394,7 +3397,7 @@ public:
         // -----------------------------------------------------------------------
         const String handoffPath  = resultDir + "\\analyzer_handoff.json";
         const String analyzerPath = resultDir + "\\analyzer_result.json";
-        const String analyzerCmd  = "python esp32/host/analyze_sample_rate.py --format sd-bin session_data.bin";
+        const String analyzerCmd  = "python esp32/host/analyze_sample_rate.py --format sd-bin " + binFileName;
 
         {
             File handoffFile (handoffPath);
