@@ -403,27 +403,47 @@ raw count, and compute a scale factor.
 
 ### What Zero-Force Control Is
 
-Zero-force control is a robot control mode where the robot follows the human's
-movement. When a person pushes or guides the robot, the load cell senses the
-applied force, and the controller drives the motor to move in that direction
-until the measured force returns to zero. The result: the robot feels weightless
-and compliant, as if it is moving on its own to follow the person's intent.
+Zero-force control is a robot control mode where the robot replicates human
+input. The therapist manipulates a load cell (the primary control input), and
+the robot drives its motors to mirror that force/direction on the patient side.
 
-This is NOT the same as zeroing/taring a scale. "Zero-force" refers to the
-control objective: keep the force reading at zero by moving the robot.
+All control inputs come from the **therapist side**:
 
 ```
-Normal robot (position control):
-  Command: "go to 90 degrees"
-  Robot moves to 90° regardless of the person
-  If the person pushes, the robot resists
+THERAPIST SIDE (all inputs):             PATIENT SIDE (output):
 
-Zero-force control:
-  Command: "keep external force at zero"
-  Person pushes right → load cell reads 5N right
-  Controller: "force is not zero → move motor right to reduce it"
-  Motor moves right → load cell reads 0N → motor stops
-  Person feels: the robot follows my hand
+  Load cell (PRIMARY)                     Robot + motor
+  → force direction and magnitude         → moves the patient's limb
+  → "how much and which way to move"
+
+  IMU (supplementary)                     Patient
+  → therapist's arm/hand posture          → receives assisted movement
+  → refines the motion trajectory
+
+  EMG (supplementary)
+  → therapist's muscle activation
+  → detects fatigue, adjusts sensitivity
+```
+
+The load cell is the main control input — like a force-sensitive joystick.
+When the therapist pushes the load cell to the right with 5N, the robot moves
+the patient's limb to the right proportionally. IMU and EMG from the therapist
+provide supplementary context: IMU tracks the therapist's arm posture for more
+nuanced motion mapping, and EMG monitors whether the therapist is fatiguing
+(which could affect control precision).
+
+```
+Therapist pushes load cell right (5N)
+     │
+     ├── Load cell: 5N to the right (primary command)
+     ├── IMU: therapist's wrist is at 30° flexion (motion context)
+     └── EMG: therapist's forearm at 40% activation (fatigue monitor)
+     │
+     ▼
+  Jetson computes motor command
+     │
+     ▼
+  Robot moves patient's limb to the right
 ```
 
 #### The control loop (1 kHz):
@@ -431,30 +451,31 @@ Zero-force control:
 ```
 Every 1 ms:
   1. Read load cell → F_measured (e.g. 5N to the right)
-  2. Compute error: F_error = 0 - F_measured = -5N
-  3. Compute motor command: torque = Kp × F_error
-     (Kp = proportional gain, tuned for responsiveness vs stability)
-  4. Send torque command to motor driver
-  5. Motor moves → robot arm shifts right → force on load cell drops
-  6. Next cycle: F_measured is now 2N → motor keeps moving
-  7. Eventually: F_measured ≈ 0 → motor holds position
-  8. Person pushes again → cycle restarts
+  2. Read IMU → therapist pose (supplementary)
+  3. Compute motor command from combined inputs:
+     - Load cell force sets direction and magnitude (primary)
+     - IMU refines trajectory mapping (supplementary)
+     - EMG adjusts gain if therapist is fatiguing (supplementary)
+  4. Send torque/position command to motor driver
+  5. Motor moves patient's limb accordingly
+  6. Repeat
 ```
 
-#### Why this matters for rehabilitation / exoskeletons:
+#### Rehabilitation scenario:
 
 ```
-Patient tries to move their arm
-    │
-    ▼
-Load cell detects the direction and magnitude of intent
-    │
-    ▼
-Robot assists in that direction (amplifies weak patient force)
-    │
-    ▼
-Patient experiences successful movement → motor learning
-Meanwhile: IMU measures joint angles → OpenSim IK analyzes biomechanics
+Therapist manipulates load cell to guide movement pattern
+     │
+     ├── Load cell: "move patient's elbow 30° flexion, 2N force"
+     ├── IMU: confirms therapist's intended motion arc
+     └── EMG: therapist is not fatigued, full sensitivity
+     │
+     ▼
+  Jetson → motor command → robot moves patient's arm
+     │
+     ▼
+  Meanwhile: patient-side sensors (if any) record the resulting
+  joint angles and forces for OpenSim biomechanical analysis
 ```
 
 ### Tare Calibration (Separate from Zero-Force Control)
@@ -504,13 +525,19 @@ hardware access, and publish downsampled data to ROS2 for monitoring/recording.
 ```
 FAST LOOP (1 kHz, outside ROS2, direct hardware):
   Load cell ──ADC──→ [control law] ──PWM/Serial──→ Motor
+  IMU ──SPI/I2C──→       │
+  EMG ──ADC──→           │
                       runs every 1ms
-                      reads force, computes torque, drives motor
+                      load cell = primary input
+                      IMU/EMG = supplementary inputs
+                      computes motor command, drives motor on patient side
                       NO ROS2 in this path
 
 SLOW LOOP (100 Hz, ROS2, monitoring/recording):
   Fast loop downsamples to 100 Hz and publishes:
     /loadcell/force    → GUI shows live force readings
+    /imu/data          → GUI shows therapist arm posture
+    /emg/envelope      → GUI shows therapist muscle activation
     /motor/state       → GUI shows motor position/velocity
   
   GUI subscribes and displays:
@@ -580,20 +607,21 @@ Load cells serve two purposes in this system:
    pressure insoles in the Klein et al. paper.
 
 ```
-FAST PATH (zero-force control, 1 kHz):
-  Load cell → control law → motor → robot follows person
+FAST PATH (motor control, 1 kHz):
+  Load cell (primary) + IMU/EMG (supplementary) → control law → motor
+  → robot moves patient's limb
 
 ANALYSIS PATH (biomechanics, 100 Hz via ROS2):
-  [ik_node] → /joint_states (joint angles q, q_dot, q_ddot)
+  [ik_node] → /joint_states (therapist joint angles from IMU)
                       │
                       ▼
-                [id_node] ← /loadcell/force (external forces)
+                [id_node] ← /loadcell/force (therapist applied forces)
                       │
                       ▼
-                /joint_torques (how much torque each joint produces)
+                /joint_torques (force/motion analysis)
                       │
                       ▼
-                [so_node] (optional: which muscles generate those torques)
+                [so_node] (optional: therapist muscle activation from EMG)
 ```
 
 ---
