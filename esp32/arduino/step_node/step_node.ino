@@ -32,6 +32,8 @@
 
 #define ENABLE_ESPNOW true
 #define ESPNOW_WIFI_CHANNEL 6   // Must match WIFI_AP_CHANNEL so slaves on STEP_ESP32 AP receive sync
+#define ESPNOW_UNICAST true     // Use unicast to known slave MACs instead of broadcast (saves ~2-3 mA per TX burst)
+#define BATTERY_CPU_MHZ 80      // Drop from 240 MHz default; 80 MHz is plenty for 100 Hz IMU + ESP-NOW
 
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -53,7 +55,7 @@ extern "C" {
 
 struct SlaveStatusPacket;
 
-#define FIRMWARE_VERSION "1.7.0"
+#define FIRMWARE_VERSION "1.8.0"
 #define WIFI_HOSTNAME "step-esp32"
 #define BOOT_CSV_DELAY_MS 5000
 #define REPEAT_STATUS_SEC 10
@@ -578,6 +580,7 @@ struct SlaveStatusPacket {
 
 struct SlaveStatusSlot {
   bool used;
+  bool peer_registered;
   uint8_t mac[6];
   uint32_t last_seen_ms;
   SlaveStatusPacket status;
@@ -596,6 +599,24 @@ static const char *relayCmdName(uint8_t cmd) {
 }
 
 #if ENABLE_ESPNOW
+static void maybeRegisterUnicastPeer(SlaveStatusSlot *s) {
+#if ESPNOW_UNICAST
+  if (s->peer_registered) return;
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, s->mac, 6);
+  peer.channel = ESPNOW_WIFI_CHANNEL;
+  peer.ifidx = wifi_soft_ap ? WIFI_IF_AP : WIFI_IF_STA;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) == ESP_OK) {
+    s->peer_registered = true;
+    Serial.printf("[ESPNOW] registered unicast peer %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  s->mac[0], s->mac[1], s->mac[2], s->mac[3], s->mac[4], s->mac[5]);
+  }
+#else
+  (void)s;
+#endif
+}
+
 static void rememberSlaveStatus(const esp_now_recv_info_t *info, const SlaveStatusPacket *status) {
   if (!info || !info->src_addr || !status) return;
 
@@ -615,6 +636,7 @@ static void rememberSlaveStatus(const esp_now_recv_info_t *info, const SlaveStat
   memcpy(g_slave_status[slot].mac, info->src_addr, sizeof(g_slave_status[slot].mac));
   g_slave_status[slot].last_seen_ms = millis();
   g_slave_status[slot].status = *status;
+  maybeRegisterUnicastPeer(&g_slave_status[slot]);
 }
 
 static int slaveStatusCount() {
@@ -967,11 +989,30 @@ static void fillOeHeader(OeHeader *hdr) {
 }
 
 #if ENABLE_ESPNOW
+static void espNowSendToSlaves(const uint8_t *data, size_t len) {
+#if ESPNOW_UNICAST
+  bool sent_any = false;
+  const uint32_t now_ms = millis();
+  for (int i = 0; i < MAX_SLAVE_STATUS_SLOTS; i++) {
+    if (!g_slave_status[i].used || !g_slave_status[i].peer_registered) continue;
+    if ((uint32_t)(now_ms - g_slave_status[i].last_seen_ms) >= SLAVE_STATUS_STALE_MS) continue;
+    esp_now_send(g_slave_status[i].mac, data, len);
+    sent_any = true;
+  }
+  if (!sent_any) {
+    uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_send(bcast, data, len);
+  }
+#else
+  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  esp_now_send(bcast, data, len);
+#endif
+}
+
 static void sendEspNowSync() {
   if (!NODE_IS_MASTER || !wifi_up) return;
   SyncPacket pkt = {seq, (int64_t)esp_timer_get_time()};
-  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  esp_now_send(bcast, (uint8_t *)&pkt, sizeof(pkt));
+  espNowSendToSlaves((uint8_t *)&pkt, sizeof(pkt));
 }
 #else
 static void sendEspNowSync() {}
@@ -989,16 +1030,14 @@ static void espNowRelayCmd(uint8_t cmd) {
   if (cmd == CMD_REC_START && strcmp(g_rec_session_id, "none") != 0) {
     strncpy(pkt.session_id, g_rec_session_id, sizeof(pkt.session_id) - 1);
   }
-  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   const bool record_cmd = (cmd == CMD_REC_START || cmd == CMD_REC_STOP);
   const int attempts = record_cmd ? 5 : 1;
-  esp_err_t last_err = ESP_OK;
   for (int i = 0; i < attempts; i++) {
-    last_err = esp_now_send(bcast, (uint8_t *)&pkt, sizeof(pkt));
+    espNowSendToSlaves((uint8_t *)&pkt, sizeof(pkt));
     if (record_cmd && i + 1 < attempts) delay(20);
   }
-  Serial.printf("[RELAY] send %s len=%u attempts=%d err=%d\n",
-                relayCmdName(cmd), (unsigned)sizeof(pkt), attempts, (int)last_err);
+  Serial.printf("[RELAY] send %s len=%u attempts=%d\n",
+                relayCmdName(cmd), (unsigned)sizeof(pkt), attempts);
 }
 #else
 static void espNowRelayCmd(uint8_t) {}
@@ -2238,11 +2277,11 @@ static void setupEspNow() {
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
+    WiFi.setSleep(true);
     esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
     delay(100);
     wifi_up = true;
-    Serial.printf("ESP-NOW WiFi: STA mode ch=%d (no AP join)\n", ESPNOW_WIFI_CHANNEL);
+    Serial.printf("ESP-NOW WiFi: STA mode ch=%d (no AP join, modem-sleep ON)\n", ESPNOW_WIFI_CHANNEL);
   }
   esp_err_t err = esp_now_init();
   if (err != ESP_OK) {
@@ -2251,6 +2290,7 @@ static void setupEspNow() {
   }
   esp_now_register_recv_cb(onEspNowRecv);
   esp_now_register_send_cb(onEspNowSent);
+  // Always register broadcast peer (needed for initial discovery and fallback)
   esp_now_peer_info_t peer = {};
   memset(peer.peer_addr, 0xFF, 6);
   peer.channel = ESPNOW_WIFI_CHANNEL;
@@ -2261,10 +2301,11 @@ static void setupEspNow() {
     Serial.printf("ESP-NOW add peer failed: %d\n", (int)err);
     return;
   }
-  Serial.printf("ESP-NOW ready (role=%s ch=%d iface=%s)\n",
+  Serial.printf("ESP-NOW ready (role=%s ch=%d iface=%s unicast=%s)\n",
                 NODE_IS_MASTER ? "master" : "slave",
                 ESPNOW_WIFI_CHANNEL,
-                wifi_soft_ap ? "AP" : "STA");
+                wifi_soft_ap ? "AP" : "STA",
+                ESPNOW_UNICAST ? "yes" : "no");
 #else
   Serial.println("ESP-NOW disabled — single-node mode");
 #endif
@@ -2292,6 +2333,9 @@ static void maybeRepeatStatus() {
 }
 
 void setup() {
+#ifdef BATTERY_CPU_MHZ
+  setCpuFrequencyMhz(BATTERY_CPU_MHZ);
+#endif
   Serial.begin(115200);
   delay(3000);
   while (!Serial && millis() < 5000) {
@@ -2299,7 +2343,7 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println("STEP node (Arduino) starting");
+  Serial.printf("STEP node (Arduino) starting  CPU=%d MHz\n", getCpuFrequencyMhz());
 
   g_spi_mutex = xSemaphoreCreateMutex();
 

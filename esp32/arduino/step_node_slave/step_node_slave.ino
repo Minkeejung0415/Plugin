@@ -33,6 +33,8 @@
 
 #define ENABLE_ESPNOW true
 #define ESPNOW_WIFI_CHANNEL 6   // Must match WIFI_AP_CHANNEL so slaves on STEP_ESP32 AP receive sync
+#define ESPNOW_UNICAST true     // Use unicast to master MAC instead of broadcast (saves ~2-3 mA per TX burst)
+#define BATTERY_CPU_MHZ 80      // Drop from 240 MHz default; 80 MHz is plenty for 100 Hz IMU + ESP-NOW
 
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -52,7 +54,7 @@ extern "C" {
 #include "vqf.h"
 }
 
-#define FIRMWARE_VERSION "1.7.0"
+#define FIRMWARE_VERSION "1.8.0"
 #define WIFI_HOSTNAME "step-esp32"
 #define BOOT_CSV_DELAY_MS 5000
 #define REPEAT_STATUS_SEC 10
@@ -280,6 +282,10 @@ static uint32_t          g_espnow_last_seq        = 0;
 static volatile bool     g_espnow_rec_start_pending = false;
 static volatile bool     g_espnow_rec_stop_pending  = false;
 static char              g_espnow_requested_session[33] = {};
+#if ESPNOW_UNICAST
+static uint8_t           g_master_mac[6]          = {};
+static bool              g_master_peer_registered = false;
+#endif
 #endif
 static char g_sd_path[48] = "/step_session.bin";
 static char g_rec_session_id[33] = "none";
@@ -580,12 +586,32 @@ static void sdRecordStop();
 static uint32_t g_last_slave_status_ms = 0;
 
 #if ENABLE_ESPNOW
-void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+static void maybeRegisterMasterPeer(const esp_now_recv_info_t *info) {
+#if ESPNOW_UNICAST
+  if (g_master_peer_registered || !info || !info->src_addr) return;
+  memcpy(g_master_mac, info->src_addr, 6);
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, g_master_mac, 6);
+  peer.channel = ESPNOW_WIFI_CHANNEL;
+  peer.ifidx = wifi_soft_ap ? WIFI_IF_AP : WIFI_IF_STA;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) == ESP_OK) {
+    g_master_peer_registered = true;
+    Serial.printf("[ESPNOW] registered master peer %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  g_master_mac[0], g_master_mac[1], g_master_mac[2],
+                  g_master_mac[3], g_master_mac[4], g_master_mac[5]);
+  }
+#else
   (void)info;
+#endif
+}
+
+void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   if (NODE_IS_MASTER) return;
   // Command relay from master. Old packets are 2 bytes; newer REC_START
   // packets include the master's requested wall-clock session id.
   if ((len == 2 || len == (int)sizeof(CmdPacket)) && data[0] == CMD_MAGIC) {
+    maybeRegisterMasterPeer(info);
     const CmdPacket *cmd = len == (int)sizeof(CmdPacket) ? (const CmdPacket *)data : nullptr;
     const uint8_t command = cmd ? cmd->cmd : data[1];
     switch (command) {
@@ -606,6 +632,7 @@ void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
   }
   // Clock sync packet (12 bytes)
   if (len < (int)sizeof(SyncPacket)) return;
+  maybeRegisterMasterPeer(info);
   const SyncPacket *pkt = (const SyncPacket *)data;
   int64_t recv_us = (int64_t)esp_timer_get_time();
   g_clock_offset_us      = (int64_t)pkt->time_us - recv_us;
@@ -978,8 +1005,17 @@ static void sendSlaveStatus() {
   pkt.qy = channels[11];
   pkt.qz = channels[12];
 
+#if ESPNOW_UNICAST
+  if (g_master_peer_registered) {
+    esp_now_send(g_master_mac, (uint8_t *)&pkt, sizeof(pkt));
+  } else {
+    uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_send(bcast, (uint8_t *)&pkt, sizeof(pkt));
+  }
+#else
   uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   esp_now_send(bcast, (uint8_t *)&pkt, sizeof(pkt));
+#endif
 #endif
 }
 
@@ -2109,11 +2145,11 @@ static void setupEspNow() {
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
+    WiFi.setSleep(true);
     esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
     delay(100);
     wifi_up = true;
-    Serial.printf("ESP-NOW WiFi: STA mode ch=%d (no AP join)\n", ESPNOW_WIFI_CHANNEL);
+    Serial.printf("ESP-NOW WiFi: STA mode ch=%d (no AP join, modem-sleep ON)\n", ESPNOW_WIFI_CHANNEL);
   }
   esp_err_t err = esp_now_init();
   if (err != ESP_OK) {
@@ -2122,6 +2158,7 @@ static void setupEspNow() {
   }
   esp_now_register_recv_cb(onEspNowRecv);
   esp_now_register_send_cb(onEspNowSent);
+  // Always register broadcast peer (needed for initial discovery and fallback)
   esp_now_peer_info_t peer = {};
   memset(peer.peer_addr, 0xFF, 6);
   peer.channel = ESPNOW_WIFI_CHANNEL;
@@ -2132,10 +2169,11 @@ static void setupEspNow() {
     Serial.printf("ESP-NOW add peer failed: %d\n", (int)err);
     return;
   }
-  Serial.printf("ESP-NOW ready (role=%s ch=%d iface=%s)\n",
+  Serial.printf("ESP-NOW ready (role=%s ch=%d iface=%s unicast=%s)\n",
                 NODE_IS_MASTER ? "master" : "slave",
                 ESPNOW_WIFI_CHANNEL,
-                wifi_soft_ap ? "AP" : "STA");
+                wifi_soft_ap ? "AP" : "STA",
+                ESPNOW_UNICAST ? "yes" : "no");
 #else
   Serial.println("ESP-NOW disabled — single-node mode");
 #endif
@@ -2163,6 +2201,9 @@ static void maybeRepeatStatus() {
 }
 
 void setup() {
+#ifdef BATTERY_CPU_MHZ
+  setCpuFrequencyMhz(BATTERY_CPU_MHZ);
+#endif
   Serial.begin(115200);
   delay(3000);
   while (!Serial && millis() < 5000) {
@@ -2170,7 +2211,7 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println("STEP node (Arduino) starting");
+  Serial.printf("STEP node (Arduino) starting  CPU=%d MHz\n", getCpuFrequencyMhz());
 
   g_spi_mutex = xSemaphoreCreateMutex();
 
